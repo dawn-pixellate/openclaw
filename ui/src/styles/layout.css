@@ -1185,6 +1185,11 @@ openclaw-settings-save-indicator:empty {
      both values share --sidebar-pad-x so they cannot drift. */
   margin-right: calc(-1 * var(--sidebar-pad-x));
   padding-right: var(--sidebar-pad-x);
+  scrollbar-color: color-mix(in srgb, var(--muted) 10%, transparent) transparent;
+}
+
+.sidebar-shell:hover .sidebar-shell__body {
+  scrollbar-color: color-mix(in srgb, var(--muted) 16%, transparent) transparent;
 }
 
 /* The footer bleeds past the sidebar gutters without moving the content frame. */
