@@ -31,18 +31,12 @@ const Bridge = defineSolidBridge<Props, Methods>(
     const local = { id: props.label };
     mounted(local);
     onCleanup(() => disposed(local));
+    const act = () =>
+      host.dispatchEvent(new CustomEvent("bridge-action", { detail: props.payload }));
     return (
       <section data-owned={local.id}>
-        <output>
-          {props.label}:{props.count}:{String(props.enabled)}
-        </output>
-        <button
-          onClick={() =>
-            host.dispatchEvent(new CustomEvent("bridge-action", { detail: props.payload }))
-          }
-        >
-          Action
-        </button>
+        <output>{`${props.label}:${props.count}:${props.enabled}`}</output>
+        <button onClick={act}>Action</button>
         <div class="caller-content">{props.children}</div>
       </section>
     );

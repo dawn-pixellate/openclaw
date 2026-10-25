@@ -100,19 +100,30 @@ it.each([-3_600_000, 3_600_000])(
   },
 );
 
-it("shares ordinary reads until the connection or auth event invalidates them", async () => {
-  const first = createDeferred<ModelAuthStatusResult>();
-  const { client, request, read, reads } = harness(() => first.promise);
-  const pending = reads();
-  first.resolve(status(1));
-  expect(await pending).toEqual([status(1), status(1)]);
-  expect(await read()).toEqual(status(1));
-  expect(request).toHaveBeenCalledExactlyOnceWith("models.authStatus", { agentId: "main" });
-  invalidateModelAuthStatusRequests(client);
-  request.mockResolvedValueOnce(status(2));
-  expect(await read()).toEqual(status(2));
-  expect(request).toHaveBeenCalledTimes(2);
-});
+it.each([false, true])(
+  "shares ordinary reads and reacquires them after failure=%s",
+  async (failed) => {
+    const first = createDeferred<ModelAuthStatusResult>();
+    const { client, request, read } = harness(() => first.promise);
+    const pending = [read(), read()].map((promise) => promise.catch((error: unknown) => error));
+    const error = new Error("status unavailable");
+    if (failed) {
+      first.reject(error);
+    } else {
+      first.resolve(status(1));
+    }
+    expect(await Promise.all(pending)).toEqual(failed ? [error, error] : [status(1), status(1)]);
+    expect(request).toHaveBeenCalledExactlyOnceWith("models.authStatus", { agentId: "main" });
+    if (!failed) {
+      expect(await read()).toEqual(status(1));
+      expect(request).toHaveBeenCalledOnce();
+      invalidateModelAuthStatusRequests(client);
+    }
+    request.mockResolvedValueOnce(status(2));
+    expect(await read()).toEqual(status(2));
+    expect(request).toHaveBeenCalledTimes(2);
+  },
+);
 
 it("keeps concurrent reads separate across agents and clients", async () => {
   const { request, read } = harness(async (_method, params) =>
@@ -141,19 +152,6 @@ it("shares cancellable view reads without cancelling another consumer", async ()
   expect(await ordinary).toEqual(status(1));
   expect(await read({ signal: new AbortController().signal })).toEqual(status(1));
   expect(request).toHaveBeenCalledTimes(1);
-});
-
-it("does not retain a failed ordinary read", async () => {
-  const pending = createDeferred<ModelAuthStatusResult>();
-  const { request, read } = harness(() => pending.promise);
-  const reads = [read(), read()].map((promise) => promise.catch((error: unknown) => error));
-  const error = new Error("status unavailable");
-  pending.reject(error);
-  expect(await Promise.all(reads)).toEqual([error, error]);
-  expect(request).toHaveBeenCalledOnce();
-  request.mockResolvedValueOnce(status(2));
-  expect(await read()).toEqual(status(2));
-  expect(request).toHaveBeenCalledTimes(2);
 });
 
 it.each(["success", "failure"] as const)(
