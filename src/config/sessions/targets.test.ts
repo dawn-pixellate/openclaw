@@ -53,6 +53,9 @@ function storeScope(home: string, storePath: string, agentId = "main", defaultAg
   };
 }
 
+const targets = (storePath: string, ...agents: string[]) =>
+  agents.map((agentId) => ({ agentId, storePath }));
+
 function fixedStoreFixture(home: string, name: string) {
   const storePath = path.join(home, name);
   const scope = (agentId = "main", defaultAgentId = "main") =>
@@ -95,8 +98,8 @@ describe("resolveSessionStoreTargets", () => {
       };
 
       const env = { ...process.env };
-      const targets = resolveSessionStoreTargets(cfg, { allAgents: true }, { env });
-      expect(targets).toEqual(
+      const selected = resolveSessionStoreTargets(cfg, { allAgents: true }, { env });
+      expect(selected).toEqual(
         ["ops", "review", "claude", "gemini", "opencode"].map((agentId) => ({
           agentId,
           storePath: resolveSessionStorePathCore(cfg.session?.store, { agentId, env }),
@@ -127,10 +130,7 @@ describe("resolveSessionStoreTargets", () => {
           { allAgents: true },
           { env, diagnostics },
         ),
-      ).toEqual([
-        { agentId: "main", storePath },
-        { agentId: "ops", storePath },
-      ]);
+      ).toEqual(targets(storePath, "main", "ops"));
       expect(diagnostics).toContainEqual(
         expect.stringMatching(
           /owner "main" selected by database-(?:registry|path); suffixed owner\(s\): "ops"\./,
@@ -202,15 +202,15 @@ describe("resolveSessionStoreTargets", () => {
       await write("ops", 2);
       const cfg = fixedStoreConfig(storePath, { ops: {}, other: {} }, "ops");
       const diagnostics: string[] = [];
-      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env, diagnostics })).toEqual([
-        { agentId: "ops", storePath },
-      ]);
+      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env, diagnostics })).toEqual(
+        targets(storePath, "ops"),
+      );
       expect(diagnostics).toEqual([
         `Session store target collision at ${storePath}: owner "main" selected by database-path; ignored owner(s): "other".`,
       ]);
-      expect(resolveExistingAgentSessionStoreTargetsSync(cfg, "ops", { env })).toEqual([
-        { agentId: "ops", storePath },
-      ]);
+      expect(resolveExistingAgentSessionStoreTargetsSync(cfg, "ops", { env })).toEqual(
+        targets(storePath, "ops"),
+      );
     }, "shared.sqlite");
   });
 
@@ -227,10 +227,9 @@ describe("resolveSessionStoreTargets", () => {
       );
       const diagnostics: string[] = [];
 
-      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env, diagnostics })).toEqual([
-        { agentId: "main", storePath },
-        { agentId: "ops", storePath },
-      ]);
+      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env, diagnostics })).toEqual(
+        targets(storePath, "main", "ops"),
+      );
       expect(diagnostics).toContainEqual(
         expect.stringContaining('owner "ops" selected by database-registry'),
       );
@@ -253,9 +252,9 @@ describe("resolveSessionStoreTargets", () => {
       unregisterOpenClawAgentDatabase({ agentId: "main", env, path: databasePath });
 
       expect(resolveExistingAgentSessionStoreTargetsSync(cfg, "ops", { env })).toEqual([]);
-      expect(resolveExistingAgentSessionStoreTargetsSync(cfg, "main", { env })).toEqual([
-        { agentId: "main", storePath },
-      ]);
+      expect(resolveExistingAgentSessionStoreTargetsSync(cfg, "main", { env })).toEqual(
+        targets(storePath, "main"),
+      );
     });
   });
 
@@ -269,10 +268,9 @@ describe("resolveSessionStoreTargets", () => {
       const cfg = fixedStoreConfig(storePath);
       const diagnostics: string[] = [];
 
-      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env, diagnostics })).toEqual([
-        { agentId: "main", storePath },
-        { agentId: "ops", storePath },
-      ]);
+      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env, diagnostics })).toEqual(
+        targets(storePath, "main", "ops"),
+      );
       expect(diagnostics).toContainEqual(
         expect.stringContaining("registry ownership is ambiguous"),
       );
@@ -287,9 +285,9 @@ describe("resolveSessionStoreTargets", () => {
       registerOpenClawAgentDatabase({ agentId: "ops", env, path: databasePath });
       const cfg = fixedStoreConfig(storePath);
 
-      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env })).toEqual([
-        { agentId: "main", storePath },
-      ]);
+      expect(resolveSessionStoreTargets(cfg, { allAgents: true }, { env })).toEqual(
+        targets(storePath, "main"),
+      );
     });
   });
 
@@ -309,9 +307,9 @@ describe("resolveSessionStoreTargets", () => {
     await withTempHome(async (home) => {
       const storePath = path.join(home, "backups", "sessions", "sessions.json");
 
-      expect(resolveSessionStoreTargets(EXPLICIT_MAIN_CONFIG, { store: storePath })).toEqual([
-        { agentId: "main", storePath },
-      ]);
+      expect(resolveSessionStoreTargets(EXPLICIT_MAIN_CONFIG, { store: storePath })).toEqual(
+        targets(storePath, "main"),
+      );
     });
   });
 
@@ -320,9 +318,9 @@ describe("resolveSessionStoreTargets", () => {
     const cfg = fixedStoreConfig(storePath, { research: {}, ops: {} }, "ops");
     cfg.agents!.ownership = "explicit";
 
-    expect(resolveSessionStoreTargets(cfg, { store: storePath })).toEqual([
-      { agentId: "ops", storePath },
-    ]);
+    expect(resolveSessionStoreTargets(cfg, { store: storePath })).toEqual(
+      targets(storePath, "ops"),
+    );
     expect(() => resolveSessionStoreTargets(cfg, { agent: "research", store: storePath })).toThrow(
       'Session store belongs to agent "ops", not requested agent "research"',
     );
@@ -344,9 +342,9 @@ describe("resolveSessionStoreTargets", () => {
       agents: { ownership: "explicit", entries: { Ops: {}, research: {} } },
     };
 
-    expect(resolveSessionStoreTargets(cfg, { agent: "ops", store: storePath })).toEqual([
-      { agentId: "ops", storePath },
-    ]);
+    expect(resolveSessionStoreTargets(cfg, { agent: "ops", store: storePath })).toEqual(
+      targets(storePath, "ops"),
+    );
     expect(() =>
       resolveSessionStoreTargets(cfg, {
         agent: "ops",
@@ -359,14 +357,12 @@ describe("resolveSessionStoreTargets", () => {
     const cfg: OpenClawConfig = { agents: { entries: { ops: {} } } };
     const mainPath = path.resolve("/tmp/agents/Main/sessions/sessions.json");
 
-    expect(resolveSessionStoreTargets(cfg, { store: mainPath })).toEqual([
-      { agentId: "main", storePath: mainPath },
-    ]);
+    expect(resolveSessionStoreTargets(cfg, { store: mainPath })).toEqual(targets(mainPath, "main"));
     for (const alias of ["main!", "main "]) {
       const storePath = path.resolve("/tmp/agents", alias, "sessions", "sessions.json");
-      expect(resolveSessionStoreTargets(cfg, { store: storePath })).toEqual([
-        { agentId: "ops", storePath },
-      ]);
+      expect(resolveSessionStoreTargets(cfg, { store: storePath })).toEqual(
+        targets(storePath, "ops"),
+      );
     }
   });
 
