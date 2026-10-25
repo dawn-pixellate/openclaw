@@ -122,12 +122,11 @@ it("keeps real guest file requests in their session's private sandbox", async ()
         });
         return respond.mock.calls.map(([ok, payload, error]) => ({ ok, payload, error }));
       };
-      const expectSuccess = (calls: Awaited<ReturnType<typeof request>>) => {
+      const ok = async (...args: Parameters<typeof request>) => {
+        const calls = await request(...args);
         expect(calls[0]?.error).toBeUndefined();
         return expectOkPayload(calls);
       };
-      const ok = async (...args: Parameters<typeof request>) =>
-        expectSuccess(await request(...args));
       const error = async (...args: Parameters<typeof request>) =>
         expectError(await request(...args));
       const expectContent = async (

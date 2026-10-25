@@ -25,8 +25,7 @@ import { updateRpcSourceSessionId } from "../../sessions/session-controller.rpc-
 import { rpcSourceTesting } from "../../sessions/session-lifecycle-admission.test-support.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { createAgentDedupeLifecycle } from "../agent-turn/agent-dedupe-lifecycle.js";
-import { waitForAgentJob } from "../agent-turn/agent-job.js";
-import * as agentJob from "../agent-turn/agent-job.js";
+import { getAgentJobSession, waitForAgentJob } from "../agent-turn/agent-job.js";
 import { dispatchAgentRunFromGateway } from "../agent-turn/agent-run-dispatch.js";
 import { registerChatAbortController } from "../chat-abort.js";
 import { createDirectChatContext } from "../server-chat.agent-events.test-helpers.js";
@@ -138,7 +137,6 @@ it.each([
           options.abortSignal,
         );
         const details = asOptionalRecord(result.details);
-        expect(details?.status).toBe("running");
         if (details?.status !== "running" || typeof details.sessionId !== "string") {
           throw new Error("Expected an ordinary command to yield its process handle");
         }
@@ -362,8 +360,6 @@ it("sessions.abort records the rotated RPC source identity on its terminal recei
   updateRpcSourceSessionId(entry, rotatedSessionId);
   context.chatRunState.getOrCreate(runId).buffer = "Rotated abort partial";
   const respond = vi.fn<RespondFn>();
-  const setDedupeEntry = vi.spyOn(agentJob, "setGatewayDedupeEntry");
-
   try {
     await stopSession(scope.sessionKey, respond, context, { runId }, null);
     expectStopped(respond, runId);
@@ -372,12 +368,8 @@ it("sessions.abort records the rotated RPC source identity on its terminal recei
       sessionId: rotatedSessionId,
       lifecycleGeneration,
     };
-    expect(setDedupeEntry).toHaveBeenCalledWith(
-      expect.objectContaining({ key: `chat:${runId}`, session: expectedSession }),
-    );
-    expect(agentJob.getAgentJobSession(runId, "chat")).toEqual(expectedSession);
+    expect(getAgentJobSession(runId, "chat")).toEqual(expectedSession);
   } finally {
-    setDedupeEntry.mockRestore();
     releaseExecution();
     registration.cleanup();
     context.chatRunState.clearRun(runId);
