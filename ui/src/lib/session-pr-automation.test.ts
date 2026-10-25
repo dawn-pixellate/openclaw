@@ -68,8 +68,6 @@ function expectList(call: number, params: Record<string, unknown>) {
   );
 }
 
-const recipe = (option: CiAutomationOption, overrides: Partial<CiAutomationTarget> = {}) =>
-  jobSpec({ ...target, ...overrides }, option);
 const declarationKey = (overrides: Partial<CiAutomationTarget> = {}) =>
   declarationKeyFor({ ...target, ...overrides }, "autoMerge");
 
@@ -186,9 +184,10 @@ it("bounds declaration keys and separates every ownership dimension and action",
   ];
   const prefixes = [prefix, ...variants.map(declarationKey)];
   expect(new Set(prefixes).size).toBe(prefixes.length);
-  const keys = CI_AUTOMATION_OPTIONS.map((option) =>
-    recipe(option, { sessionKey: "long-session:".repeat(200) }),
-  ).map((spec) => spec.declarationKey);
+  const keys = CI_AUTOMATION_OPTIONS.map(
+    (option) =>
+      jobSpec({ ...target, sessionKey: "long-session:".repeat(200) }, option).declarationKey,
+  );
   expect(new Set(keys).size).toBe(3);
   for (const key of keys) {
     expect(key).toMatch(/^session-pr:v1:[a-f0-9]{64}:auto(?:Fix|Merge|Archive)$/u);

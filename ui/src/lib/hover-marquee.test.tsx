@@ -9,46 +9,33 @@ import { HoverMarquee } from "./solid/hover-marquee.tsx";
 
 function measurementClock() {
   const framesClock = createFrameClock();
-
-  const observers = new Set<ControlledResizeObserver>();
-  const visibilityObservers = new Set<ControlledIntersectionObserver>();
   const motion = Object.assign(new EventTarget(), { matches: false });
-  class ControlledResizeObserver implements ResizeObserver {
-    readonly targets = new Set<Element>();
-    constructor(readonly callback: ResizeObserverCallback) {
-      observers.add(this);
+  function observerClass<Callback>() {
+    const instances = new Set<Observer>();
+    class Observer {
+      readonly targets = new Set<Element>();
+      constructor(readonly callback: Callback) {
+        instances.add(this);
+      }
+      observe(target: Element) {
+        this.targets.add(target);
+      }
+      unobserve(target: Element) {
+        this.targets.delete(target);
+      }
+      disconnect() {
+        this.targets.clear();
+      }
     }
-    observe(target: Element) {
-      this.targets.add(target);
-    }
-    unobserve(target: Element) {
-      this.targets.delete(target);
-    }
-    disconnect() {
-      this.targets.clear();
-    }
+    return { Observer, instances };
   }
-  class ControlledIntersectionObserver {
-    readonly targets = new Set<Element>();
-    constructor(
-      readonly callback: (entries: { target: Element; isIntersecting: boolean }[]) => void,
-    ) {
-      visibilityObservers.add(this);
-    }
-    observe(target: Element) {
-      this.targets.add(target);
-    }
-    unobserve(target: Element) {
-      this.targets.delete(target);
-    }
-    disconnect() {
-      this.targets.clear();
-    }
-  }
-  vi.stubGlobal("ResizeObserver", ControlledResizeObserver);
+  const resize = observerClass<ResizeObserverCallback>();
+  const visibility =
+    observerClass<(entries: { target: Element; isIntersecting: boolean }[]) => void>();
+  vi.stubGlobal("ResizeObserver", resize.Observer);
   vi.stubGlobal("requestAnimationFrame", framesClock.request);
   vi.stubGlobal("cancelAnimationFrame", framesClock.cancel);
-  vi.stubGlobal("IntersectionObserver", ControlledIntersectionObserver);
+  vi.stubGlobal("IntersectionObserver", visibility.Observer);
   vi.stubGlobal("matchMedia", () => motion);
   const flushFrames = () => {
     framesClock.flush(0);
@@ -60,7 +47,7 @@ function measurementClock() {
       flushFrames();
     },
     visible(isIntersecting: boolean, target?: Element) {
-      for (const observer of visibilityObservers) {
+      for (const observer of visibility.instances) {
         if (target ? observer.targets.has(target) : observer.targets.size > 0) {
           observer.callback(
             [...observer.targets]
@@ -72,12 +59,12 @@ function measurementClock() {
       flushFrames();
     },
     observesSize(target: Element) {
-      return [...observers].some((observer) => observer.targets.has(target));
+      return [...resize.instances].some((observer) => observer.targets.has(target));
     },
     flush: flushFrames,
     resize(...targets: Element[]) {
       for (const target of targets) {
-        for (const observer of observers) {
+        for (const observer of resize.instances) {
           if (observer.targets.has(target)) {
             // SAFETY: Only target is consumed by the resize delivery router.
             observer.callback([{ target } as ResizeObserverEntry], observer);
