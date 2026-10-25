@@ -222,8 +222,10 @@ export function createPage(
   page.settle = async () => {
     await Promise.resolve();
     flush();
-    await vi.dynamicImportSettled();
-    flush();
+    if (options.render === true) {
+      await vi.dynamicImportSettled();
+      flush();
+    }
   };
   page.remove = () => {
     mounted.unmount();
