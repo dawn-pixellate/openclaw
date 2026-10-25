@@ -62,7 +62,7 @@ describe("channel ingress drain lanes", () => {
           dispatches.push(event.id);
           if (event.id === "retained") {
             await lifecycle.onAdopted();
-            return;
+            return undefined;
           }
           return { kind: "deferred" };
         },
@@ -232,7 +232,7 @@ describe("channel ingress drain lanes", () => {
           return snapshot;
         };
         const listPending = queue.listPending.bind(queue);
-        const listUnsettled = expectDefined(queue.listUnsettled, "list unsettled").bind(queue);
+        const listUnsettled = expectDefined(queue.listUnsettled?.bind(queue), "list unsettled");
         // The split-read negative control loses the head between these same boundaries.
         vi.spyOn(queue, "listPending").mockImplementationOnce((options) =>
           afterSnapshot(listPending(options)),
