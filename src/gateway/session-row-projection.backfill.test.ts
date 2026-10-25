@@ -270,7 +270,9 @@ it.for(["absent", "user", "assistant"] as const)(
         .spyOn(transcriptBackfill, "backfillSessionRowTranscriptFields")
         .mockImplementation(async (params) => {
           const fields = await read(params);
-          if (params.sessionKey === barrier) drained.resolve();
+          if (params.sessionKey === barrier) {
+            drained.resolve();
+          }
           return fields;
         });
       const reads = () =>
@@ -346,7 +348,9 @@ it("keeps an in-flight transcript outcome through demotion without admitting ano
         if (params.sessionKey === target.sessionKey) {
           captured.resolve();
           await resume.promise;
-        } else if (params.sessionKey === barrier) drained.resolve();
+        } else if (params.sessionKey === barrier) {
+          drained.resolve();
+        }
         return fields;
       });
     using projection = await createTestProjection({ cfg, modelCatalog: [] });
