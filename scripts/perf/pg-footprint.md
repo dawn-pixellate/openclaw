@@ -39,6 +39,21 @@ connection must retain its own search path, active transaction, error outcome,
 publication anchor and disposal. No schema, permission or durability change is
 part of this work.
 
+The default `--pool-topology fixed-four` asserts the physical topology in counts
+and profile runs: the Gateway and each PG-using native process own exactly four
+I/O service launches. The declared native children are schema inspection and the
+native resource broker; an unused child may own zero. Every service must be
+created by its process main thread using the private pool envelope. Any worker
+thread self-root or undeclared process through shutdown fails the fixture. This is an ownership
+assertion, not a ceiling inferred from candidate measurements. Use the explicit
+`--pool-topology legacy` only for the pinned pre-pool baseline.
+
+Observer-free RSS runs load no observer or supplemental instrumentation. Their
+controller requires a completed fixed-four count assertion on the same candidate
+head and workload before collecting RSS, and samples all process descendants
+externally. Physical worker launches are proved by the counts run; they are not
+inferred from RSS or OS thread counts.
+
 ## Controlled topology diagnostics
 
 `pg-footprint-topology.mjs` uses an owned local synthetic PostgreSQL server from

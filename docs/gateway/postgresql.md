@@ -143,6 +143,14 @@ close their cached connections after three minutes idle or on shutdown. Taking a
 connection from the cache cancels its idle timeout; checked-out connections are
 not expired by this cache.
 
+Gateway workers share four PostgreSQL I/O services per process. This changes
+where connections run, not their exclusive ownership or idle retention. An
+externally constructed SDK or plugin worker without inherited pool endpoints
+starts its own four services on first PostgreSQL use. It emits a once-per-thread
+warning and `openclaw.postgres.pool.self-root` diagnostic with the worker label
+and thread ID. Worker diagnostics count these roots separately from physical
+I/O services, so unexpected worker creation remains visible.
+
 Usage reports retain their reader in the existing history worker between requests.
 Each report still uses a fresh read snapshot; database maintenance and worker
 shutdown close the retained connection before releasing custody.

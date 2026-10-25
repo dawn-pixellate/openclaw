@@ -1,5 +1,6 @@
 // Synthetic Gateway instrumentation: no query bindings, result rows, or task payloads.
 import { createHash } from "node:crypto";
+import { channel as diagnosticChannel } from "node:diagnostics_channel";
 import { appendFileSync, readFileSync, watch } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
@@ -28,6 +29,9 @@ const record = (event) =>
     `${JSON.stringify({ at: Date.now(), pid: process.pid, parentPid: process.ppid, threadId, ...event })}\n`,
   );
 const phase = () => readFileSync(path.join(output, "phase"), "utf8").trim();
+diagnosticChannel("openclaw.postgres.pool.self-root").subscribe(({ owner }) => {
+  record({ type: "pool-self-root", owner, phase: phase() });
+});
 
 // Count setup and direct requests without reading payload values or changing envelopes.
 const ownValue = (value, key) =>
@@ -116,7 +120,17 @@ workers.Worker = class extends NativeWorker {
         : [...execArgv, "--import", import.meta.filename],
     });
     const workerId = this.threadId;
-    record({ type: "spawn", workerId, script: String(filename), phase: phase() });
+    const data = options.workerData;
+    record({
+      type: "spawn",
+      workerId,
+      script: String(filename),
+      phase: phase(),
+      poolService:
+        ownValue(data, "host") instanceof MessagePort &&
+        ownValue(data, "signal") instanceof SharedArrayBuffer &&
+        Array.isArray(ownValue(data, "peers")),
+    });
     const emit = this.emit;
     // Owners can remove their listeners after a reply, before native exit arrives.
     this.emit = function (event, ...args) {

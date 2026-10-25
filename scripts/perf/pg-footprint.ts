@@ -37,13 +37,17 @@ const { values } = parseArgs({
     entry: { type: "string", default: "dist/entry.js" },
     profile: { type: "boolean", default: false },
     "observer-free": { type: "boolean", default: false },
+    "pool-topology": { type: "string", default: "fixed-four" },
   },
 });
 if (
   !["seed", "run"].includes(values.mode ?? "") ||
-  !["sqlite", "postgres"].includes(values.engine)
+  !["sqlite", "postgres"].includes(values.engine) ||
+  !["legacy", "fixed-four"].includes(values["pool-topology"])
 ) {
-  throw new Error("Use --mode seed|run and --engine postgres|sqlite");
+  throw new Error(
+    "Use --mode seed|run, --engine postgres|sqlite and --pool-topology fixed-four|legacy",
+  );
 }
 function internalPath(raw: string | undefined, existing: boolean): string {
   if (!raw || !path.isAbsolute(raw)) {
@@ -283,9 +287,87 @@ if (values.mode === "seed") {
                 workerId?: number;
                 sample?: string;
                 phase?: string;
+                script?: string;
+                poolService?: boolean;
+                owner?: string;
               },
           ),
       );
+  let poolTopology: {
+    mode: string;
+    checked: boolean;
+    roots?: Array<{ pid: number; kind: string; physicalServices: number }>;
+    selfRoots?: Array<{ pid: number; threadId: number; owner?: string }>;
+  } = { mode: values["pool-topology"], checked: false };
+  const assertPoolTopology = () => {
+    if (
+      values.engine !== "postgres" ||
+      values["observer-free"] ||
+      values["pool-topology"] === "legacy"
+    ) {
+      return;
+    }
+    const events = workerEvents();
+    const roots = new Map<number, { pid: number; kind: string; physicalServices: number }>();
+    for (const event of events) {
+      if (event.type !== "start" || event.threadId !== 0) {
+        continue;
+      }
+      const script = event.script?.replaceAll("\\", "/") ?? "";
+      // These are the fixture's native process owners, not an observed count ceiling.
+      const kind =
+        event.pid === child.pid
+          ? "gateway"
+          : /\/state\/openclaw-agent-schema-inspection\.worker\.[cm]?[jt]s$/.test(script)
+            ? "schema-inspection"
+            : /\/process\/spawn-broker\/worker\.[cm]?[jt]s$/.test(script)
+              ? "native-resource-broker"
+              : undefined;
+      if (!kind) {
+        throw new Error(`Undeclared PostgreSQL fixture process: ${event.pid} ${script}`);
+      }
+      roots.set(event.pid, { pid: event.pid, kind, physicalServices: 0 });
+    }
+    const selfRoots = events
+      .filter((event) => event.type === "pool-self-root")
+      .map(({ pid, threadId, owner }) => ({ pid, threadId, owner }));
+    poolTopology = {
+      mode: values["pool-topology"],
+      checked: false,
+      roots: [...roots.values()],
+      selfRoots,
+    };
+    if (selfRoots.length) {
+      throw new Error(`Undeclared PostgreSQL thread self-root: ${JSON.stringify(selfRoots)}`);
+    }
+    for (const event of events) {
+      if (
+        event.type !== "spawn" ||
+        !/\/postgres-sync\/bridge\.worker\.[cm]?[jt]s$/.test(
+          event.script?.replaceAll("\\", "/") ?? "",
+        )
+      ) {
+        continue;
+      }
+      const root = roots.get(event.pid);
+      if (!root || event.threadId !== 0 || !event.poolService) {
+        throw new Error(`PostgreSQL service has an undeclared owner: ${JSON.stringify(event)}`);
+      }
+      root.physicalServices++;
+    }
+    for (const root of roots.values()) {
+      // A prestarted schema/broker child may never open PG; any PG-using process owns four.
+      if ((root.kind === "gateway" || root.physicalServices !== 0) && root.physicalServices !== 4) {
+        throw new Error(
+          `Expected four PostgreSQL services for ${root.kind} ${root.pid}; got ${root.physicalServices}`,
+        );
+      }
+    }
+    if (!roots.has(child.pid!)) {
+      throw new Error("PostgreSQL topology census missed the Gateway process");
+    }
+    poolTopology.checked = true;
+  };
   const sample = async (label: string) => {
     // RSS is measured in the unprofiled run; profiling uses thread exit artifacts.
     if (values.profile) {
@@ -411,6 +493,7 @@ if (values.mode === "seed") {
   let client: ReturnType<typeof createGatewayWsClient> | undefined;
   let readyMs: number | undefined;
   let teardown: Awaited<ReturnType<typeof stopChild>> | undefined;
+  let completed = false;
   try {
     while ((await requestProbeStatus(port, "/readyz")).status !== 200) {
       if (
@@ -506,20 +589,31 @@ if (values.mode === "seed") {
     }
     await history("post-idle-first-request");
     await sample("after-reopen");
+    completed = true;
   } finally {
     phase("shutdown");
     client?.ws.close();
     teardown = await stopChild(child, { teardownGraceMs: 30_000 });
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", interrupt);
-    writeFileSync(
-      path.join(output, "result.json"),
-      JSON.stringify({ fixture, readyMs, latencies, samples, teardown, load: loadavg() }, null, 2),
-    );
-    writeFileSync(
-      path.join(output, "evidence.json"),
-      JSON.stringify({ children: [{ name: "gateway", pid: child.pid }], turns: [] }),
-    );
+    try {
+      if (completed) {
+        assertPoolTopology();
+      }
+    } finally {
+      writeFileSync(
+        path.join(output, "result.json"),
+        JSON.stringify(
+          { fixture, readyMs, latencies, samples, poolTopology, teardown, load: loadavg() },
+          null,
+          2,
+        ),
+      );
+      writeFileSync(
+        path.join(output, "evidence.json"),
+        JSON.stringify({ children: [{ name: "gateway", pid: child.pid }], turns: [] }),
+      );
+    }
   }
   if (teardown.exitCode !== 0 || teardown.signal !== null) {
     throw new Error("Gateway shutdown was not clean");

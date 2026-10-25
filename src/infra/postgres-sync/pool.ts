@@ -1,10 +1,14 @@
+import { channel } from "node:diagnostics_channel";
 import {
+  BroadcastChannel,
   isMainThread,
   MessageChannel,
   type MessagePort,
   Worker,
+  threadId,
   workerData,
 } from "node:worker_threads";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import {
   getDatabaseEngineSelection,
@@ -12,7 +16,8 @@ import {
 } from "../database-engine/context.js";
 import { resolveRuntimeProcessEntrypointUrl } from "../runtime-process-url.js";
 import { resolveRuntimeWorkerThreadExecArgv } from "../runtime-worker-url.js";
-import { trackNativeWorkerForCpu } from "../worker-cpu.js";
+import { recordPostgresPoolSelfRoot, trackNativeWorkerForCpu } from "../worker-cpu.js";
+import { workerScriptName } from "../worker-diagnostic-script.js";
 
 export type PostgresPoolEndpoint = { port: MessagePort; signal: SharedArrayBuffer };
 export type PostgresPoolEndpoints = {
@@ -43,6 +48,7 @@ type PoolService = {
   peers: PostgresPoolEndpoint[];
 };
 
+const selfRootDiagnostic = channel("openclaw.postgres.pool.self-root");
 const inherited: { postgresPool?: PostgresPoolEndpoints } | null = workerData;
 const state = resolveGlobalSingleton<PoolState>(Symbol.for("openclaw.postgresIoPool"), () => ({
   endpoints: inherited?.postgresPool,
@@ -79,8 +85,17 @@ export function bindPostgresPool(endpoints: PostgresPoolEndpoints): void {
 }
 
 function startPool(): PostgresPoolEndpoints {
-  if (!isMainThread) {
-    throw new Error("PostgreSQL SQL host was created without process pool endpoints");
+  if (!isMainThread && recordPostgresPoolSelfRoot()) {
+    const event = { threadId, owner: workerScriptName(process.argv[1] ?? "") };
+    selfRootDiagnostic.publish(event);
+    // Diagnostics cross thread boundaries even for externally constructed plugin workers.
+    const diagnostics = new BroadcastChannel("openclaw.postgres.pool.self-root");
+    diagnostics.unref();
+    diagnostics.postMessage(event);
+    diagnostics.close();
+    createSubsystemLogger("postgres").warn(
+      `PostgreSQL worker ${event.owner} (thread ${threadId}) has no inherited pool; starting its own four I/O services.`,
+    );
   }
   const allocation = new SharedArrayBuffer(4);
   const services: PoolService[] = Array.from({ length: 4 }, () => ({

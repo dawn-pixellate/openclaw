@@ -1,6 +1,7 @@
 import { once } from "node:events";
-import { MessageChannel } from "node:worker_threads";
+import { BroadcastChannel, MessageChannel, Worker } from "node:worker_threads";
 import { expect, it } from "vitest";
+import { declarePostgresTestRoot } from "../../test/helpers/postgres-pool-roots.js";
 import { createPostgresBridge } from "./postgres-sync/bridge-prestart.js";
 import {
   closePostgresPool,
@@ -13,10 +14,12 @@ import {
   getTrackedWorkerPoolSnapshot,
   receiveWorkerMemoryPort,
   sampleTrackedWorkerMemory,
+  trackNativeWorkerForCpu,
 } from "./worker-cpu.js";
 import {
   collectPostgresBridgeCounters,
   countPostgresBridges,
+  countPostgresPoolSelfRoots,
 } from "./worker-postgres-bridge-census.js";
 
 it("counts four physical services across direct and deeply nested logical bridges", async () => {
@@ -28,6 +31,7 @@ it("counts four physical services across direct and deeply nested logical bridge
     schema: "fixture",
     storeId: "fixture",
   });
+  const selfRoots = getTrackedWorkerPoolSnapshot().postgresPoolSelfRootCount;
   const postgresPool = createPostgresPoolEndpoints();
   const workerUrl = new URL("./worker-cpu.postgres-bridge.test-support.ts", import.meta.url);
   const parent = createCpuTrackedWorker(workerUrl, {
@@ -55,6 +59,7 @@ it("counts four physical services across direct and deeply nested logical bridge
     expect(getTrackedWorkerPoolSnapshot()).toMatchObject({
       workerCount: before.workerCount + 5,
       postgresBridgeCount: baseline + 4,
+      postgresPoolSelfRootCount: selfRoots,
     });
     expect(sampleTrackedWorkerMemory().postgresBridgeCount).toBe(baseline + 4);
 
@@ -82,9 +87,72 @@ it("counts four physical services across direct and deeply nested logical bridge
   }
 });
 
+it("lets an explicitly declared external worker own four services and reports its self-root once", async () => {
+  const { port1, port2 } = new MessageChannel();
+  const diagnostics = new BroadcastChannel("openclaw.postgres.pool.self-root");
+  const reported = Promise.withResolvers<{ threadId: number; owner: string }>();
+  const url = new URL("./worker-cpu.postgres-bridge.test-support.ts", import.meta.url);
+  const worker = new Worker(url, {
+    workerData: { control: port2, depth: 0 },
+    transferList: [port2],
+    execArgv: resolveRuntimeWorkerThreadExecArgv(url),
+  });
+  declarePostgresTestRoot(worker.threadId);
+  trackNativeWorkerForCpu(worker, url);
+  diagnostics.onmessage = ({ data }) => {
+    if (data.threadId === worker.threadId) {
+      reported.resolve(data);
+    }
+  };
+  const attached = new Promise<void>((resolve, reject) => {
+    worker.on("message", (message: unknown) => {
+      if (receiveWorkerMemoryPort(worker, message)) {
+        resolve();
+      }
+    });
+    worker.once("error", reject);
+  });
+  const command = async (value: "create" | "close" | "restart" | "snapshot") => {
+    const reply = once(port1, "message");
+    port1.postMessage(value);
+    return (await reply)[0];
+  };
+  try {
+    await attached;
+    expect(await command("create")).toBe(1);
+    expect(await reported.promise).toMatchObject({ threadId: worker.threadId });
+    expect(await command("create")).toBe(2);
+    expect(await command("close")).toBe(1);
+    expect(await command("snapshot")).toMatchObject({
+      postgresBridgeCount: 4,
+      postgresPoolSelfRootCount: 1,
+      selfRootEvents: 1,
+    });
+    expect(await command("restart")).toBe(1);
+    expect(await command("snapshot")).toMatchObject({
+      postgresBridgeCount: 4,
+      postgresPoolSelfRootCount: 1,
+      selfRootEvents: 1,
+    });
+    const failed = once(worker, "error");
+    port1.postMessage("undeclared");
+    const [error] = await failed;
+    expect(error.message).toContain("Undeclared PostgreSQL pool self-root: undeclared-fixture");
+  } finally {
+    diagnostics.close();
+    port1.close();
+    await worker.terminate();
+  }
+});
+
 it("counts a shared counter once when multiple diagnostic sources forward it", () => {
-  const descendant = { threadId: 9001, count: new Int32Array(new SharedArrayBuffer(4)) };
+  const descendant = {
+    threadId: 9001,
+    count: new Int32Array(new SharedArrayBuffer(4)),
+    selfRootCount: new Int32Array(new SharedArrayBuffer(4)),
+  };
   Atomics.store(descendant.count, 0, 3);
+  Atomics.store(descendant.selfRootCount, 0, 1);
   const forwarded = structuredClone(descendant);
   expect(forwarded.count.buffer).not.toBe(descendant.count.buffer);
   const counters = collectPostgresBridgeCounters(new Int32Array(new SharedArrayBuffer(4)), [
@@ -92,4 +160,6 @@ it("counts a shared counter once when multiple diagnostic sources forward it", (
     { postgresBridgeCounters: [forwarded] },
   ]);
   expect(countPostgresBridges(counters)).toBe(3);
+  expect(countPostgresPoolSelfRoots(counters)).toBe(1);
+  expect(countPostgresPoolSelfRoots([{ threadId: 9002, count: descendant.count }])).toBe(0);
 });
