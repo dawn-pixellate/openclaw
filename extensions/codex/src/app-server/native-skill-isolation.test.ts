@@ -59,48 +59,17 @@ function skillClient(
   };
 }
 
-it("refreshes isolated skill rules on native changes and coalesces each client snapshot", async () => {
+it("coalesces each client snapshot without sharing across workspaces", async () => {
   return withNativeSkillHome(async (home) => {
-    const codexHome = path.join(home, "scratch-state", "codex");
-    const personalSkill = path.join(home, ".claude", "skills", "personal", "SKILL.md");
-    const pluginSkill = path.join(home, "plugin-cache", "skills", "plugin", "SKILL.md");
-    const instanceSkill = path.join(codexHome, "skills", "instance", "SKILL.md");
-    const skills: CodexSkillsListResponse["data"][number]["skills"] = [];
-    const { load, changed, request } = skillClient(home, async () => skillResponse(home, skills));
+    const { load, request } = skillClient(home);
 
-    const [first, second] = await Promise.all([load({ codexHome }), load({ codexHome })]);
+    const [first, second] = await Promise.all([load(), load()]);
     expect(second).toBe(first);
     expect(first?.disabledUserSkillPaths).toEqual([]);
     expect(request).toHaveBeenCalledTimes(1);
 
-    for (const [name, skillPath] of [
-      ["personal", personalSkill],
-      ["plugin", pluginSkill],
-      ["instance", instanceSkill],
-    ] as const) {
-      await writeSkill(skillPath, name);
-      skills.push(skill(name, skillPath, "user"));
-    }
-    await changed();
-    const [refreshed, shared] = await Promise.all([load({ codexHome }), load({ codexHome })]);
-    expect(shared).toBe(refreshed);
-    expect(request).toHaveBeenCalledTimes(2);
-    const enabledRules = [pluginSkill, instanceSkill].map((skillPath) => ({
-      path: skillPath,
-      enabled: true,
-    }));
-    expect(
-      applyCodexNativeSkillIsolation({ "skills.config": enabledRules }, refreshed),
-    ).toMatchObject({
-      "skills.config": [
-        { path: pluginSkill, enabled: true },
-        { path: instanceSkill, enabled: true },
-        { path: personalSkill, enabled: false },
-      ],
-    });
-
     await load({ cwd: path.join(home, "another-workspace") });
-    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 });
 

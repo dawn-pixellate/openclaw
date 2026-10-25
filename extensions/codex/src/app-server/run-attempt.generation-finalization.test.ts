@@ -39,21 +39,6 @@ import { getSharedCodexAppServerClient } from "./shared-client.js";
 
 setupRunAttemptTestHooks();
 
-const webSearchThreadConfigFingerprint = JSON.stringify({
-  "features.standalone_web_search": false,
-  web_search: "disabled",
-});
-
-function existingBinding(cwd: string) {
-  return {
-    threadId: "thread-existing",
-    cwd,
-    dynamicToolsFingerprint: "[]",
-    webSearchThreadConfigFingerprint,
-    historyCoveredThrough: new Date(1).toISOString(),
-  };
-}
-
 const superseded = { name: "AgentHarnessSessionSupersededError" };
 const successful = { aborted: false, timedOut: false, promptError: null };
 const settle = <T>(run: Promise<T>) =>
@@ -88,7 +73,16 @@ async function generationFixture(predecessor?: string) {
   const bindingStore = createCodexTestBindingStore();
   await bindingStore.mutate(previous, {
     kind: "set",
-    binding: existingBinding(params.workspaceDir),
+    binding: {
+      threadId: "thread-existing",
+      cwd: params.workspaceDir,
+      dynamicToolsFingerprint: "[]",
+      webSearchThreadConfigFingerprint: JSON.stringify({
+        "features.standalone_web_search": false,
+        web_search: "disabled",
+      }),
+      historyCoveredThrough: new Date(1).toISOString(),
+    },
   });
   return { params, current, scope, bindingStore };
 }
@@ -239,16 +233,10 @@ it.each(["current", "lineage-replaced"] as const)(
             });
           }
           await withCurrent(() => {
-            const forbidden = vi
-              .spyOn(sessionStoreRuntime, "getSessionEntry")
-              .mockImplementation(() => {
-                throw new Error("synchronous host lineage read reached wire admission");
-              });
-            try {
-              write();
-            } finally {
-              forbidden.mockRestore();
-            }
+            using _ = vi.spyOn(sessionStoreRuntime, "getSessionEntry").mockImplementation(() => {
+              throw new Error("synchronous host lineage read reached wire admission");
+            });
+            write();
           });
         },
       });

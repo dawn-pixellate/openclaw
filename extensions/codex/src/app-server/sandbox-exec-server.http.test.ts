@@ -57,24 +57,16 @@ function expectBody(notifications: Parameters<typeof waitForHttpBodyDeltas>[0], 
 const base64 = (text: string) => Buffer.from(text).toString("base64");
 const header = (name: string, value: unknown) => expect.objectContaining({ name, value });
 
-function splitUtf8ChildScript(params: {
-  stream: "stdout" | "stderr";
-  value: string;
-  stdoutPrefix?: string;
-  exitCode?: number;
-}): string {
-  const target = `process.${params.stream}`;
+function splitUtf8ChildScript(stream: "stdout" | "stderr", headerLine: string): string {
+  const target = `process.${stream}`;
+  const value = stream === "stdout" ? headerLine : "sandbox failed: 猫 not found\n";
   const finish =
-    params.exitCode === undefined
-      ? `${target}.end(rest);`
-      : `${target}.write(rest, () => process.exit(${params.exitCode}));`;
+    stream === "stdout" ? `${target}.end(rest);` : `${target}.write(rest, () => process.exit(17));`;
   return [
-    `const value = Buffer.from(${JSON.stringify(params.value)});`,
+    `const value = Buffer.from(${JSON.stringify(value)});`,
     'const marker = Buffer.from("猫");',
     "const splitAt = value.indexOf(marker) + 1;",
-    ...(params.stdoutPrefix
-      ? [`process.stdout.write(${JSON.stringify(params.stdoutPrefix)});`]
-      : []),
+    ...(stream === "stderr" ? [`process.stdout.write(${JSON.stringify(headerLine)});`] : []),
     `${target}.write(value.subarray(0, splitAt));`,
     "setTimeout(() => {",
     "  const rest = value.subarray(splitAt);",
@@ -306,13 +298,7 @@ describe("OpenClaw Codex sandbox exec-server HTTP", () => {
       const headers = stream === "stdout" ? [{ name: "X-Test", value: "猫-value" }] : [];
       const headerLine = `${JSON.stringify({ type: "headers", status: 200, headers })}\n`;
       const requestId = `http-split-${stream}`;
-      const socket = await openScriptHttpSocket(
-        splitUtf8ChildScript({
-          stream,
-          value: stream === "stdout" ? headerLine : "sandbox failed: 猫 not found\n",
-          ...(stream === "stderr" ? { stdoutPrefix: headerLine, exitCode: 17 } : {}),
-        }),
-      );
+      const socket = await openScriptHttpSocket(splitUtf8ChildScript(stream, headerLine));
       const notifications = collectNotifications(socket);
       await expect(httpRpc(socket, { requestId, streamResponse: true })).resolves.toEqual({
         status: 200,
