@@ -51,12 +51,25 @@ const target = captureSessionTarget({ storeScope: "/test/source.sqlite", session
 function reserve() {
   return reserveSessionControllerSource(key, { target, policy: { mode: "followup" } });
 }
-function prepare(sessionKey = key, store = "/test/source.sqlite", commandTarget?: string) {
+function prepare(
+  sessionKey = key,
+  store = target.storeScope,
+  commandTarget?: string,
+  options?: Parameters<typeof prepareReplySourceInput>[2],
+) {
   return prepareReplySourceInput(
     { SessionKey: sessionKey, CommandTargetSessionKey: commandTarget },
     { session: { store } },
-    undefined,
+    options,
   );
+}
+
+function pendingRecovery(recovery: { promise: Promise<void> }, agent = "main") {
+  return () => ({
+    isPending: (agentId: string) => agentId === agent,
+    waitForAgentInputRecovery: (agentId: string) =>
+      agentId === agent ? recovery.promise : undefined,
+  });
 }
 
 it("carries the Gateway source through lifecycle/options spreads to the actual followup", async () => {
@@ -65,11 +78,7 @@ it("carries the Gateway source through lifecycle/options spreads to the actual f
   const options = prepareInternalGetReplyOptions({
     turnAdoptionLifecycle: { ...lifecycle, onAdopted: async () => lifecycle.onAdopted() },
   });
-  const prepared = await prepareReplySourceInput(
-    { SessionKey: key },
-    { session: { store: "/test/source.sqlite" } },
-    { ...options },
-  );
+  const prepared = await prepare(key, target.storeScope, undefined, { ...options });
   const run = createQueueTestRun({ prompt: "hello" });
   expect(prepared.created).toBe(false);
   expect(readReplySourceInput(prepared.options)).toBe(input);
@@ -140,14 +149,10 @@ it("preserves lifecycle cancellation before pending recovery without reserving i
           racePromiseWithAbortSignal(recovery.promise, options?.signal),
       }),
       () =>
-        prepareReplySourceInput(
-          { SessionKey: key },
-          { session: { store: target.storeScope } },
-          {
-            abortSignal: caller.signal,
-            turnAdoptionLifecycle: { abortSignal: lifecycle.signal, onAdopted() {} },
-          },
-        ),
+        prepare(key, target.storeScope, undefined, {
+          abortSignal: caller.signal,
+          turnAdoptionLifecycle: { abortSignal: lifecycle.signal, onAdopted() {} },
+        }),
     );
     expect(caller.signal.aborted).toBe(false);
     expect(prepared.options.abortSignal?.aborted).toBe(true);
@@ -162,21 +167,10 @@ it("preserves lifecycle cancellation before pending recovery without reserving i
 it("waits for only its agent's recovery before reserving fresh input", async () => {
   const recovery = createDeferred();
   const otherKey = "agent:other:source-binding";
-  const waiting = withInputRecovery(
-    () => ({
-      isPending: (agentId) => agentId === "main",
-      waitForAgentInputRecovery: (agentId) => (agentId === "main" ? recovery.promise : undefined),
-    }),
-    () => prepare(),
-  );
+  const recoveryContext = pendingRecovery(recovery);
+  const waiting = withInputRecovery(recoveryContext, () => prepare());
   expect(getExistingSessionControllerMailbox(key, target)).toBeUndefined();
-  const other = await withInputRecovery(
-    () => ({
-      isPending: (agentId) => agentId === "main",
-      waitForAgentInputRecovery: (agentId) => (agentId === "main" ? recovery.promise : undefined),
-    }),
-    () => prepare(otherKey),
-  );
+  const other = await withInputRecovery(recoveryContext, () => prepare(otherKey));
   expect(other.input?.target?.agentId).toBe("other");
   recovery.resolve();
   const recovered = await waiting;
@@ -212,29 +206,22 @@ it.each([
     };
     const reserved = existing ? await prepare() : undefined;
     const continued = vi.fn();
-    const preparing = withInputRecovery(
-      () => ({
-        isPending: (agentId) => agentId === "other",
-        waitForAgentInputRecovery: (agentId) =>
-          agentId === "other" ? recovery.promise : undefined,
-      }),
-      async () => {
-        const source = await prepareReplySourceInput(
-          ctx,
-          { session: { store: target.storeScope } },
-          reserved?.options,
-        );
-        retargetReplySourceForExecution({
-          ctx,
-          options: source.options,
-          sessionKey: targetKey,
-          storePath: target.storeScope,
-          agentId: "other",
-        });
-        continued();
-        return source;
-      },
-    );
+    const preparing = withInputRecovery(pendingRecovery(recovery, "other"), async () => {
+      const source = await prepareReplySourceInput(
+        ctx,
+        { session: { store: target.storeScope } },
+        reserved?.options,
+      );
+      retargetReplySourceForExecution({
+        ctx,
+        options: source.options,
+        sessionKey: targetKey,
+        storePath: target.storeScope,
+        agentId: "other",
+      });
+      continued();
+      return source;
+    });
     try {
       await Promise.resolve();
       if (reserved) {
@@ -282,11 +269,9 @@ it("prepares a late command target from the physical source context", async () =
   const controller = new AbortController();
   const reason = new Error("cancelled while waiting for command target recovery");
   const targetKey = "agent:other:late-command-target";
-  const source = await prepareReplySourceInput(
-    { SessionKey: key },
-    { session: { store: target.storeScope } },
-    { abortSignal: controller.signal },
-  );
+  const source = await prepare(key, target.storeScope, undefined, {
+    abortSignal: controller.signal,
+  });
   const ctx = {
     SessionKey: key,
     CommandSource: "native" as const,

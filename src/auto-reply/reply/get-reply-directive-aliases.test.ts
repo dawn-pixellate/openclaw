@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   listForWorkspace: vi.fn(),
 }));
 const modelRef = { provider: "anthropic", model: "claude-opus-4-6" };
+const sessionKey = "agent:main:whatsapp:+2000";
 
 const directiveModel: ModelDefinitionConfig = {
   id: "claude-opus-4-6",
@@ -84,6 +85,24 @@ vi.mock("../../skills/discovery/chat-commands.runtime.js", () => ({
 type DirectiveApplyParams = Parameters<
   typeof import("./get-reply-directives-apply.js").applyInlineDirectiveOverrides
 >[0];
+type ResolveParams = Parameters<typeof resolveReplyDirectives>[0];
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.stubEnv("OPENCLAW_TEST_FAST", "1");
+  mocks.listForWorkspace.mockReturnValue([]);
+  mocks.apply.mockImplementation(async (params: DirectiveApplyParams) => ({
+    kind: "continue",
+    directives: params.directives,
+    provider: params.provider,
+    model: params.model,
+    contextTokens: params.contextTokens,
+  }));
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 function configWithModelAlias(alias: string, agentId?: string): OpenClawConfig {
   const models = { "anthropic/claude-opus-4-6": { alias } };
@@ -115,14 +134,13 @@ async function resolveModelDirective(params: {
   authorized?: boolean;
   cfg?: OpenClawConfig;
   surface?: string;
-  agentCfg?: Parameters<typeof resolveReplyDirectives>[0]["agentCfg"];
-  opts?: Parameters<typeof resolveReplyDirectives>[0]["opts"];
+  agentCfg?: ResolveParams["agentCfg"];
+  opts?: ResolveParams["opts"];
 }) {
   const authorized = params.authorized ?? true;
   const { body } = params;
   const agentText = params.agentText ?? body;
   const surface = params.surface ?? "whatsapp";
-  const sessionKey = "agent:main:whatsapp:+2000";
   const sessionEntry = createSessionEntry();
   const sessionCtx = {
     Body: agentText,
@@ -185,23 +203,9 @@ async function resolveModelDirective(params: {
 
 describe("reply directive resolution", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    vi.stubEnv("OPENCLAW_TEST_FAST", "1");
     mocks.shouldHandle.mockImplementation(
       (params: { cfg: OpenClawConfig }) => params.cfg.commands?.text !== false,
     );
-    mocks.listForWorkspace.mockReturnValue([]);
-    mocks.apply.mockImplementation(async (params: DirectiveApplyParams) => ({
-      kind: "continue",
-      directives: params.directives,
-      provider: params.provider,
-      model: params.model,
-      contextTokens: params.contextTokens,
-    }));
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
   });
 
   it.each([false, true])(
@@ -322,7 +326,7 @@ describe("reply directive resolution", () => {
 
     const { result, sessionEntry } = await resolveModelDirective({
       body,
-      cfg: { commands: { text: true } } as OpenClawConfig,
+      cfg: { commands: { text: true } },
       surface: "webchat",
     });
 
@@ -341,7 +345,7 @@ describe("reply directive resolution", () => {
 
     const { result } = await resolveModelDirective({
       body,
-      cfg: { commands: { text: true } } as OpenClawConfig,
+      cfg: { commands: { text: true } },
       surface: "webchat",
     });
 

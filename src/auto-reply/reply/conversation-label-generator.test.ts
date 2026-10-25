@@ -37,6 +37,8 @@ const fallback = (
   overrides: Partial<Parameters<typeof generateConversationLabelWithFallback>[0]> = {},
 ) => generateConversationLabelWithFallback({ ...params, ...overrides });
 const attemptedModels = () => runIsolatedCompletion.mock.calls.map(([request]) => request.model);
+const attemptedRoutes = (...fields: string[]) =>
+  runIsolatedCompletion.mock.calls.map(([request]) => fields.map((field) => request[field]));
 const unavailable = () =>
   new FailoverError("Fixture server unavailable", { reason: "server_error" });
 function expectCompletion(request: Record<string, unknown>) {
@@ -88,8 +90,6 @@ describe("generateConversationLabel", () => {
       generate({
         cfg: modelConfig("openai/gpt-main", "openai/gpt-mini", ["openai/utility-backup"]),
         agentId: "main",
-        userMessage: "Plan a garden.",
-        prompt: "Generate a label.",
       }),
     ).resolves.toBe("Garden planning");
     expect(attemptedModels()).toEqual(["gpt-mini", "utility-backup"]);
@@ -139,7 +139,6 @@ describe("generateConversationLabel", () => {
   ])(
     "keeps the utility label on its selected runtime ($primary, session=$sessionRuntime)",
     async ({ primary, sessionRuntime }) => {
-      const utilityModel = "anthropic/claude-haiku";
       const cfg = {
         agents: {
           defaults: {
@@ -164,11 +163,9 @@ describe("generateConversationLabel", () => {
           ...baseParams,
           cfg,
           agentId: "main",
-          utilityModelRef: utilityModel,
+          utilityModelRef: "anthropic/claude-haiku",
           regularModelRef: `anthropic/${primary}`,
           agentHarnessRuntimeOverride: sessionRuntime,
-          prompt: "Return a session title.",
-          userMessage: "Plan a garden.",
         }),
       );
       expectCompletion({
@@ -240,32 +237,16 @@ describe("generateConversationLabelWithFallback", () => {
         if (request.model === "gpt-main" && request.agentHarnessRuntimeOverride === "codex") {
           return { text: "Runtime recovery label" };
         }
-        throw new FailoverError("Fixture server unavailable", { reason: "server_error" });
+        throw unavailable();
       },
     );
     await expect(
-      generateConversationLabelWithFallback({
-        ...params,
-        cfg: {
-          agents: {
-            defaults: {
-              utilityModel: {
-                primary: "openai/gpt-mini",
-                fallbacks: ["openai/gpt-main"],
-              },
-            },
-          },
-          plugins: { enabled: false },
-        },
+      fallback({
+        cfg: modelConfig(undefined, "openai/gpt-mini", ["openai/gpt-main"]),
         agentHarnessRuntimeOverride: "codex",
       }),
     ).resolves.toBe("Runtime recovery label");
-    expect(
-      runIsolatedCompletion.mock.calls.map(([request]) => [
-        request.model,
-        request.agentHarnessRuntimeOverride,
-      ]),
-    ).toEqual([
+    expect(attemptedRoutes("model", "agentHarnessRuntimeOverride")).toEqual([
       ["gpt-mini", "codex"],
       ["gpt-main", undefined],
       ["gpt-main", "codex"],
@@ -313,13 +294,11 @@ describe("generateConversationLabelWithFallback", () => {
     const cfg = {
       agents: {
         entries: { main: {} },
-        defaults: {
-          model: "label-test/regular",
-          utilityModel: {
-            primary: "label-test/utility",
-            fallbacks: hasFallback ? ["label-test/backup"] : [],
-          },
-        },
+        defaults: modelConfig(
+          "label-test/regular",
+          "label-test/utility",
+          hasFallback ? ["label-test/backup"] : [],
+        ).agents.defaults,
       },
     };
     const operatorAuthority = createAdmittedRunOperatorAuthority({
@@ -376,13 +355,7 @@ describe("generateConversationLabelWithFallback", () => {
     await expect(
       fallback({ utilityModelRef: row.utilityModelRef, agentHarnessRuntimeOverride: "codex" }),
     ).resolves.toBe("Primary title");
-    expect(
-      runIsolatedCompletion.mock.calls.map(([request]) => [
-        request.provider,
-        request.agentHarnessRuntimeOverride,
-        request.authProfileId,
-      ]),
-    ).toEqual([
+    expect(attemptedRoutes("provider", "agentHarnessRuntimeOverride", "authProfileId")).toEqual([
       [row.provider, row.runtime, row.profile],
       ["openai", "codex", "work"],
     ]);

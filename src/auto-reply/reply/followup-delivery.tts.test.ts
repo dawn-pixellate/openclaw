@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TtsAutoMode } from "../../config/types.js";
+import type { TtsAutoMode, TtsConfig } from "../../config/types.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import type { SpeechProviderPlugin } from "../../plugins/types.js";
 import {
@@ -37,13 +37,26 @@ vi.mock("../../infra/outbound/deliver.js", () => ({
 const speech = "The queued assistant answer should include automatic speech.";
 const audio = Buffer.from("deterministic synthetic speech fixture");
 const providerId = "queued-tts-fixture";
-let state: OpenClawTestState;
-const synthesize = vi.fn<SpeechProviderPlugin["synthesize"]>(async () => ({
+const speechResult = {
   audioBuffer: audio,
   fileExtension: ".ogg",
   outputFormat: "ogg",
   voiceCompatible: true,
-}));
+};
+let state: OpenClawTestState;
+const synthesize = vi.fn<SpeechProviderPlugin["synthesize"]>(async () => ({ ...speechResult }));
+const tts = (auto: TtsAutoMode = "always", speakerVoice?: string): TtsConfig => ({
+  auto,
+  ...(speakerVoice ? { providers: { [providerId]: { speakerVoice } } } : { provider: providerId }),
+});
+
+function sourceOwned(turn: ReturnType<typeof createTurn>) {
+  const deliver = vi.fn(async () => {});
+  turn.queued.originatingChannel = "webchat";
+  turn.queued.originatingTo = undefined;
+  turn.queued.queuedFollowupReplyDisposition = { kind: "deliver", deliver };
+  return deliver;
+}
 
 beforeEach(async () => {
   state = await createOpenClawTestState({ prefix: "openclaw-queued-tts-", layout: "home" });
@@ -56,25 +69,11 @@ beforeEach(async () => {
   );
   synthesize.mockClear();
   outbound.mockReset().mockResolvedValue([{ channel: "discord", messageId: "synthetic-delivery" }]);
-  const registry = createTestRegistry([
-    {
-      pluginId: "discord",
-      source: "test",
-      plugin: createChannelTestPluginBase({
-        id: "discord",
-        capabilities: {
-          chatTypes: ["direct"],
-          media: true,
-          tts: { voice: { synthesisTarget: "voice-note" } },
-        },
-      }),
-    },
-  ]);
-  registry.channels.push({
-    pluginId: "matrix",
+  const channel = (id: string) => ({
+    pluginId: id,
     source: "test",
     plugin: createChannelTestPluginBase({
-      id: "matrix",
+      id,
       capabilities: {
         chatTypes: ["direct"],
         media: true,
@@ -82,6 +81,8 @@ beforeEach(async () => {
       },
     }),
   });
+  const registry = createTestRegistry([channel("discord")]);
+  registry.channels.push(channel("matrix"));
   registry.speechProviders.push({
     pluginId: providerId,
     source: "test",
@@ -106,7 +107,7 @@ async function send(
   payload: ReplyPayload = { text: speech },
   originFails = false,
 ) {
-  turn.config = { tts: { auto: "always", provider: providerId }, ...turn.config };
+  turn.config = { tts: tts(), ...turn.config };
   if (originFails) {
     outbound.mockRejectedValueOnce(new Error("synthetic transport failure"));
   }
@@ -171,7 +172,7 @@ it.each<{
 ])(
   "honors $mode speech policy (inbound=$inbound, session=$sessionAuto, tagged=$tagged)",
   async ({ mode, inbound, sessionAuto, tagged, audio: expectedAudio }) => {
-    const turn = createTurn({ config: { tts: { auto: mode, provider: providerId } } });
+    const turn = createTurn({ config: { tts: tts(mode) } });
     turn.queued.currentInboundAudio = inbound;
     turn.session.current = () => ({ sessionId: "session", updatedAt: 1, ttsAuto: sessionAuto });
     const payload = tagged
@@ -214,24 +215,13 @@ it("reuses prepared audio when origin routing falls back to the source dispatche
 it("uses the selected destination account and agent settings instead of the ingress surface", async () => {
   const turn = createTurn({
     config: {
-      tts: { auto: "off", provider: providerId },
-      agents: {
-        entries: {
-          agent: {
-            tts: { auto: "always", providers: { [providerId]: { speakerVoice: "agent-voice" } } },
-          },
-        },
-      },
+      tts: tts("off"),
+      agents: { entries: { agent: { tts: tts("always", "agent-voice") } } },
       channels: {
         matrix: {
           tts: { auto: "off" },
           accounts: {
-            selected: {
-              tts: {
-                auto: "always",
-                providers: { [providerId]: { speakerVoice: "destination-voice" } },
-              },
-            },
+            selected: { tts: tts("always", "destination-voice") },
           },
         },
       },
@@ -262,7 +252,7 @@ it("uses local preferences and lets the queued session override them", async () 
 it("preserves inbound speech eligibility for a collected follow-up", async () => {
   const first = createTurn().queued;
   first.currentInboundAudio = true;
-  const turn = createTurn({ config: { tts: { auto: "inbound", provider: providerId } } });
+  const turn = createTurn({ config: { tts: tts("inbound") } });
   Object.assign(turn.queued, collectRuntimeMetadata([first, createTurn().queued]));
   await send(turn);
   expect(synthesize).toHaveBeenCalledOnce();
@@ -279,10 +269,7 @@ it("does not synthesize a reply suppressed by every collected source", async () 
 
 it("returns prepared audio to the source-owned terminal batch without sending it early", async () => {
   const turn = createTurn();
-  turn.queued.originatingChannel = "webchat";
-  turn.queued.originatingTo = undefined;
-  const deliver = vi.fn(async () => {});
-  turn.queued.queuedFollowupReplyDisposition = { kind: "deliver", deliver };
+  const deliver = sourceOwned(turn);
   const { result } = await send(turn);
   expect(synthesize).toHaveBeenCalledOnce();
   expect(result).toMatchObject({
@@ -298,12 +285,7 @@ it("does not route audio after the queued operation is aborted during synthesis"
   const { replyOperation } = createMockReplyOperation({ abortSignal: controller.signal });
   synthesize.mockImplementationOnce(async () => {
     controller.abort(new Error("synthetic queued cancellation"));
-    return {
-      audioBuffer: audio,
-      fileExtension: ".ogg",
-      outputFormat: "ogg",
-      voiceCompatible: true,
-    };
+    return { ...speechResult };
   });
   await expect(send(createTurn({ operation: replyOperation }))).rejects.toThrow(
     "synthetic queued cancellation",
@@ -318,7 +300,7 @@ it.each(["origin", "source-owned"] as const)(
       abortSignal: AbortSignal.abort(new Error("synthetic stalled recovery")),
     });
     const turn = createTurn({
-      config: { tts: { auto: "always", provider: providerId } },
+      config: { tts: tts() },
       operation: {
         ...replyOperation,
         result: { kind: "failed", code: "run_stalled" },
@@ -327,12 +309,7 @@ it.each(["origin", "source-owned"] as const)(
     });
     turn.queued.stalledTurnRecovery = true;
     turn.queued.run.sourceReplyDeliveryMode = "message_tool_only";
-    const sourceDelivery = vi.fn(async () => {});
-    if (route === "source-owned") {
-      turn.queued.originatingChannel = "webchat";
-      turn.queued.originatingTo = undefined;
-      turn.queued.queuedFollowupReplyDisposition = { kind: "deliver", deliver: sourceDelivery };
-    }
+    const sourceDelivery = route === "source-owned" ? sourceOwned(turn) : vi.fn();
     const decision = await resolveFollowupDeliveryDecision({
       turn,
       execution: { runId: turn.runId, outcome: { kind: "aborted", reason: "user" } },
