@@ -50,13 +50,14 @@ function buildPrompter(): WizardPrompter {
 function buildAuthContext() {
   return {
     config: {},
-    prompter: buildPrompter(),
+    prompter: {
+      ...buildPrompter(),
+      note: vi.fn(async (_message: string, _title?: string) => {}),
+    },
     runtime: createNonExitingRuntime(),
     isRemote: false,
-    openUrl: async () => {},
-    oauth: {
-      createVpsAwareHandlers: vi.fn(),
-    },
+    openUrl: vi.fn(async (_url: string) => {}),
+    oauth: { createVpsAwareHandlers: vi.fn() },
   };
 }
 
@@ -66,9 +67,7 @@ async function loadProvider(load: ProviderAuthContractPluginLoader, id: string) 
 }
 
 function createJwt(payload: Record<string, unknown>): string {
-  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
-  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  return `${header}.${body}.signature`;
+  return `e30.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
 }
 
 async function withStdinTTY<T>(isTTY: boolean, run: () => Promise<T>): Promise<T> {
@@ -107,8 +106,7 @@ function installSharedAuthProfileStoreHooks() {
       };
     });
     ensureAuthProfileStoreMock.mockReset().mockReturnValue({ version: 1, profiles: {} });
-    listProfilesForProviderMock.mockReset();
-    listProfilesForProviderMock.mockImplementation((store, providerId) =>
+    listProfilesForProviderMock.mockReset().mockImplementation((store, providerId) =>
       Object.entries(store.profiles)
         .filter(([, credential]) => credential?.provider === providerId)
         .map(([profileId]) => profileId),
@@ -134,7 +132,6 @@ export function describeOpenAICodexProviderAuthContract(
     async function expectOAuthProfile(params: {
       access: string;
       profileId: string;
-      email?: string;
       loginEmail?: string;
     }) {
       const provider = await loadProvider(load, "openai");
@@ -145,18 +142,14 @@ export function describeOpenAICodexProviderAuthContract(
       };
       loginOpenAICodexOAuthMock.mockResolvedValueOnce({ ...tokens, email: params.loginEmail });
       const result = await provider.auth[0]?.run(buildAuthContext() as never);
+      const credential = {
+        type: "oauth",
+        provider: "openai",
+        ...tokens,
+        ...(params.loginEmail ? { email: params.loginEmail } : {}),
+      };
       expect(result).toEqual({
-        profiles: [
-          {
-            profileId: params.profileId,
-            credential: {
-              type: "oauth",
-              provider: "openai",
-              ...tokens,
-              ...(params.email ? { email: params.email } : {}),
-            },
-          },
-        ],
+        profiles: [{ profileId: params.profileId, credential }],
         configPatch: { agents: { defaults: { models: { [expectedCodexDefaultModel]: {} } } } },
         defaultModel: expectedCodexDefaultModel,
         notes: undefined,
@@ -170,7 +163,6 @@ export function describeOpenAICodexProviderAuthContract(
         name: "keeps OAuth auth results provider-owned",
         profileId: "openai:user@example.com",
         access: "access-token",
-        email: "user@example.com",
         loginEmail: "user@example.com",
       },
       {
@@ -209,40 +201,6 @@ export function describeGithubCopilotProviderAuthContract(
 ) {
   describe("github-copilot provider auth contract", () => {
     installSharedAuthProfileStoreHooks();
-    const getProvider = () => loadProvider(load, "github-copilot");
-
-    async function runDeviceAuthWithFakeTimers<T>(
-      run: () => T | Promise<T>,
-      openUrl: (url: string) => Promise<void>,
-    ): Promise<T> {
-      vi.useFakeTimers();
-      try {
-        const deviceCodeShown = new Promise<void>((resolve) => {
-          vi.mocked(openUrl).mockImplementation(async () => resolve());
-        });
-        const pending = Promise.resolve(run());
-        const openedBeforeCompletion = await Promise.race([
-          deviceCodeShown.then(() => true),
-          pending.then(() => false),
-        ]);
-        expect(openedBeforeCompletion).toBe(true);
-        // Browser handoff follows the profile, device-code, and prompt work.
-        await vi.advanceTimersByTimeAsync(1_000);
-        return await pending;
-      } finally {
-        vi.useRealTimers();
-      }
-    }
-
-    function resolveFetchTarget(input: unknown): string {
-      return typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : input instanceof Request
-            ? input.url
-            : String(input);
-    }
 
     function stubGitHubDeviceFlowFetch(
       outcome: { accessToken: string } | { error: "access_denied" | "expired_token" },
@@ -256,13 +214,10 @@ export function describeGithubCopilotProviderAuthContract(
             data: [
               {
                 id: defaultModel.replace("github-copilot/", ""),
-                name: "Contract starter model",
                 model_picker_enabled: true,
-                model_picker_category: "versatile",
                 policy: { state: "enabled" },
                 capabilities: {
                   type: "chat",
-                  limits: { max_context_window_tokens: 200_000, max_output_tokens: 64_000 },
                   supports: { streaming: true, tool_calls: true },
                 },
               },
@@ -283,35 +238,32 @@ export function describeGithubCopilotProviderAuthContract(
           ? { access_token: outcome.accessToken, token_type: "bearer" }
           : { error: outcome.error },
       );
-      const fetchMock = vi.fn(async (input: unknown) => {
-        const target = resolveFetchTarget(input);
+      vi.stubGlobal("fetch", async (input: unknown) => {
+        const target = input instanceof Request ? input.url : String(input);
         if (!responses.has(target)) {
           throw new Error(`unexpected fetch in github-copilot device flow stub: ${target}`);
         }
         return Response.json(responses.get(target));
       });
-      vi.stubGlobal("fetch", fetchMock);
-      return fetchMock;
-    }
-
-    function buildSpyAuthContext() {
-      const ctx = {
-        ...buildAuthContext(),
-        openUrl: vi.fn(async (_url: string) => {}),
-      };
-      ctx.prompter.note = vi.fn(async () => {});
-      return ctx;
     }
 
     async function runDeviceFlow(outcome: Parameters<typeof stubGitHubDeviceFlowFetch>[0]) {
-      const provider = await getProvider();
+      const provider = await loadProvider(load, "github-copilot");
       stubGitHubDeviceFlowFetch(outcome);
-      const ctx = buildSpyAuthContext();
-      const result = await runDeviceAuthWithFakeTimers(
-        () => provider.auth[0]?.run(ctx as never),
-        ctx.openUrl,
-      );
-      return { result, ctx };
+      const ctx = buildAuthContext();
+      vi.useFakeTimers();
+      try {
+        const { promise: deviceCodeShown, resolve } = Promise.withResolvers<void>();
+        ctx.openUrl.mockImplementation(async () => resolve());
+        const pending = Promise.resolve(provider.auth[0]?.run(ctx as never));
+        expect(
+          await Promise.race([deviceCodeShown.then(() => true), pending.then(() => false)]),
+        ).toBe(true);
+        await vi.advanceTimersByTimeAsync(1_000);
+        return { result: await pending, ctx };
+      } finally {
+        vi.useRealTimers();
+      }
     }
 
     afterEach(() => {
@@ -324,7 +276,7 @@ export function describeGithubCopilotProviderAuthContract(
         const { result, ctx } = await runDeviceFlow({ accessToken: "rpc-client-token" });
         expect(result).toEqual({ profiles: [copilotProfile("rpc-client-token")], defaultModel });
         expect(ctx.openUrl).toHaveBeenCalledWith("https://github.com/login/device");
-        const noteCalls = (ctx.prompter.note as ReturnType<typeof vi.fn>).mock.calls;
+        const noteCalls = ctx.prompter.note.mock.calls;
         const codeNote = noteCalls.find(
           ([msg]) => typeof msg === "string" && msg.includes("ABCD-1234"),
         );
@@ -339,7 +291,7 @@ export function describeGithubCopilotProviderAuthContract(
     ] as const)("returns no profiles and notes %s", async (error, note) => {
       const { result, ctx } = await runDeviceFlow({ error });
       expect(result).toEqual({ profiles: [] });
-      const noteCalls = (ctx.prompter.note as ReturnType<typeof vi.fn>).mock.calls;
+      const noteCalls = ctx.prompter.note.mock.calls;
       expect(
         noteCalls.some(([msg]) => typeof msg === "string" && msg.toLowerCase().includes(note)),
       ).toBe(true);
