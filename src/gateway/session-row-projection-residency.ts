@@ -240,6 +240,13 @@ export function createSessionRowProjectionResidency(params: {
           row.pendingDatabaseFacts = undefined;
           row.retainedDatabaseFacts = undefined;
         }
+        if (
+          typeof change.scope !== "string" ||
+          change.factsInvalidated ||
+          ((change.scope === "config" || change.scope === "catalog") && row.entry?.fallbackNotice)
+        ) {
+          params.invalidateTranscript(records.identity(row));
+        }
         if (isColdSessionRow(row) || row.entry?.archivedAt !== undefined) {
           const current = row.materialized ? demote(row) : row;
           if (!catalogOnly) {
@@ -256,36 +263,26 @@ export function createSessionRowProjectionResidency(params: {
           continue;
         }
         params.dirty.add(records.identity(row));
-        if (
-          typeof change.scope !== "string" ||
-          change.factsInvalidated ||
-          ((change.scope === "config" || change.scope === "catalog") && row.entry?.fallbackNotice)
-        ) {
-          params.invalidateTranscript(records.identity(row));
-        }
       }
     },
     // Disjoint prepared pages retain their own rows across worker and placement yields.
     retainRows(this: void) {
       let pins: ReadonlySet<string> = new Set();
       readPins.add(pins);
+      const release = () => {
+        readPins.delete(pins);
+        const now = Date.now();
+        for (const id of pins) {
+          touch(id, now);
+        }
+      };
       return {
         update(ids: readonly string[]) {
-          const now = Date.now();
-          for (const id of pins) {
-            touch(id, now);
-          }
-          readPins.delete(pins);
+          release();
           pins = new Set(ids);
           readPins.add(pins);
         },
-        release() {
-          readPins.delete(pins);
-          const now = Date.now();
-          for (const id of pins) {
-            touch(id, now);
-          }
-        },
+        release,
       };
     },
     forget: (id: string) => materialized.delete(id),

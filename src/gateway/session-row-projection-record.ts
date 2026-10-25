@@ -22,6 +22,7 @@ import type { SessionRepositoryWorkspaceRecord } from "../state/session-reposito
 import type { readSessionRowFacts } from "./server-methods/session-placement-read-projection.js";
 import { compareSessionEntryPairs } from "./session-list-order.js";
 import { readSessionListSelectionFacts } from "./session-list-target.js";
+import type { SessionRowBackfill } from "./session-row-projection-backfill.js";
 import { selectStoredSessionLineage } from "./session-store-key.js";
 import { sessionTitleRequests } from "./session-title-state.js";
 import type { SessionListRowContext } from "./session-utils-contracts.js";
@@ -99,6 +100,8 @@ export type Row = {
   pendingDatabaseFacts?: PreparedSessionRowDatabaseFacts;
   /** Presentation retains committed facets until their owner publishes or the row is demoted. */
   retainedDatabaseFacts?: RetainedSessionRowDatabaseFacts;
+  /** Optional transcript outcomes survive display eviction at their source revision. */
+  transcriptBackfill?: SessionRowBackfill;
   /** Durable search metadata survives archive demotion, until its owner invalidates it. */
   preparedAcpMeta?: SessionAcpMeta | null;
   preparedRuntimeOwnership?: AgentHarnessSessionRuntimeOwnership | null;

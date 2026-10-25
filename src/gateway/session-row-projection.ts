@@ -143,7 +143,7 @@ export async function createSessionRowProjection(params: records.ProjectionOptio
     invalidateTranscript: backfill.remove,
     release(id) {
       transcriptUpdates.remove(id);
-      backfill.remove(id);
+      backfill.suspend(id);
       dirty.delete(id);
     },
     invalidateFacts(row) {
@@ -454,7 +454,7 @@ export async function createSessionRowProjection(params: records.ProjectionOptio
     },
     acquireEntry,
     materialize,
-    forgetBackfill: backfill.remove,
+    forgetBackfill: backfill.suspend,
     retainMaterialized: (row) => residency.describe(row),
   });
   const transcriptUpdates = createSessionRowProjectionTranscriptUpdates({

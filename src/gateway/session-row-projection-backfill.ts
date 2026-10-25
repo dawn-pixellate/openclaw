@@ -7,6 +7,28 @@ import {
   presentSessionRowTranscriptFields,
 } from "./session-row-transcript-backfill.js";
 
+export type SessionRowBackfill = {
+  revision: ReturnType<typeof revision>;
+  state: "pending" | "running" | "completed" | "not-needed";
+  fields?: NonNullable<Awaited<ReturnType<typeof backfillSessionRowTranscriptFields>>>;
+};
+
+function revision(row: EntryRow, watermark: Row["retainedDatabaseFacts"]) {
+  const { entry, materialized } = row;
+  return {
+    generation: row.generation,
+    watermark: watermark?.activitySummaryWatermark,
+    fallback: entry.fallbackNotice && {
+      status: entry.status,
+      lastRunId: entry.lastRunId,
+      modelProvider: entry.modelProvider,
+      model: entry.model,
+      notice: entry.fallbackNotice,
+      selectedModel: materialized?.source.selectedModel,
+    },
+  };
+}
+
 function transcriptParams(row: Row, entry: EntryRow["entry"]) {
   return {
     ...row.storeTarget,
@@ -28,31 +50,18 @@ export function createSessionRowProjectionBackfill(params: {
   ready: () => Promise<void>;
   read: (id: string) => Row | undefined;
   current: (row: Row) => boolean;
-  publish: (
-    row: Row,
-    fields: NonNullable<Awaited<ReturnType<typeof backfillSessionRowTranscriptFields>>>,
-  ) => void;
+  publish: (row: Row, fields: NonNullable<SessionRowBackfill["fields"]>) => void;
 }) {
   const inOwnerContext = AsyncLocalStorage.snapshot();
   const queued = new Set<string>();
-  const revisions = new Map<string, ReturnType<typeof revision>>();
   let pending: Promise<void> | undefined;
   let started = false;
   let disposed = false;
-  function revision(row: EntryRow, watermark: Row["retainedDatabaseFacts"]) {
-    const { entry, materialized } = row;
-    return {
-      generation: row.generation,
-      watermark: watermark?.activitySummaryWatermark,
-      fallback: entry.fallbackNotice && {
-        status: entry.status,
-        lastRunId: entry.lastRunId,
-        modelProvider: entry.modelProvider,
-        model: entry.model,
-        notice: entry.fallbackNotice,
-        selectedModel: materialized?.source.selectedModel,
-      },
-    };
+  function publish(row: Row, state: SessionRowBackfill, facts = row.retainedDatabaseFacts) {
+    if (facts?.transcriptAssistantMessage === "unknown") {
+      facts.transcriptAssistantMessage = state.fields?.lastAssistantMessage ?? null;
+    }
+    params.publish(row, state.fields ?? {});
   }
   async function drain() {
     for (;;) {
@@ -70,41 +79,29 @@ export function createSessionRowProjectionBackfill(params: {
       }
       queued.delete(id);
       const row = params.read(id);
-      const entry = row?.entry;
-      const captured = revisions.get(id);
-      if (!row || !entry || !captured) {
+      const captured = row?.transcriptBackfill;
+      if (!row?.entry || !captured || captured.state !== "pending") {
         continue;
       }
+      captured.state = "running";
       try {
-        const fields = await backfillSessionRowTranscriptFields(transcriptParams(row, entry));
+        const fields = await backfillSessionRowTranscriptFields(transcriptParams(row, row.entry));
         const live = params.read(id);
         // A replacement/private-session revocation must not publish another session's text.
         if (!disposed && live?.entry && params.current(row)) {
-          const facts = live.retainedDatabaseFacts;
           // Superseded reads must not restore previews cleared by broad invalidation.
-          if (revisions.get(id) !== captured) {
+          if (live.transcriptBackfill !== captured) {
             continue;
           }
-          if (fields && facts?.transcriptAssistantMessage === "unknown") {
-            facts.transcriptAssistantMessage = fields.lastAssistantMessage ?? null;
-          }
-          params.publish(
-            live,
-            facts?.transcriptPreview !== undefined &&
-              facts.transcriptAssistantMessage !== "unknown" &&
-              facts.transcriptTerminalModel !== undefined
-              ? presentSessionRowTranscriptFields(transcriptParams(live, live.entry), {
-                  lastMessagePreview: facts.transcriptPreview,
-                  lastAssistantMessage: facts.transcriptAssistantMessage,
-                  terminalModel: facts.transcriptTerminalModel,
-                })
-              : (fields ?? {}),
-          );
+          captured.state = fields ? "completed" : "not-needed";
+          captured.fields = fields;
+          publish(live, captured);
         }
       } catch {
         // A later owner publication retries optional fields; do not spin on a cold/error row.
-        if (revisions.get(id) === captured) {
-          revisions.delete(id);
+        const live = params.read(id);
+        if (live?.transcriptBackfill === captured) {
+          live.transcriptBackfill = undefined;
         }
       }
     }
@@ -112,17 +109,10 @@ export function createSessionRowProjectionBackfill(params: {
   function start() {
     started = true;
     if (!disposed && !pending && queued.size) {
-      pending = inOwnerContext(drain).then(
-        () => {
-          pending = undefined;
-          start();
-        },
-        (error: unknown) => {
-          pending = undefined;
-          throw error;
-        },
-      );
-      void pending.catch(() => {});
+      pending = inOwnerContext(drain).finally(() => {
+        pending = undefined;
+      });
+      void pending.then(start, () => {});
     }
   }
   return {
@@ -131,39 +121,47 @@ export function createSessionRowProjectionBackfill(params: {
       const id = identity(row);
       const next = revision(row, facts);
       if (facts?.transcriptPreview !== undefined && facts.transcriptTerminalModel !== undefined) {
-        params.publish(
-          row,
-          presentSessionRowTranscriptFields(transcriptParams(row, row.entry), {
-            lastMessagePreview: facts.transcriptPreview,
-            lastAssistantMessage:
-              facts.transcriptAssistantMessage === "unknown"
-                ? (row.lastAssistantMessage ?? null)
-                : facts.transcriptAssistantMessage,
-            terminalModel: facts.transcriptTerminalModel,
-          }),
-        );
+        const fields = presentSessionRowTranscriptFields(transcriptParams(row, row.entry), {
+          lastMessagePreview: facts.transcriptPreview,
+          lastAssistantMessage:
+            facts.transcriptAssistantMessage === "unknown"
+              ? (row.lastAssistantMessage ?? null)
+              : facts.transcriptAssistantMessage,
+          terminalModel: facts.transcriptTerminalModel,
+        });
+        params.publish(row, fields);
         if (facts.transcriptAssistantMessage !== "unknown") {
-          revisions.set(id, next);
+          row.transcriptBackfill = { revision: next, state: "not-needed", fields };
           queued.delete(id);
           return;
         }
       }
-      if (!isDeepStrictEqual(revisions.get(id), next)) {
-        revisions.set(id, next);
+      if (!isDeepStrictEqual(row.transcriptBackfill?.revision, next)) {
+        row.transcriptBackfill = { revision: next, state: "pending" };
+      }
+      const state = row.transcriptBackfill!;
+      if (state.state === "completed" || state.state === "not-needed") {
+        publish(row, state, facts);
+      } else if (state.state === "pending") {
         queued.add(id);
       }
       if (started) {
         start();
       }
     },
+    suspend(this: void, id: string) {
+      queued.delete(id);
+    },
     remove(this: void, id: string) {
-      revisions.delete(id);
+      const row = params.read(id);
+      if (row) {
+        row.transcriptBackfill = undefined;
+      }
       queued.delete(id);
     },
     dispose() {
       disposed = true;
       queued.clear();
-      revisions.clear();
     },
   };
 }

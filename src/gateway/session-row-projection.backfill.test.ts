@@ -233,29 +233,44 @@ it("enriches a pre-assistant preview cache without changing settings or transcri
   });
 });
 
-it.for([false, true])(
-  "backfills an unknown assistant fact once and retains it across user appends (assistant: %s)",
-  async (hasAssistant, { signal }) => {
+it.for(["absent", "user", "assistant"] as const)(
+  "retains transcript backfill outcomes through idle demotion and user appends (%s)",
+  async (source, { signal }) => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
       setRuntimeConfigSnapshot(cfg);
-      const { target, query } = seedTranscriptRow("cold-preview");
-      await appendTranscript(target, {
-        role: hasAssistant ? "assistant" : "user",
-        content: "Cold message",
-        timestamp: 100,
-      });
+      const { target, query } = seedTranscriptRow("cold-preview", { status: "done" });
+      if (source !== "absent") {
+        await appendTranscript(target, {
+          role: source,
+          content: "Cold message",
+          timestamp: 100,
+        });
+      }
       clearStoredSessionRowTranscriptForTest(target);
       const backfill = vi.spyOn(transcriptBackfill, "backfillSessionRowTranscriptFields");
       using release = holdForeground();
       using projection = await createTestProjection({ cfg, modelCatalog: [] });
       await projection.ensureMaterialized();
       const published = observeSessionRowBackfill([target.sessionKey], projection, (row) =>
-        row.lastMessagePreview === "Cold message" ? row.key : "",
+        source === "absent" || row.lastMessagePreview === "Cold message" ? row.key : "",
       );
       projection.describe(query);
       release();
       await withinTest(published, signal);
       expect(backfill).toHaveBeenCalledTimes(1);
+      for (let wave = 0; wave < 3; wave++) {
+        projection.sweepMaterializedRows(Date.now() + 10 * 60_000);
+        expect(projection.capture(query)?.materialized).toBeUndefined();
+        const reused = observeSessionRowBackfill([target.sessionKey], projection);
+        const snapshot = await withReadySessionRows(
+          projection,
+          () => [query],
+          () => projection.snapshot(query, { includeLastMessage: true }).row,
+        );
+        await withinTest(reused, signal);
+        expect(snapshot?.lastMessagePreview).toBe(source === "absent" ? undefined : "Cold message");
+        expect(backfill).toHaveBeenCalledTimes(1);
+      }
       await appendTranscript(
         target,
         { role: "user", content: "First followup" },
@@ -267,12 +282,49 @@ it.for([false, true])(
       );
       expect(
         projection.snapshot(query, { includeLastMessage: true }).row?.lastAssistantMessage,
-      ).toEqual(hasAssistant ? { text: "Cold message", timestamp: 100 } : undefined);
+      ).toEqual(source === "assistant" ? { text: "Cold message", timestamp: 100 } : undefined);
       await nextTurn();
       expect(backfill).toHaveBeenCalledTimes(1);
     });
   },
 );
+
+it("keeps an in-flight transcript outcome through demotion without admitting another backfill", async ({
+  signal,
+}) => {
+  await withOpenClawTestState({ scenario: "minimal" }, async () => {
+    setRuntimeConfigSnapshot(cfg);
+    const { target, query } = seedTranscriptRow("inflight-preview", { status: "done" });
+    const captured = createDeferredCore();
+    const resume = createDeferredCore();
+    const read = transcriptBackfill.backfillSessionRowTranscriptFields;
+    const backfill = vi
+      .spyOn(transcriptBackfill, "backfillSessionRowTranscriptFields")
+      .mockImplementationOnce(async (params) => {
+        const fields = await read(params);
+        captured.resolve();
+        await resume.promise;
+        return fields;
+      });
+    using projection = await createTestProjection({ cfg, modelCatalog: [] });
+    const published = observeSessionRowBackfill([target.sessionKey], projection);
+    try {
+      projection.describe(query);
+      await withinTest(captured.promise, signal);
+      projection.sweepMaterializedRows(Date.now() + 10 * 60_000);
+      expect(projection.capture(query)?.materialized).toBeUndefined();
+      await withReadySessionRows(
+        projection,
+        () => [query],
+        () => projection.snapshot(query),
+      );
+    } finally {
+      resume.resolve();
+    }
+    await withinTest(published, signal);
+    expect(backfill).toHaveBeenCalledTimes(1);
+  });
+});
 
 it("keeps the latest visible assistant preview across user followups and clears replaced sessions", async ({
   signal,
