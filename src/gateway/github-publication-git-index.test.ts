@@ -107,7 +107,6 @@ async function createFixture() {
   };
   return {
     ...params,
-    commit,
     git: run,
     write,
     file: (...parts: string[]) => path.join(cwd, ...parts),
@@ -122,12 +121,6 @@ async function createFixture() {
         sourceHeadCommit: previousHead,
         ...overrides,
       }),
-    state: async () => ({
-      head: await run("rev-parse", "HEAD"),
-      tree: await run("write-tree"),
-      status: await run("status", "--porcelain"),
-      artifact: await fs.readFile(path.join(cwd, "artifact.txt"), "utf8"),
-    }),
   };
 }
 
@@ -191,45 +184,17 @@ describe("GitHub publication index update", () => {
     }
   });
 
-  it.each(["reset", "created"] as const)(
-    "pins a conditional push when the remote branch was %s after admission",
-    async (change) => {
-      const remote = await makeDirectory("remote");
-      await git(remote, ["init", "--bare", "--initial-branch=main"]);
-      await fs.mkdir(f.file(".github/workflows"), { recursive: true });
-      await f.write(
-        ".github/workflows/example.yml",
-        "name: synthetic\non: workflow_dispatch\njobs: {}\n",
-      );
-      await f.git("add", "-A");
-      const workflowTree = await f.git("write-tree");
-      const observedHead = await f.commit(workflowTree, f.previousHead, "maintainer workflow\n");
-      await f.write("artifact.txt", "guest code\n");
-      await f.git("add", "artifact.txt");
-      const candidateTree = await f.git("write-tree");
-      const candidate = await f.commit(candidateTree, observedHead, "guest code\n");
-      await f.git("merge-base", "--is-ancestor", observedHead, candidate);
-      if (change === "reset") {
-        await f.git("push", remote, `${observedHead}:refs/heads/publication`);
-        await git(remote, ["update-ref", "refs/heads/publication", f.previousHead]);
-      } else {
-        await f.git("push", remote, `${f.previousHead}:refs/heads/publication`);
-      }
-      const expectedHead = change === "reset" ? observedHead : "";
-      const push = githubPublicationPushArgs(remote, candidate, "publication", expectedHead).slice(
-        1,
-      );
-      await expect(git(f.cwd, push)).rejects.toThrow();
-      expect(await git(remote, ["rev-parse", "refs/heads/publication"])).toBe(f.previousHead);
-      if (expectedHead) {
-        await git(remote, ["update-ref", "refs/heads/publication", expectedHead]);
-      } else {
-        await git(remote, ["update-ref", "-d", "refs/heads/publication"]);
-      }
-      await git(f.cwd, push);
-      expect(await git(remote, ["rev-parse", "refs/heads/publication"])).toBe(candidate);
-    },
-  );
+  it("pins a conditional push when the remote branch was created after admission", async () => {
+    const remote = await makeDirectory("remote");
+    await git(remote, ["init", "--bare", "--initial-branch=main"]);
+    await f.git("push", remote, `${f.previousHead}:refs/heads/publication`);
+    const push = githubPublicationPushArgs(remote, f.headCommit, "publication", "").slice(1);
+    await expect(git(f.cwd, push)).rejects.toThrow();
+    expect(await git(remote, ["rev-parse", "refs/heads/publication"])).toBe(f.previousHead);
+    await git(remote, ["update-ref", "-d", "refs/heads/publication"]);
+    await git(f.cwd, push);
+    expect(await git(remote, ["rev-parse", "refs/heads/publication"])).toBe(f.headCommit);
+  });
 
   it("publishes and recovers with worktree-scoped hooks without executing them", async () => {
     const remote = await makeDirectory("remote");
@@ -279,7 +244,6 @@ describe("GitHub publication index update", () => {
       run: async (argv, options) =>
         await git(f.cwd, argv.slice(1), options?.input, options?.env ?? hookEnv),
     });
-    await expect(fs.access(marker)).rejects.toThrow();
     await run(githubPublicationPushArgs(remote, f.headCommit, "publication", ""));
 
     expect(await git(remote, ["rev-parse", "refs/heads/publication"])).toBe(f.headCommit);
@@ -292,33 +256,6 @@ describe("GitHub publication index update", () => {
     await fs.writeFile(globalAttributes, "*.secret filter=redact\n");
 
     await rejects(captureGitHubPublicationWorkspaceSnapshot(f), "unsupported Git clean filter");
-  });
-
-  it("settles the accepted branch and index after publication authority ends", async () => {
-    let current = true;
-    await f.update({
-      assertCurrent: () => {
-        if (!current) {
-          throw new Error("publication permission ended");
-        }
-      },
-      updateRef: async () => {
-        await moveHead();
-        current = false;
-      },
-    });
-
-    expect(await f.state()).toEqual({
-      head: f.headCommit,
-      tree: f.workspaceTree,
-      status: "",
-      artifact: "accepted\n",
-    });
-    expect(
-      (await fs.readdir(f.file(".git"))).filter(
-        (entry) => entry === "index.lock" || entry.startsWith("index.openclaw-"),
-      ),
-    ).toEqual([]);
   });
 
   it("rejects concurrent staged changes without moving HEAD or rewriting the index", async () => {

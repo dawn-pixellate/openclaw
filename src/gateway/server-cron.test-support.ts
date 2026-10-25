@@ -27,8 +27,6 @@ const {
   getGlobalHookRunnerMock,
   runCronChangedMock,
   abortAndDrainEmbeddedAgentRunMock,
-  retireSessionMcpRuntimeMock,
-  requestSafeGatewayRestartMock,
   getProcessSupervisorMock,
   createCronScriptRuntimeMock,
   cronTriggerEvaluatorMock,
@@ -69,38 +67,6 @@ const {
     drained: true,
     forceCleared: false,
   })),
-  retireSessionMcpRuntimeMock: vi.fn(async () => true),
-  requestSafeGatewayRestartMock: vi.fn(() => ({
-    ok: true,
-    status: "scheduled",
-    preflight: {
-      safe: true,
-      counts: {
-        queueSize: 0,
-        pendingReplies: 0,
-        embeddedRuns: 0,
-        cronRuns: 0,
-        backgroundExecSessions: 0,
-        rootRequests: 0,
-        agentRuns: 0,
-        acpRuns: 0,
-        mediaRuns: 0,
-        totalActive: 0,
-      },
-      blockers: [],
-      summary: "safe to restart now",
-    },
-    restart: {
-      ok: true,
-      pid: 123,
-      signal: "SIGUSR2",
-      delayMs: 0,
-      reason: "cron.isolated_agent_setup_timeout",
-      mode: "emit",
-      coalesced: false,
-      cooldownMsApplied: 0,
-    },
-  })),
   getProcessSupervisorMock: vi.fn(() => ({
     spawn: vi.fn(),
     cancelScope: vi.fn(),
@@ -122,11 +88,6 @@ vi.mock("../infra/system-events.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../infra/restart-coordinator.js", async (original) => ({
-  ...(await original<typeof import("../infra/restart-coordinator.js")>()),
-  scheduleSafeGatewayRestart: requestSafeGatewayRestartMock,
-}));
-
 vi.mock("../config/config.js", async (original) => ({
   ...(await original<typeof import("../config/config.js")>()),
   getRuntimeConfig: () => loadConfigMock(),
@@ -135,6 +96,13 @@ vi.mock("../config/config.js", async (original) => ({
 vi.mock("../config/io.js", async (original) => ({
   ...(await original<typeof import("../config/io.js")>()),
   getRuntimeConfig: () => loadConfigMock(),
+}));
+
+vi.mock("../infra/restart-coordinator.js", async (original) => ({
+  ...(await original<typeof import("../infra/restart-coordinator.js")>()),
+  scheduleSafeGatewayRestart: () => {
+    throw new Error("Cron must back off without restarting the Gateway");
+  },
 }));
 
 // mock-isolation: Webhook effects use the fixture transport and never open real network requests.
@@ -169,11 +137,6 @@ vi.mock("../agents/embedded-agent.js", () => ({
   abortAndDrainEmbeddedAgentRun: abortAndDrainEmbeddedAgentRunMock,
 }));
 
-// mock-isolation: MCP retirement must not touch process-global plugin sessions.
-vi.mock("../agents/agent-bundle-mcp-tools.js", () => ({
-  retireSessionMcpRuntime: retireSessionMcpRuntimeMock,
-}));
-
 // mock-isolation: Deletion authority is fixture-controlled, independent of the process-global registry.
 vi.mock("../agents/agent-lifecycle-registry.js", () => ({
   AgentDeletionAuthorityRollbackError: class extends AggregateError {},
@@ -194,28 +157,6 @@ vi.mock("../cron/trigger-script.js", () => ({
 import { buildGatewayCronService as buildGatewayCronServiceRuntime } from "./server-cron.js";
 import { runExit } from "./server-cron.process.test-support.js";
 
-function buildGatewayCronService(
-  params: Omit<Parameters<typeof buildGatewayCronServiceRuntime>[0], "storePath">,
-) {
-  const legacyStore = (params.cfg.cron as { store?: unknown } | undefined)?.store;
-  const env =
-    typeof legacyStore === "string"
-      ? {
-          ...process.env,
-          OPENCLAW_SKIP_CRON: "0",
-          OPENCLAW_STATE_DIR: path.dirname(legacyStore),
-        }
-      : (params.env ?? process.env);
-  return buildGatewayCronServiceRuntime({
-    ...params,
-    env,
-    storePath: resolveSelectedCronJobsStorePath(
-      typeof legacyStore === "string" ? legacyStore : undefined,
-      env,
-    ),
-  });
-}
-
 export function createCronConfig(name: string): OpenClawConfig {
   const tmpDir = path.join(os.tmpdir(), `${name}-${Date.now()}`);
   return {
@@ -226,23 +167,29 @@ export function createCronConfig(name: string): OpenClawConfig {
 }
 
 type CronServiceOverrides = Partial<
-  Omit<Parameters<typeof buildGatewayCronService>[0], "cfg" | "deps">
+  Omit<Parameters<typeof buildGatewayCronServiceRuntime>[0], "cfg" | "deps" | "storePath">
 >;
 
-function createCronService(cfg: OpenClawConfig, overrides: CronServiceOverrides = {}) {
-  return buildGatewayCronService({
+export function loadCronService(cfg: OpenClawConfig, overrides: CronServiceOverrides = {}) {
+  loadConfigMock.mockReturnValue(cfg);
+  const legacyStore = (cfg.cron as { store?: unknown } | undefined)?.store;
+  const env =
+    typeof legacyStore === "string"
+      ? { ...process.env, OPENCLAW_SKIP_CRON: "0", OPENCLAW_STATE_DIR: path.dirname(legacyStore) }
+      : (overrides.env ?? process.env);
+  return buildGatewayCronServiceRuntime({
     cfg,
     // SAFETY: agent and delivery dependencies are replaced by the suite module mocks.
     deps: {} as CliDeps,
     broadcast: () => {},
     ...overrides,
     scheduler: overrides.scheduler ?? createTestGatewayScheduler(),
+    env,
+    storePath: resolveSelectedCronJobsStorePath(
+      typeof legacyStore === "string" ? legacyStore : undefined,
+      env,
+    ),
   });
-}
-
-export function loadCronService(cfg: OpenClawConfig, overrides: CronServiceOverrides = {}) {
-  loadConfigMock.mockReturnValue(cfg);
-  return createCronService(cfg, overrides);
 }
 
 type CronJobOverrides = Partial<Omit<CronJobCreate, "name" | "payload">>;
@@ -264,7 +211,7 @@ function addCronJob(
   });
 }
 
-type CronServiceFixture = ReturnType<typeof createCronService>;
+type CronServiceFixture = ReturnType<typeof loadCronService>;
 
 export function addSystemEventJob(
   service: CronServiceFixture,
@@ -332,8 +279,6 @@ export function resetGatewayCronMocks() {
   runCronChangedMock.mockClear();
   getGlobalHookRunnerMock.mockClear();
   abortAndDrainEmbeddedAgentRunMock.mockClear();
-  retireSessionMcpRuntimeMock.mockClear();
-  requestSafeGatewayRestartMock.mockClear();
   getProcessSupervisorMock.mockReset();
   getProcessSupervisorMock.mockReturnValue({
     spawn: vi.fn(),
