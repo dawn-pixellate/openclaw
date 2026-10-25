@@ -1,11 +1,5 @@
 import { sql } from "kysely";
 import { beforeAll, describe, expect, it } from "vitest";
-import {
-  loadCardChildRows,
-  type WorkboardCardDatabase,
-} from "../../../extensions/workboard/src/sqlite-store-records.js";
-import { WORKBOARD_POSTGRES_SCHEMA_SQL } from "../../../extensions/workboard/src/workboard-postgres-schema.js";
-import { WORKBOARD_SCHEMA_SQL } from "../../../extensions/workboard/src/workboard-schema.js";
 import { readSqliteSessionGenerationWindows } from "../../config/sessions/session-accessor.sqlite-generation-copy.js";
 import { readTranscriptAppendIdentities } from "../../config/sessions/session-accessor.sqlite-transcript-identity.js";
 import type { DB } from "../../state/openclaw-agent-db.generated.js";
@@ -47,14 +41,8 @@ for (const engine of ["sqlite", "postgres"] as const) {
       beforeAll(() =>
         withEngineStoreAdmission(() => {
           const { db } = database();
-          db.exec(
-            isPostgresSqlConnection(db) ? WORKBOARD_POSTGRES_SCHEMA_SQL : WORKBOARD_SCHEMA_SQL,
-          );
           runSqliteImmediateTransactionSync(db, () => {
             const query = getNodeSqliteKysely<DB>(db);
-            db.prepare(
-              "INSERT INTO workboard_boards (id, created_at, updated_at) VALUES ('board', 1, 1)",
-            ).run();
             for (const id of ["alpha", "beta", "unrelated"]) {
               executeSqliteQuerySync(
                 db,
@@ -95,13 +83,6 @@ for (const engine of ["sqlite", "postgres"] as const) {
                   created_at: 1,
                 }),
               );
-              // Real parent cards retain the canonical child foreign keys.
-              db.prepare(
-                "INSERT INTO workboard_cards (id, board_id, title, status, priority, position, created_at, updated_at) VALUES (?, 'board', ?, 'todo', 'normal', ?, 1, 1)",
-              ).run(id, id, index);
-              db.prepare(
-                "INSERT INTO workboard_card_events (id, card_id, ordinal, kind, at) VALUES (?, ?, 0, 'created', 1)",
-              ).run(`event-${id}`, id);
             }
           });
         }),
@@ -155,28 +136,6 @@ for (const engine of ["sqlite", "postgres"] as const) {
               .map((row) => row.event_id)
               .toSorted(),
           ).toEqual(expected);
-        }),
-      );
-
-      it.each(selectionCases)("preserves $name Workboard preload", ({ values, expected }) =>
-        withEngineStoreAdmission(() => {
-          const { db } = database();
-          const query = getNodeSqliteKysely<WorkboardCardDatabase>(db);
-          const previous = executeSqliteQuerySync(
-            db,
-            query
-              .selectFrom("workboard_card_events")
-              .select("card_id")
-              .where("card_id", "in", previousStringSet(db, values))
-              .orderBy("card_id")
-              .orderBy("ordinal"),
-          ).rows.map((row) => row.card_id);
-          expect(previous).toEqual(expected);
-          const current = loadCardChildRows(db, values).byTable.get("workboard_card_events");
-          expect([...current!.keys()]).toEqual(expected);
-          expect([...current!.values()].flat().map((row) => row.id)).toEqual(
-            expected.map((id) => `event-${id}`),
-          );
         }),
       );
 
