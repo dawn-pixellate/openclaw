@@ -170,7 +170,12 @@ describe("repairProviderWrappedModelOverride", () => {
     model: "anthropic/claude-haiku-4.5",
     contextTokens: 200_000,
   };
-  const defaultSelection = { defaultProvider: "openai", defaultModel: "gpt-5.4" };
+  const unknownRoute = () => false;
+  const defaultSelection = {
+    defaultProvider: "openai",
+    defaultModel: "gpt-5.4",
+    isKnownRoute: unknownRoute,
+  };
 
   it("rejects provider-wrapped repair for locked sessions without mutating them", () => {
     const entry = wrappedEntry({ ...runtime, modelSelectionLocked: true });
@@ -203,11 +208,30 @@ describe("repairProviderWrappedModelOverride", () => {
       entry,
       defaultProvider: "openrouter",
       defaultModel: "anthropic/claude-haiku-4.5",
+      isKnownRoute: unknownRoute,
     });
 
     expect(result.updated).toBe(true);
     expectCleared(entry, "providerOverride", "modelOverride", "modelOverrideSource");
     expect((entry.updatedAt ?? 0) > before).toBe(true);
+  });
+
+  it.each([
+    ["the wrapped default", {}, { defaultProvider: "openrouter" }],
+    ["aligned runtime fields", runtime, { defaultProvider: "openai" }],
+  ])("keeps a cataloged direct route that resembles %s", (_label, fields, defaults) => {
+    const entry = wrappedEntry(fields);
+    const unchanged = { ...entry };
+
+    const result = repairProviderWrappedModelOverride({
+      entry,
+      ...defaults,
+      defaultModel: "anthropic/claude-haiku-4.5",
+      isKnownRoute: (ref) => ref.provider === "anthropic" && ref.model === "claude-haiku-4.5",
+    });
+
+    expect(result.updated).toBe(false);
+    expect(entry).toEqual(unchanged);
   });
 });
 

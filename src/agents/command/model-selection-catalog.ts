@@ -46,13 +46,15 @@ function resolveDeferredSelection(params: {
   if (!provider || !model || provider.includes("/") || model.includes("/")) {
     return undefined;
   }
-  // Canonical repair can replace the route that justified deferral.
+  // Canonical repair can replace the route that justified deferral. A deferred run has no
+  // catalog to prove the stored route, so any repair candidate loads the full catalog instead.
   if (
     !isModelSelectionLocked(entry) &&
     repairProviderWrappedModelOverride({
       entry: { ...entry },
       defaultProvider: params.defaultProvider,
       defaultModel: params.defaultModel,
+      isKnownRoute: () => false,
     }).updated
   ) {
     return undefined;
