@@ -233,9 +233,9 @@ function ConfigBody(props: {
   );
 }
 
-export type ConfigPageProps = { pageId: ConfigPageId; routeData: ConfigRouteData | null };
+type ConfigPageProps = { pageId: ConfigPageId; routeData: ConfigRouteData | null };
 
-export function ConfigPage(props: ConfigPageProps) {
+function ConfigPage(props: ConfigPageProps) {
   let host!: HTMLElement;
   const context = useApplication();
   const state = createConfigPage(

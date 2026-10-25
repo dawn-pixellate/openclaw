@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 273532,
-  "reason": "Route readiness: original-base timing measured Settings readiness -15.8% and task CPU -8.3%; production patch is unchanged after merging main. Refreshed asset comparison is 273107 to 273532 B startup gzip (+425 B), with seven JS requests and one CSS request unchanged. Set the baseline to the measured head.",
+  "startupJsGzipBytes": 273614,
+  "reason": "Route readiness: original-base timing measured Settings readiness -15.8% and task CPU -8.3%; rendering behavior is unchanged by main integration and private-export cleanup. Final asset comparison is 273107 to 273614 B startup gzip (+507 B), with seven JS requests and one CSS request unchanged. Set the baseline to the measured head.",
   "updatedAt": "2026-10-25"
 }
