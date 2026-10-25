@@ -222,29 +222,6 @@ it.each(["replace", "remove", "dispose"] as const)(
   },
 );
 
-it("retains failed refresh work and patches only committed changed keys", async () => {
-  readFacts.mockResolvedValueOnce(snapshot(target.identity, ["alice"]));
-  using projection = membershipProjection([target]);
-  await projection.prepare();
-  readFacts.mockRejectedValueOnce(new Error("reader unavailable"));
-  projection.invalidate({ storePath: target.filename, sessionKey, factsInvalidated: true });
-  await expect(projection.prepare()).rejects.toThrow("reader unavailable");
-  expect(projection.ready(target.storePath, sessionKey)).toBe(false);
-  expect(projection.membership(target.storePath, sessionKey)).toEqual([]);
-  readFacts.mockResolvedValueOnce({
-    kind: "session-membership-facts",
-    identity: target.identity,
-    facts: [],
-  });
-  await projection.prepare();
-  expect(readFacts).toHaveBeenLastCalledWith(
-    expect.objectContaining({ sessionKeys: [sessionKey] }),
-  );
-  expect(projection.membership(target.storePath, sessionKey)).toEqual([]);
-  expect([...projection.groupTargets()]).toEqual([]);
-  expect(projection.ready(target.storePath, sessionKey)).toBe(true);
-});
-
 it("retires membership when a new file reuses a previous database inode", async () => {
   readFacts
     .mockResolvedValueOnce({ ...snapshot(target.identity, ["alice"]), birthtime: "old" })
@@ -364,9 +341,19 @@ it.each(["key", "store"] as const)(
         scope === "key" ? ["carol"] : [],
       );
     }
-    readFacts.mockResolvedValueOnce(snapshot(target.identity, ["bob"]));
+    const fresh = snapshot(target.identity, ["bob"]);
+    if (scope === "key") {
+      fresh.facts = [];
+    }
+    readFacts.mockResolvedValueOnce(fresh);
     await projection.prepare();
-    expect(projection.membership(alias.storePath, sessionKey)).toEqual(["bob"]);
+    expect(readFacts).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sessionKeys: scope === "key" ? [sessionKey] : undefined }),
+    );
+    expect(projection.membership(alias.storePath, sessionKey)).toEqual(
+      scope === "key" ? [] : ["bob"],
+    );
     expect(projection.ready(alias.storePath, sessionKey)).toBe(true);
+    expect([...projection.groupTargets().keys()]).toEqual(scope === "key" ? ["other"] : ["work"]);
   },
 );

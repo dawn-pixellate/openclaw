@@ -1,7 +1,6 @@
 import "./server-startup-module-mocks.test-support.js";
 import assert from "node:assert/strict";
 import { afterEach, expect, it, vi } from "vitest";
-import { awaitGateBeforeSettlement, withinTest } from "../../test/helpers/promise.js";
 import { createOAuthManager } from "../agents/auth-profiles/oauth-manager.js";
 import { mockOAuthProviderOperations } from "../agents/auth-profiles/oauth-native-provider.test-support.js";
 import { loadPersistedAuthProfileStore } from "../agents/auth-profiles/persisted.js";
@@ -21,13 +20,12 @@ import {
 } from "../sessions/session-state-events.js";
 import { upsertSessionUpstreamLink } from "../sessions/session-upstream-links.js";
 import { readSessionUpstreamLinkInDatabase } from "../sessions/session-upstream-links.kernel.js";
-import { createDeferredCore } from "../shared/deferred.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import * as stateWorker from "../state/openclaw-state-worker-store.js";
 import { connectUserModelAccount, readUserModelAuthProfile } from "../state/user-model-accounts.js";
 import "../test-utils/prepare-compiled-subprocesses.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
-import { createGatewayMetadataCloseFixture } from "./server-close.metadata.test-support.js";
+import { createGatewayCloseRace } from "./server-close.race.test-support.js";
 import { runGatewayStartupObservers } from "./server-startup-observers.js";
 import {
   withLocalWorkspaceStore,
@@ -49,42 +47,36 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 async function prepareClosingGateway(signal: AbortSignal) {
-  const name = "gateway-catalog-write-close";
-  const fixture = await createGatewayMetadataCloseFixture(name);
-  const release = createDeferredCore();
+  const race = await createGatewayCloseRace("gateway-catalog-write-close", signal);
+  const { fixture, kernel } = race;
   const pending: Promise<unknown>[] = [];
   const startupModuleRestorers: Array<() => void> = [];
   cleanups.push(async () => {
-    release.resolve();
     try {
-      await Promise.allSettled(pending);
-      vi.restoreAllMocks();
-      await fixture.cleanup();
+      await race.dispose();
     } finally {
       for (const restore of startupModuleRestorers.toReversed()) {
         restore();
       }
     }
   });
-  const port = await fixture.reservePort();
-  const server = await fixture.start(port);
-  const kernel = fixture.kernels.get(port);
-  assert(kernel);
+  race.onCleanup(async () => {
+    await Promise.allSettled(pending);
+    vi.restoreAllMocks();
+  });
   const options = { env: fixture.state.env };
+  const [port] = fixture.kernels.keys();
+  assert(port !== undefined);
   const shared = openOpenClawStateDatabase(options).db;
-  const accepted = createDeferredCore();
   const track = <T>(task: Promise<T>) => {
     pending.push(task);
     return task;
   };
   return {
-    fixture,
+    ...race,
     port,
-    kernel,
     options,
     shared,
-    accepted,
-    release,
     startupModuleRestorers,
     track,
     trackConnection<T>(run: () => Promise<T>) {
@@ -94,28 +86,21 @@ async function prepareClosingGateway(signal: AbortSignal) {
     holdCommand(type: string) {
       probe.command(stateWorker, async (command, executeOptions, scope) => {
         if (command.type === type) {
-          accepted.resolve();
-          await release.promise;
+          await race.block();
         }
         return scope.execute(command, executeOptions);
       });
     },
-    async admitted(task: Promise<unknown>, message: string) {
-      await withinTest(awaitGateBeforeSettlement(accepted.promise, task, message), signal);
-    },
+    admitted: race.waitForEntry,
     async beginClose(abortSignal = kernel.connectionWork.signal) {
-      const parentClosed = createDeferredCore();
-      abortSignal.addEventListener("abort", () => parentClosed.resolve(), { once: true });
-      const closing = track(server.close({ reason: name }));
-      await withinTest(parentClosed.promise, signal);
-      return { closing };
+      await race.close(abortSignal, undefined, { reason: "gateway-catalog-write-close" });
     },
   };
 }
 
 it("persists accepted catalog writes before closing the state writer", async ({ signal }) => {
   const context = await prepareClosingGateway(signal);
-  const { fixture, kernel, shared, release } = context;
+  const { fixture, kernel, shared } = context;
   const lifecycle = createGatewayUpdateLifecycle(kernel.scheduler);
   kernel.runtimeState.stopGatewayUpdateCheck = lifecycle.stop;
   const bundle = {
@@ -142,18 +127,16 @@ it("persists accepted catalog writes before closing the state writer", async ({ 
     ),
   );
   await context.admitted(refreshing, "Catalog refresh settled before worker write");
-  const { closing } = await context.beginClose(kernel.scheduler.signal);
+  await context.beginClose(kernel.scheduler.signal);
   expect(lifecycle.signal.aborted).toBe(true);
   const lateWork = vi.fn(async () => undefined);
   await expect(lifecycle.run(lateWork)).rejects.toThrow();
   expect(lateWork).not.toHaveBeenCalled();
   expect(shared.isOpen).toBe(true);
-  release.resolve();
-  await expect(refreshing).resolves.toMatchObject({
+  await expect(context.finish(refreshing)).resolves.toMatchObject({
     status: "updated",
     generatedAt: bundle.generatedAt,
   });
-  await closing;
   expect(shared.isOpen).toBe(false);
   expect(
     JSON.parse(readRemoteModelCatalog({ env: fixture.state.env })?.bundle_json ?? "null"),
@@ -162,7 +145,7 @@ it("persists accepted catalog writes before closing the state writer", async ({ 
 
 it("joins notice cleanup and upstream deletion after close prelude", async ({ signal }) => {
   const context = await prepareClosingGateway(signal);
-  const { fixture, port, kernel, options, shared, release, sql } = context;
+  const { fixture, port, kernel, options, shared, sql } = context;
   const watcher = "agent:main:subagent:startup-notice-watcher";
   const target = "agent:main:subagent:startup-notice-target";
   await upsertSessionEntryCore(
@@ -249,13 +232,11 @@ it("joins notice cleanup and upstream deletion after close prelude", async ({ si
     await handleSessionStateSessionDeleted(deletedTarget, "main", options);
     cleanupSettled = true;
   });
-  const { closing } = await context.beginClose();
+  await context.beginClose();
   expect(kernel.scheduler.signal.aborted).toBe(true);
   expect(shared.isOpen).toBe(true);
   expect(cleanupSettled).toBe(false);
-  release.resolve();
-  await Promise.all([sweeping, cleaning]);
-  await closing;
+  await context.finish(Promise.all([sweeping, cleaning]));
   expect(shared.isOpen).toBe(false);
   expect(
     sql(
@@ -275,7 +256,7 @@ it("joins workspace writes and releases leases after close prelude", async ({ si
   const worktreeId = "local-workspace-close";
   const expectedProjection = { worktree_id: worktreeId, revision: 0 };
   const context = await prepareClosingGateway(signal);
-  const { fixture, kernel, options, shared, release, sql } = context;
+  const { fixture, kernel, options, shared, sql } = context;
   context.holdCommand("localWorkspace.mutate");
   const writing = context.trackConnection(() =>
     withLocalWorkspaceStore({ worktreeId, ...options }, async (store) => {
@@ -284,7 +265,7 @@ it("joins workspace writes and releases leases after close prelude", async ({ si
     }),
   );
   await context.admitted(writing, "Workspace write settled before admission");
-  const { closing } = await context.beginClose();
+  await context.beginClose();
   expect(kernel.scheduler.signal.aborted).toBe(true);
   const lateWork = vi.fn(async () => undefined);
   await expect(
@@ -292,9 +273,7 @@ it("joins workspace writes and releases leases after close prelude", async ({ si
   ).rejects.toThrow("run-end admission is closed");
   expect(lateWork).not.toHaveBeenCalled();
   expect(shared.isOpen).toBe(true);
-  release.resolve();
-  await expect(writing).resolves.toMatchObject(expectedProjection);
-  await closing;
+  await expect(context.finish(writing)).resolves.toMatchObject(expectedProjection);
   expect(shared.isOpen).toBe(false);
   assert(custody);
   expect(custody.assertCurrent).toThrow();
@@ -313,7 +292,7 @@ it.for(["personal", "shared-peer"] as const)(
   "joins %s OAuth settlement after the close prelude cancels its observer",
   async (kind, { signal }) => {
     const context = await prepareClosingGateway(signal);
-    const { fixture, kernel, shared, accepted, release } = context;
+    const { fixture, kernel, shared } = context;
     const owner = ensureProfileForEmail("close-personal@example.test");
     const credential: OAuthCredential = {
       type: "oauth",
@@ -344,8 +323,7 @@ it.for(["personal", "shared-peer"] as const)(
     };
     mockOAuthProviderOperations({
       refreshCredential: async () => {
-        accepted.resolve();
-        await release.promise;
+        await context.block();
         return replacement;
       },
     });
@@ -361,11 +339,10 @@ it.for(["personal", "shared-peer"] as const)(
       )
       .catch((error: unknown) => error);
     await context.admitted(resolving, "Refresh did not acquire its durable claim");
-    const { closing } = await context.beginClose();
+    await context.beginClose();
     expect(await resolving).toBeInstanceOf(Error);
     expect(shared.isOpen).toBe(true);
-    release.resolve();
-    await closing;
+    await context.finish();
     expect(shared.isOpen).toBe(false);
     if (kind === "personal") {
       expect(readUserModelAuthProfile(profileId)?.credential).toEqual(replacement);
