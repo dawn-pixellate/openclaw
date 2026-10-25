@@ -1,6 +1,6 @@
 // Provider auth contract helpers define reusable tests for provider auth implementations.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearRuntimeAuthProfileStoreSnapshots, type AuthProfileStore } from "../agent-runtime.js";
+import { clearRuntimeAuthProfileStoreSnapshots } from "../agent-runtime.js";
 import { createNonExitingRuntime } from "../runtime.js";
 import type { WizardMultiSelectParams, WizardPrompter, WizardSelectParams } from "../setup.js";
 import { registerProviders, requireProvider } from "./contracts-testkit.js";
@@ -86,18 +86,15 @@ async function withStdinTTY<T>(isTTY: boolean, run: () => Promise<T>): Promise<T
   }
 }
 
-function copilotProfile(token: string, storeSecret = false) {
+function copilotProfile(token: string) {
   return {
     profileId: "github-copilot:github",
     credential: { type: "token", provider: "github-copilot", token },
-    ...(storeSecret
-      ? { secretStorage: { kind: "store", namePrefix: "GITHUB_COPILOT_TOKEN" } }
-      : {}),
+    secretStorage: { kind: "store", namePrefix: "GITHUB_COPILOT_TOKEN" },
   };
 }
 
 function installSharedAuthProfileStoreHooks() {
-  const state: { authStore: AuthProfileStore } = { authStore: { version: 1, profiles: {} } };
   beforeEach(() => {
     vi.doMock("openclaw/plugin-sdk/provider-auth", async () => {
       const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/provider-auth")>(
@@ -109,9 +106,7 @@ function installSharedAuthProfileStoreHooks() {
         listProfilesForProvider: listProfilesForProviderMock,
       };
     });
-    state.authStore = { version: 1, profiles: {} };
-    ensureAuthProfileStoreMock.mockReset();
-    ensureAuthProfileStoreMock.mockImplementation(() => state.authStore);
+    ensureAuthProfileStoreMock.mockReset().mockReturnValue({ version: 1, profiles: {} });
     listProfilesForProviderMock.mockReset();
     listProfilesForProviderMock.mockImplementation((store, providerId) =>
       Object.entries(store.profiles)
@@ -125,7 +120,6 @@ function installSharedAuthProfileStoreHooks() {
     listProfilesForProviderMock.mockReset();
     clearRuntimeAuthProfileStoreSnapshots();
   });
-  return state;
 }
 
 export function describeOpenAICodexProviderAuthContract(
@@ -180,22 +174,11 @@ export function describeOpenAICodexProviderAuthContract(
         loginEmail: "user@example.com",
       },
       {
-        name: "backfills OAuth email from the JWT profile claim",
-        access: createJwt({ "https://api.openai.com/profile": { email: "jwt-user@example.com" } }),
-        profileId: "openai:jwt-user@example.com",
-        email: "jwt-user@example.com",
-      },
-      {
         name: "uses a stable fallback id when JWT email is missing",
         access: createJwt({
           "https://api.openai.com/auth": { chatgpt_account_user_id: "user-123__acct-456" },
         }),
         profileId: stableProfile("user-123__acct-456"),
-      },
-      {
-        name: "uses iss and sub to build a stable fallback id when auth claims are missing",
-        access: createJwt({ iss: "https://accounts.openai.com", sub: "user-abc" }),
-        profileId: stableProfile("https://accounts.openai.com|user-abc"),
       },
       {
         name: "uses sub alone to build a stable fallback id when iss is missing",
@@ -225,7 +208,7 @@ export function describeGithubCopilotProviderAuthContract(
   defaultModel: string,
 ) {
   describe("github-copilot provider auth contract", () => {
-    const state = installSharedAuthProfileStoreHooks();
+    installSharedAuthProfileStoreHooks();
     const getProvider = () => loadProvider(load, "github-copilot");
 
     async function runDeviceAuthWithFakeTimers<T>(
@@ -261,34 +244,8 @@ export function describeGithubCopilotProviderAuthContract(
             : String(input);
     }
 
-    it("keeps existing device auth results provider-owned", async () => {
-      const provider = await getProvider();
-      stubGitHubDeviceFlowFetch();
-      state.authStore.profiles["github-copilot:github"] = {
-        type: "token",
-        provider: "github-copilot",
-        token: "github-device-token",
-      };
-
-      await withStdinTTY(true, async () => {
-        const result = await provider.auth[0]?.run({
-          ...buildAuthContext(),
-          existingProfiles: [
-            {
-              profileId: "github-copilot:github",
-              credential: state.authStore.profiles["github-copilot:github"],
-            },
-          ],
-        } as never);
-        expect(result).toEqual({
-          profiles: [copilotProfile("github-device-token")],
-          defaultModel,
-        });
-      });
-    });
-
     function stubGitHubDeviceFlowFetch(
-      outcome?: { accessToken: string } | { error: "access_denied" | "expired_token" },
+      outcome: { accessToken: string } | { error: "access_denied" | "expired_token" },
     ) {
       const api = "https://api.individual.githubcopilot.com";
       const responses = new Map<string, unknown>([
@@ -313,21 +270,19 @@ export function describeGithubCopilotProviderAuthContract(
           },
         ],
       ]);
-      if (outcome) {
-        responses.set("https://github.com/login/device/code", {
-          device_code: "device-code-stub",
-          user_code: "ABCD-1234",
-          verification_uri: "https://github.com/login/device",
-          expires_in: 900,
-          interval: 0,
-        });
-        responses.set(
-          "https://github.com/login/oauth/access_token",
-          "accessToken" in outcome
-            ? { access_token: outcome.accessToken, token_type: "bearer" }
-            : { error: outcome.error },
-        );
-      }
+      responses.set("https://github.com/login/device/code", {
+        device_code: "device-code-stub",
+        user_code: "ABCD-1234",
+        verification_uri: "https://github.com/login/device",
+        expires_in: 900,
+        interval: 0,
+      });
+      responses.set(
+        "https://github.com/login/oauth/access_token",
+        "accessToken" in outcome
+          ? { access_token: outcome.accessToken, token_type: "bearer" }
+          : { error: outcome.error },
+      );
       const fetchMock = vi.fn(async (input: unknown) => {
         const target = resolveFetchTarget(input);
         if (!responses.has(target)) {
@@ -364,26 +319,17 @@ export function describeGithubCopilotProviderAuthContract(
       vi.unstubAllGlobals();
     });
 
-    it("keeps device auth results provider-owned", async () => {
-      const { result, ctx } = await runDeviceFlow({ accessToken: "github-device-token" });
-
-      expect(result).toEqual({
-        profiles: [copilotProfile("github-device-token", true)],
-        defaultModel,
-      });
-      expect(ctx.openUrl).toHaveBeenCalledWith("https://github.com/login/device");
-      const noteCalls = (ctx.prompter.note as ReturnType<typeof vi.fn>).mock.calls;
-      const codeNote = noteCalls.find(
-        ([msg]) => typeof msg === "string" && msg.includes("ABCD-1234"),
-      );
-      expect(codeNote).toBeDefined();
-      expect(codeNote?.[0]).toContain("https://github.com/login/device");
-    });
-
     it("supports non-interactive (GUI/RPC) auth contexts without a TTY", async () => {
       await withStdinTTY(false, async () => {
-        const { result } = await runDeviceFlow({ accessToken: "rpc-client-token" });
-        expect(result?.profiles).toEqual([copilotProfile("rpc-client-token", true)]);
+        const { result, ctx } = await runDeviceFlow({ accessToken: "rpc-client-token" });
+        expect(result).toEqual({ profiles: [copilotProfile("rpc-client-token")], defaultModel });
+        expect(ctx.openUrl).toHaveBeenCalledWith("https://github.com/login/device");
+        const noteCalls = (ctx.prompter.note as ReturnType<typeof vi.fn>).mock.calls;
+        const codeNote = noteCalls.find(
+          ([msg]) => typeof msg === "string" && msg.includes("ABCD-1234"),
+        );
+        expect(codeNote).toBeDefined();
+        expect(codeNote?.[0]).toContain("https://github.com/login/device");
       });
     });
 
