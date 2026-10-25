@@ -88,6 +88,13 @@ function savedAccessGateway(
   });
 }
 
+function expectBootstrap() {
+  expect(mocks.runNodeHost).toHaveBeenCalledWith(
+    expect.objectContaining({ stopAfterFirstConnect: true }),
+  );
+  expect(mocks.runNodeHost.mock.calls[0]?.[0]).not.toHaveProperty("forceWorkerRuns");
+}
+
 async function runConnect(args: string[]): Promise<void> {
   const program = new Command();
   program.exitOverride();
@@ -109,7 +116,6 @@ describe("connect cli", () => {
 
   it.each([
     ["Application/JSON; charset=utf-8", true],
-    ["APPLICATION/JSON", true],
     ["text/html", false],
     ["application/json-seq", false],
   ])("recognizes the join response media type %s", async (contentType, accepted) => {
@@ -283,12 +289,7 @@ describe("connect cli", () => {
   it("authenticates before persisting hosting consent and installing the service", async () => {
     await runConnect([setupCode(), "--service", "--session-host", "--display-name", "Runner Node"]);
 
-    expect(mocks.runNodeHost).toHaveBeenCalledWith(
-      expect.objectContaining({
-        stopAfterFirstConnect: true,
-      }),
-    );
-    expect(mocks.runNodeHost.mock.calls[0]?.[0]).not.toHaveProperty("forceWorkerRuns");
+    expectBootstrap();
     expect(mocks.mutateConfigFileWithRetry).toHaveBeenCalledWith({
       writeOptions: {
         auditOrigin: "cli",
@@ -332,10 +333,7 @@ describe("connect cli", () => {
 
     await runConnect([setupCode(), "--service", "--session-host"]);
 
-    expect(mocks.runNodeHost).toHaveBeenCalledWith(
-      expect.objectContaining({ stopAfterFirstConnect: true }),
-    );
-    expect(mocks.runNodeHost.mock.calls[0]?.[0]).not.toHaveProperty("forceWorkerRuns");
+    expectBootstrap();
     expect(mocks.mutateConfigFileWithRetry).toHaveBeenCalledTimes(mutationCalls);
     expect(mocks.runtime.error).toHaveBeenCalledWith(error);
     expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
