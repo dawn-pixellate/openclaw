@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import {
@@ -123,9 +124,9 @@ describe("transcript turn physical identity", () => {
       });
     }
     expect(loadSessionEntryReadOnly(base)).toEqual(originalBase);
-    expect(loadTranscriptEventsSync(run).filter((event) => event.type === "message")).toHaveLength(
-      2,
-    );
+    expect(
+      loadTranscriptEventsSync(run).filter((event) => isRecord(event) && event.type === "message"),
+    ).toHaveLength(2);
   });
 
   it("reuses a selected target until an owning registry write reassigns it", async () => {

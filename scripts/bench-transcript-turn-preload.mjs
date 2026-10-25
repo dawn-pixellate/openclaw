@@ -30,6 +30,7 @@ if (output) {
       },
     });
   }
+  // oxlint-disable-next-line typescript/unbound-method -- The proxy forwards the original receiver through Reflect.apply.
   StatementSync.prototype.iterate = new Proxy(StatementSync.prototype.iterate, {
     apply(target, receiver, args) {
       const iterator = Reflect.apply(target, receiver, args);
@@ -48,6 +49,7 @@ if (output) {
       return iterator;
     },
   });
+  // oxlint-disable-next-line typescript/unbound-method -- The proxy forwards the original receiver through Reflect.apply.
   DatabaseSync.prototype.exec = new Proxy(DatabaseSync.prototype.exec, {
     apply(target, receiver, args) {
       return observeSqlite(args[0], () => Reflect.apply(target, receiver, args));
