@@ -1,4 +1,5 @@
 // Controlled transport diagnostics; real Gateway20/C64 remain the acceptance flows.
+import { once } from "node:events";
 import { writeFileSync } from "node:fs";
 import { loadavg } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -63,6 +64,7 @@ if (!isMainThread) {
       "idle-ms": { type: "string", default: "10000" },
       "duration-ms": { type: "string", default: "5000" },
       output: { type: "string" },
+      "external-rss": { type: "boolean", default: false },
     },
   });
   const workers = Number(values.workers);
@@ -204,6 +206,11 @@ if (!isMainThread) {
     for (let sample = 0; sample < 5; sample++) {
       rss.push(process.memoryUsage().rss);
       await delay(200);
+    }
+    if (values["external-rss"]) {
+      // Hold workers until the external sampler finishes its idle observations.
+      await once(process.stdin, "data", { signal: AbortSignal.timeout(120_000) });
+      process.stdin.pause();
     }
     const heaps = await Promise.all(
       endpoints.slice(0, workers).map((endpoint) => endpoint.request("sample")),

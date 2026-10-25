@@ -73,6 +73,9 @@ large-result cells separate. Client IDs and worker assignments accompany each
 latency series. Sample the reported PID externally with `ps -o rss=` when the
 JSON `idle` event arrives; record five observations 200 ms apart alongside the
 in-process observations. This external sampling uses no observer preload.
+Use `--external-rss` for this controller: after the five external observations,
+write a byte to its stdin to release the idle workers for teardown. This keeps
+the last external observation from racing process exit.
 
 These comparative wall/CPU runs require the campaign timing lock and load below 24. Register the exact committed workload head and cells in the PR before the
 first run. Keep PG HOME/TMPDIR/data internal, output under owned internal scratch,
