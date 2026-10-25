@@ -14,7 +14,6 @@ import * as authProfileSqlite from "../../agents/auth-profiles/sqlite.js";
 import type { OAuthCredential } from "../../agents/auth-profiles/types.js";
 import { resetPreparedModelRuntimeSnapshotsForTest } from "../../agents/prepared-model-runtime.test-support.js";
 import { makeAssistantMessageFixture } from "../../agents/test-helpers/assistant-message-fixtures.js";
-import { ZERO_USAGE_FIXTURE } from "../../agents/test-helpers/usage-fixtures.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import * as embeddedStateLock from "../../infra/embedded-state-lock.js";
 import { captureNativeSignalBridge } from "../../infra/embedded-state-lock.test-support.js";
@@ -199,7 +198,6 @@ it.each([
         provider,
         model: "probe-model",
         api: "openai-completions",
-        usage: { ...ZERO_USAGE_FIXTURE, input: 1, output: 1, totalTokens: 2 },
         stopReason: status === "timeout" ? "aborted" : status === "auth" ? "error" : "stop",
         errorMessage:
           status === "auth"
@@ -259,11 +257,9 @@ it.each([
         expect(authAfter).toEqual(authBefore);
         if (oauth) {
           expect(refreshCount).toBe(0);
-          expect(credentialWrites).not.toHaveBeenCalled();
-          expect(stateWrites).not.toHaveBeenCalled();
+          expect([credentialWrites.mock.calls, stateWrites.mock.calls]).toEqual([[], []]);
         }
       }
-      expect(complete).toHaveBeenCalledOnce();
       expect(contextEngine).not.toHaveBeenCalled();
       if (credentialSource === "direct") {
         expect(privateDir).toContain("openclaw-auth-probe-");

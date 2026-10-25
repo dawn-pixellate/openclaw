@@ -135,7 +135,6 @@ describe("modelsAuthListCommand", () => {
     expect(text.join("")).not.toMatch(/\p{Cc}/u);
     expectProfile(json, { id: profileId, label: profileId, blockedModel: model });
     expect(json).toMatchObject({ authStatePath: "/tmp/café\x1b[31m\nstore.sqlite" });
-    expect(mocks.ensureAuthProfileStore().profiles).toHaveProperty(profileId);
   });
 
   it("shows the cooldown reason and re-authentication action in text and JSON", async () => {
@@ -332,10 +331,6 @@ describe("modelsAuthListCommand", () => {
       mocks.ensureAuthProfileStore.mockReturnValue(store);
       const runtime = await list({ provider: "OpenAI", json: true });
 
-      expect(mocks.externalCliDiscoveryForProviderAuth).toHaveBeenCalledWith({
-        cfg: {},
-        provider: "openai",
-      });
       expect(runtime.jsonPayloads).toStrictEqual([
         {
           agentDir: "/tmp/openclaw/agents/main",

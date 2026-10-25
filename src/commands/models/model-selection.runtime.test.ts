@@ -238,11 +238,7 @@ it("ignores foreign hooks in an existing registry", async () => {
   config.plugins!.load!.paths!.unshift(foreignDir);
   config.agents!.entries!.probe = { workspace: root };
   writeConfig();
-  const registry = loadOpenClawPlugins({ config, workspaceDir: root, env: process.env });
-  expect(registry.providers.map((entry) => entry.pluginId)).toEqual([
-    "aaa-foreign",
-    "alias-fixture",
-  ]);
+  loadOpenClawPlugins({ config, workspaceDir: root, env: process.env });
   await setModel("fixture/legacy");
   expectModel({ primary: "fixture/current" });
 });

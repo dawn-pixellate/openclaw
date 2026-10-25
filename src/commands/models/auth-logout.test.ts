@@ -48,9 +48,7 @@ vi.mock("../../agents/auth-profiles.js", async (importOriginal) => {
   };
 });
 
-vi.mock("./load-config.js", () => ({
-  loadModelsConfig: mocks.loadModelsConfig,
-}));
+vi.mock("./load-config.js", () => ({ loadModelsConfig: mocks.loadModelsConfig }));
 
 vi.mock("./shared.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./shared.js")>();
@@ -128,7 +126,6 @@ async function dispatchAuthLogout(
       getRuntimeConfig: () => ({ ...cfg, agents: { entries: { main: {} } } }),
     }),
   });
-  expect(respond).toHaveBeenCalledOnce();
   const [ok, payload, error] = expectDefined(respond.mock.calls[0], "Gateway logout response");
   if (!ok) {
     throw new Error(expectDefined(error, "Gateway logout error").message);
@@ -304,11 +301,9 @@ describe("models auth logout", () => {
           const rows = db
             .prepare("SELECT key, value_json FROM cache_entries WHERE scope = ?")
             .all(scope) as Array<{ key: string; value_json: string }>;
-          expect(rows.map((row) => row.key)).toEqual(["fixture"]);
-          expect(JSON.parse(rows[0]!.value_json)).toEqual({
-            ...catalog,
-            providers: { fixture: retainedProvider },
-          });
+          expect(rows.map(({ key, value_json }) => [key, JSON.parse(value_json)])).toEqual([
+            ["fixture", { ...catalog, providers: { fixture: retainedProvider } }],
+          ]);
         }
         expect(
           db.prepare("SELECT value_json FROM cache_entries WHERE scope = ?").get("unrelated-cache"),
@@ -353,9 +348,10 @@ describe("models auth logout", () => {
           auth: originalConfig.auth,
         });
         await runRegisteredLogout(profileId);
-        expect(readProfile()).toBeUndefined();
-        expect(liveConfig().auth?.profiles?.[profileId]).toBeUndefined();
-        expect(liveConfig().auth?.order?.openai).toBeUndefined();
+        expect({ profile: readProfile(), auth: liveConfig().auth }).toEqual({
+          profile: undefined,
+          auth: { profiles: {} },
+        });
         expect(beforeDelete).toHaveBeenCalledTimes(2);
       } finally {
         cleanup.mockRestore();

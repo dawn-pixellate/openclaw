@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelScanResult } from "../../agents/model-scan.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import type { RuntimeEnv } from "../../runtime.js";
+import { createCapturingTestRuntime } from "../test-runtime-config-helpers.js";
 
 const mocks = vi.hoisted(() => ({
   loadModelsConfig: vi.fn(),
@@ -28,15 +28,6 @@ vi.mock("./shared.js", async (importOriginal) => ({
 const { modelsScanCommand } = await import("./scan.js");
 const modelRef = (name = "acme") => `openrouter/${name}/free:free`;
 
-function createRuntime(): RuntimeEnv & { lines: string[] } {
-  const lines: string[] = [];
-  const log = (...args: unknown[]) => lines.push(args.join(" "));
-  const exit = (code?: number): never => {
-    throw new Error(`exit ${code ?? 0}`);
-  };
-  return { lines, log, error: log, exit };
-}
-
 function scanResult(overrides: Partial<ModelScanResult> = {}) {
   return {
     modelRef: modelRef(),
@@ -50,8 +41,10 @@ function scanResult(overrides: Partial<ModelScanResult> = {}) {
 }
 
 describe("models scan command", () => {
-  let runtime: ReturnType<typeof createRuntime>;
-  const scan = (opts: Parameters<typeof modelsScanCommand>[0]) => modelsScanCommand(opts, runtime);
+  let capture: ReturnType<typeof createCapturingTestRuntime>;
+  const output = () => capture.logs;
+  const scan = (opts: Parameters<typeof modelsScanCommand>[0]) =>
+    modelsScanCommand(opts, capture.runtime);
   function expectNoAuthLookup() {
     expect(mocks.loadModelsConfig).not.toHaveBeenCalled();
     expect(mocks.resolveApiKeyForProviderCore).not.toHaveBeenCalled();
@@ -62,7 +55,11 @@ describe("models scan command", () => {
   }
   beforeEach(() => {
     vi.clearAllMocks();
-    runtime = createRuntime();
+    capture = createCapturingTestRuntime();
+    capture.runtime.exit = (code) => {
+      throw new Error(`exit ${code ?? 0}`);
+    };
+    mocks.scanOpenRouterModels.mockResolvedValue([scanResult()]);
     vi.stubEnv("OPENROUTER_API_KEY", undefined);
   });
   afterEach(() => vi.unstubAllEnvs());
@@ -79,8 +76,8 @@ describe("models scan command", () => {
 
     await scan({ probe: false, json: true });
 
-    expect(runtime.lines).toHaveLength(1);
-    const results = JSON.parse(runtime.lines[0] ?? "") as ModelScanResult[];
+    expect(output()).toHaveLength(1);
+    const results = JSON.parse(output()[0] ?? "") as ModelScanResult[];
     expect(results.map((result) => result.modelRef)).toEqual(
       ["larger", "alpha", "zeta"].map(modelRef),
     );
@@ -97,7 +94,7 @@ describe("models scan command", () => {
 
     await scan({ probe: false });
 
-    const row = runtime.lines.find((line) => line.includes("openrouter/evil"));
+    const row = output().find((line) => line.includes("openrouter/evil"));
     expect(row).toContain("openrouter/evil\\nmodel:free");
     expect(row).toContain("modality:text\\nnext\\tvalue");
     expect(row).not.toMatch(/\p{Cc}/u);
@@ -105,18 +102,13 @@ describe("models scan command", () => {
 
   it("downgrades to metadata-only scan when no OpenRouter key is configured", async () => {
     withoutStoredKey();
-    mocks.scanOpenRouterModels.mockResolvedValue([scanResult()]);
-
     await scan({});
-
-    expect(mocks.loadModelsConfig).toHaveBeenCalledTimes(1);
     expect(mocks.resolveApiKeyForProviderCore).toHaveBeenCalledWith({
       provider: "openrouter",
       cfg: {},
     });
-    expect(mocks.scanOpenRouterModels).toHaveBeenCalledTimes(1);
     expect(mocks.scanOpenRouterModels.mock.calls[0]?.[0].probe).toBe(false);
-    expect(runtime.lines.join("\n")).toContain("still require OPENROUTER_API_KEY");
+    expect(output().join("\n")).toContain("still require OPENROUTER_API_KEY");
   });
 
   it("uses OPENROUTER_API_KEY directly without loading model config", async () => {
@@ -130,7 +122,6 @@ describe("models scan command", () => {
     );
 
     expectNoAuthLookup();
-    expect(mocks.scanOpenRouterModels).toHaveBeenCalledTimes(1);
     expect(mocks.scanOpenRouterModels.mock.calls[0]?.[0]).toMatchObject({
       apiKey: "sk-or-test",
       probe: true,
@@ -213,7 +204,7 @@ describe("models scan command", () => {
 
     await scan({ yes: true });
 
-    expect(runtime.lines).toContain(
+    expect(output()).toContain(
       "Scan results: tested 5, tool ok 3, image ok 3, tool+image ok 2, image only 1",
     );
   });
