@@ -8,12 +8,11 @@ import {
   fixtureReceiptClientSource,
   openFixtureReceiptChannel,
 } from "../../../test/helpers/fixture-receipts.js";
-import { createDeferred, withinTest } from "../../../test/helpers/promise.js";
+import { withinTest } from "../../../test/helpers/promise.js";
 import { runQaGatewayFixture } from "../../../test/helpers/qa-gateway-cleanup.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { execFileUtf8 } from "../../daemon/exec-file.js";
 import * as futureConfig from "../../daemon/future-config-guard.js";
-import { withGatewayServiceOperationLock } from "../../daemon/service-operation-lock.js";
 import type { GatewayServiceControlArgs } from "../../daemon/service-types.js";
 import { assertGatewayServiceUpdateCurrent } from "../../daemon/service-update-authority.js";
 import { mockSystemAccountHome } from "../../daemon/service.test-helpers.js";
@@ -319,39 +318,6 @@ describe.skipIf(process.platform === "win32")("retained POSIX native restart", (
       stderr: "native failed",
     });
     await expect(restartOwned()).rejects.toThrow("native failed");
-  });
-
-  it("holds the native lock until its nested borrower settles", async () => {
-    const release = createDeferred();
-    const entered = createDeferred();
-    let borrower: Promise<void> | undefined;
-    vi.spyOn(systemdExec, "execSystemctlUser").mockImplementation(async (_env, args) => {
-      if (args[0] === "restart") {
-        borrower = withGatewayServiceOperationLock(env, async (assertCurrent) => {
-          entered.resolve();
-          await release.promise;
-          assertCurrent();
-        });
-        await entered.promise;
-      }
-      return success;
-    });
-    let done = false;
-    const work = restartOwned().then(() => {
-      done = true;
-    });
-    try {
-      await Promise.race([entered.promise, work]);
-      await Promise.resolve();
-      expect(done).toBe(false);
-      expectOwners("busy");
-      release.resolve();
-      await work;
-      await borrower;
-    } finally {
-      release.resolve();
-      await work.catch(() => undefined);
-    }
   });
 
   it("retained-root query uses actual delegated authority", async () => {

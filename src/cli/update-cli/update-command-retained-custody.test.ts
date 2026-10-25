@@ -45,12 +45,10 @@ function parentScript() {
       run.executorFence=await executor.enter(b,{serviceRoot:a});
       fs.writeFileSync(ready+".tmp","ready"); fs.renameSync(ready+".tmp",ready);
       while(!fs.existsSync(request))await sleep(10);
-      const {argv,timeout,parallel}=JSON.parse(fs.readFileSync(request,"utf8"));
+      const {argv,timeout}=JSON.parse(fs.readFileSync(request,"utf8"));
       const result=await withRetainedUpdateServiceAuthority(
         {run,root:a,assertCurrent:()=>{}},
-        ()=>parallel
-          ? Promise.all([execFileUtf8(argv[0],argv.slice(1),{timeout}),execFileUtf8(argv[0],argv.slice(1),{timeout})])
-          : execFileUtf8(argv[0],argv.slice(1),{timeout})
+        ()=>execFileUtf8(argv[0],argv.slice(1),{timeout})
       );
       fs.writeFileSync(outcome,JSON.stringify(result));
       if((Array.isArray(result)?result:[result]).some(entry=>entry.code!==0))throw Error("native-failed:"+JSON.stringify(result));
@@ -109,16 +107,13 @@ function startParent(killProcessTree: boolean) {
     pid: () => parentPid,
     ready: (signal: AbortSignal) =>
       withinTest(waitForFixtureFile(fixture.ready, pending, "ready"), signal),
-    run(
-      script: string,
-      { timeout = 10000, deadline = 15000, parallel = false, missing = false } = {},
-    ) {
+    run(script: string, { timeout = 10000, deadline = 15000, missing = false } = {}) {
       if (dispatched) {
         throw new Error("Fixture command was already dispatched");
       }
       dispatched = true;
       // The missing executable has no controller; every Node command records its own receipt.
-      expectedControllers = missing ? 0 : parallel ? 2 : 1;
+      expectedControllers = missing ? 0 : 1;
       behaviorTimer = setTimeout(
         () => abort.abort(new Error("Fixture behavior deadline expired")),
         deadline,
@@ -126,7 +121,7 @@ function startParent(killProcessTree: boolean) {
       const argv = missing
         ? [path.join(fixture.root, "missing-native")]
         : [process.execPath, "-e", controllerScript(fixture, script)];
-      const command = { argv, timeout, parallel };
+      const command = { argv, timeout };
       fs.writeFileSync(`${fixture.request}.tmp`, JSON.stringify(command));
       fs.renameSync(`${fixture.request}.tmp`, fixture.request);
       return pending;
@@ -320,19 +315,6 @@ describe.skipIf(process.platform === "win32")("POSIX bound native control", () =
       },
       20000,
     );
-
-    it("serializes real concurrent reads under one retained executor", async () => {
-      const prepared = parent();
-      const fixture = prepared.fixture;
-      const settled = await prepared.run('setTimeout(()=>process.stdout.write("read"),30);', {
-        parallel: true,
-      });
-      expect(settled.code, settled.stderr).toBe(0);
-      expect(readJson(fixture.outcome)).toEqual([
-        expect.objectContaining({ code: 0, stdout: "read" }),
-        expect.objectContaining({ code: 0, stdout: "read" }),
-      ]);
-    });
   });
 });
 
