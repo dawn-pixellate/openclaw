@@ -196,6 +196,10 @@ if (values.child) {
       return Reflect.apply(target, scope, args);
     },
   });
+  // Restored fixtures have new file identities; use the CLI's credential admission owner.
+  const { prepareStartupClientCredentials } =
+    await import("../../src/commands/startup-client-credentials.ts");
+  await prepareStartupClientCredentials({ env: process.env });
   const { startGatewayServer } = await import("../../src/gateway/server.ts");
   let notifications = 0;
   const stop = sessionChanges.subscribeFacts((change) => {
