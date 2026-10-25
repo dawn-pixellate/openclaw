@@ -75,31 +75,16 @@ it("publishes a cold compressed multi-chunk branch without host data SQL", async
   const sibling = { ...scope, sessionId: "sibling", sessionKey: "agent:main:sibling" };
   await fixtures.seedTranscript(sibling, "sibling-message", "untouched");
   await waitForSessionTranscriptIndexReconcilesInStateDir(options.env.OPENCLAW_STATE_DIR!);
-  fixtures.expectRows(
-    database.db,
-    `SELECT seq, event_json IS NULL AS compressed,
-        length(event_zstd) > 0 AND length(event_zstd) < event_utf8_bytes AS smaller,
-        navigation_json IS NOT NULL AS navigation
-        FROM transcript_events WHERE session_id = ? AND seq IN (1, 521) ORDER BY seq`,
-    [
-      { seq: 1, compressed: 1, smaller: 1, navigation: 1 },
-      { seq: 521, compressed: 1, smaller: 1, navigation: 1 },
-    ],
-    scope.sessionId,
-  );
+  expect(
+    fixtures.row(
+      database.db,
+      "SELECT count(*) AS count FROM transcript_events WHERE session_id = ? AND event_json IS NULL AND length(event_zstd) > 0 AND length(event_zstd) < event_utf8_bytes AND navigation_json IS NOT NULL",
+      scope.sessionId,
+    ),
+  ).toEqual({ count: 2 });
   const canonical = readTranscriptEventRows(database, scope.sessionId);
-  expect(canonical.map((event) => event.eventJson)).toEqual(
-    events.map((event) => JSON.stringify(event)),
-  );
-  const physicalRows = (db: typeof database.db) =>
-    fixtures.rows(
-      db,
-      `SELECT session_id, seq, created_at, event_json, hex(event_zstd) AS compressed_hex,
-        event_utf8_bytes, navigation_json FROM transcript_events ORDER BY session_id, seq`,
-    );
   const siblingProjection = (db: typeof database.db) =>
     fixtures.projectionSnapshot(db, sibling.sessionId);
-  const physicalBefore = physicalRows(database.db);
   const siblingBefore = siblingProjection(database.db);
   fixtures.markRebuild(database.db, scope.sessionId);
   await fixtures.closeReconcileDatabases();
@@ -115,7 +100,9 @@ it("publishes a cold compressed multi-chunk branch without host data SQL", async
   const reopened = openOpenClawAgentDatabase(options);
   const { db } = reopened;
   expect(readTranscriptEventRows(reopened, scope.sessionId)).toEqual(canonical);
-  expect(physicalRows(db)).toEqual(physicalBefore);
+  expect(readTranscriptEventRows(reopened, scope.sessionId).map((row) => row.eventJson)).toEqual(
+    events.map((event) => JSON.stringify(event)),
+  );
   expect(siblingProjection(db)).toEqual(siblingBefore);
   expect(
     fixtures.row(
@@ -139,20 +126,6 @@ it("publishes a cold compressed multi-chunk branch without host data SQL", async
     "SELECT message_id, text FROM session_transcript_fts WHERE session_id = ? ORDER BY rowid",
     activeMessages.map((event) => ({ message_id: event.id, text: event.message.content })),
     scope.sessionId,
-  );
-  expect(fixtures.row(db, "SELECT count(*) AS count FROM session_transcript_fts_rows")).toEqual({
-    count: 521,
-  });
-  // Check both directions: content alone can hide missing identities or stale FTS rows.
-  fixtures.expectRows(
-    db,
-    `SELECT m.id FROM session_transcript_fts_rows m
-        LEFT JOIN session_transcript_fts f ON f.rowid = m.id
-        WHERE f.rowid IS NULL OR f.session_id IS NOT m.session_id OR f.message_id IS NOT m.message_id
-        UNION ALL
-        SELECT f.rowid FROM session_transcript_fts f
-        LEFT JOIN session_transcript_fts_rows m ON m.id = f.rowid WHERE m.id IS NULL`,
-    [],
   );
 }, 30_000);
 

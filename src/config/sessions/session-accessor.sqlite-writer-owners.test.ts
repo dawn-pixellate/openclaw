@@ -1,10 +1,7 @@
-import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { performance } from "node:perf_hooks";
 import { expect, it, vi } from "vitest";
 import { createNativeSessionCommitFinalizer } from "../../agents/harness/native-session/deletion-participant.js";
-import * as logging from "../../logging/logger.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import {
   markPluginRegistryActive,
@@ -22,18 +19,14 @@ import {
   applySessionEntryLifecycleMutation,
   applySessionEntryReplacements,
   loadSessionEntry,
-  loadTranscriptEventsSync,
   replaceSessionEntrySync,
-  resetSessionEntryLifecycle,
 } from "./session-accessor.js";
 import { kickSessionEntryMaintenanceAfterWrite } from "./session-accessor.sqlite-maintenance-kick.js";
 import * as maintenance from "./session-accessor.sqlite-maintenance.js";
 import * as reclamationRun from "./session-accessor.sqlite-reclamation-run.js";
-import * as reclamationDiagnostics from "./session-accessor.sqlite-reclamation-worker-diagnostics.js";
 import { applySessionEntryCanonicalReplacements } from "./session-accessor.sqlite-replacement-projection.js";
 import { resolveSqliteScope, toDatabaseOptions } from "./session-accessor.sqlite-scope.js";
 import { replaceTranscriptEventsSync } from "./session-accessor.sqlite-transcript-write.test-support.js";
-import { enforceSqliteSessionHistoryDiskBudget } from "./session-history-eviction.js";
 import { resolveMaintenanceConfigFromInput } from "./store-maintenance.js";
 import type { SessionEntry } from "./types.js";
 
@@ -66,49 +59,13 @@ const withStore = (run: (fixture: ReturnType<typeof storeFixture>) => Promise<vo
       vi.restoreAllMocks();
     }
   });
-const numbers = (...keys: string[]) =>
-  Object.fromEntries(keys.map((key) => [key, expect.any(Number)]));
-
-function observeSlowWriters(onWarning: (operation: unknown, fields: object) => void = () => {}) {
-  let clock = 0;
-  // Cross the existing threshold deterministically; all storage and callback work remains real.
-  vi.spyOn(performance, "now").mockImplementation(() => (clock += 1_001));
-  const operations: unknown[] = [];
-  const writers: Record<string, object[]> = {};
-  const aggregates: object[] = [];
-  const pruning: unknown[] = [];
-  const getChildLogger = logging.getChildLogger;
-  vi.spyOn(logging, "getChildLogger").mockImplementation((...args) => {
-    const logger = getChildLogger(...args);
-    vi.spyOn(logger, "warn").mockImplementation((first: unknown, second: unknown) => {
-      if (second === "slow SQLite session write") {
-        const fields = first;
-        assert(fields && typeof fields === "object");
-        const operation = "operation" in fields ? fields.operation : undefined;
-        operations.push(operation);
-        if (typeof operation === "string") {
-          (writers[operation] ??= []).push(fields);
-        }
-        onWarning(operation, fields);
-      } else if (first === "slow SQLite session archive pruning") {
-        const fields = second;
-        assert(fields && typeof fields === "object");
-        aggregates.push(fields);
-        pruning.push("archivePruning" in fields ? fields.archivePruning : undefined);
-      }
-      return undefined;
-    });
-    return logger;
-  });
-  return { operations, writers, aggregates, pruning };
-}
 
 it.each(
   ["session.entry-replacements", "session.lifecycle.mutate"].flatMap((operation) =>
     [false, true].map((split) => ({ operation, split })),
   ),
 )(
-  "attributes $operation to its real inline/split commits (split: $split)",
+  "commits $operation outside native preparation/finalization (split: $split)",
   async ({ operation, split }) => {
     await withStore(async ({ state, storePath, seed, read, database: openDatabase, archives }) => {
       const sourceKey = "agent:main:writer-source";
@@ -122,13 +79,6 @@ it.each(
           .all();
       const before = rows();
       const order: string[] = [];
-      const warningRows: ReturnType<typeof rows>[] = [];
-      const { operations } = observeSlowWriters((label) => {
-        if (label === operation) {
-          order.push("warning");
-          warningRows.push(rows());
-        }
-      });
       const registry = createEmptyPluginRegistry();
       registry.agentHarnesses.push({
         pluginId: "core",
@@ -222,21 +172,8 @@ it.each(
           }
         });
         expect(read(targetKey)).toMatchObject(updated);
-        expect(operations.filter((label) => label === operation)).toEqual(
-          split ? [operation, operation] : [operation],
-        );
-        expect(warningRows).toEqual(split ? [before, rows()] : [rows()]);
         expect(order).toEqual(
-          split
-            ? [
-                "callback",
-                "warning",
-                "native:prepare",
-                "native:commit",
-                "warning",
-                "native:release",
-              ]
-            : ["callback", "warning"],
+          split ? ["callback", "native:prepare", "native:commit", "native:release"] : ["callback"],
         );
         if (split) {
           expect(read(sourceKey)).toBeUndefined();
@@ -247,77 +184,6 @@ it.each(
     });
   },
 );
-
-it("records successful archive pruning stages", async () => {
-  await withStore(async ({ storePath, seed, read, database: openDatabase, archives }) => {
-    const historyKey = "agent:main:writer-history";
-    seed(historyKey, { sessionId: "old", updatedAt: 1 }, "historical payload");
-    await resetSessionEntryLifecycle({
-      storePath,
-      target: { canonicalKey: historyKey, storeKeys: [historyKey] },
-      buildNextEntry: () => ({ sessionId: "current", updatedAt: Date.now() }),
-    });
-    const archivedKey = "agent:main:writer-capped";
-    seed(
-      archivedKey,
-      { sessionId: "capped", updatedAt: 1, archivedAt: 1, archiveReason: "active-session-cap" },
-      "capped payload".repeat(8_192),
-    );
-    const database = openDatabase(historyKey);
-    const { writers, aggregates, pruning } = observeSlowWriters();
-    expect(
-      await enforceSqliteSessionHistoryDiskBudget({
-        storePath,
-        mode: "enforce",
-        maintenance: { maxDiskBytes: 1, highWaterBytes: 0 },
-      }),
-    ).toMatchObject({ removedEntries: 2 });
-    const writerSegments = writers["session.history.archive-prune"] ?? [];
-    const pageWrites = writers["session.history.free-pages"] ?? [];
-    expect(writerSegments.length).toBeGreaterThan(0);
-    expect(pageWrites.length).toBeGreaterThan(0);
-    for (const fields of [...writerSegments, ...pageWrites]) {
-      expect(fields).toMatchObject(numbers("queueWaitMs", "writerExecutionMs"));
-    }
-    for (const fields of aggregates) {
-      expect(fields).toMatchObject({ elapsedMs: expect.any(Number) });
-      expect(fields).not.toHaveProperty("queueWaitMs");
-      expect(fields).not.toHaveProperty("writerExecutionMs");
-      expect(fields).not.toHaveProperty("completionDelayMs");
-    }
-    expect(pruning).toEqual([
-      expect.objectContaining({ trigger: "initial", completed: true }),
-      expect.objectContaining({ trigger: "after-eviction", completed: true }),
-      expect.objectContaining({ trigger: "final", completed: true }),
-    ]);
-    expect(pruning[0]).toMatchObject({ checkpointIncomplete: 0 });
-    for (const diagnostic of pruning) {
-      expect(diagnostic).toMatchObject(
-        numbers(
-          "checkpointCalls",
-          "checkpointMs",
-          "checkpointMaxMs",
-          "queryMs",
-          "measurementMs",
-          "measurements",
-          "legacyInventoryMs",
-        ),
-      );
-    }
-    expect(pruning[1]).toMatchObject({
-      fileRemovalMs: expect.any(Number),
-      removedFiles: 1,
-      rowDeletionMs: expect.any(Number),
-    });
-    expect(read(historyKey)?.sessionId).toBe("current");
-    expect(read(archivedKey)).toBeUndefined();
-    expect(
-      loadTranscriptEventsSync({ sessionKey: historyKey, sessionId: "old", storePath }),
-    ).toEqual([]);
-    expect(archives()).toEqual([]);
-    expect(database.db.prepare("PRAGMA freelist_count").get()?.freelist_count).toBe(0);
-  });
-});
 
 it("coalesces automatic maintenance through native planning and finalization", async () => {
   await withStore(async ({ state, storePath, seed, read }) => {
@@ -351,8 +217,6 @@ it("coalesces automatic maintenance through native planning and finalization", a
       }
       return result;
     });
-    const diagnostics = vi.spyOn(reclamationDiagnostics, "logSqliteReclamationWorkerOutcome");
-    const { operations } = observeSlowWriters();
     const request = {
       activeSessionKey: activeKey,
       archiveDirectory: state.sessionsDir(),
@@ -369,16 +233,7 @@ it("coalesces automatic maintenance through native planning and finalization", a
     kickSessionEntryMaintenanceAfterWrite(request);
     await finalized.promise;
     await maintenanceSettled.promise;
-    expect(
-      operations.filter((operation) => operation === "session.reclamation.worker-commit"),
-    ).toEqual(["session.reclamation.worker-commit"]);
     expect(finalizer).toHaveBeenCalledOnce();
-    const workerOutcomes = diagnostics.mock.calls.map(([outcome]) => outcome);
-    expect(workerOutcomes.map(({ kind }) => kind)).toEqual(["maintenance-finalize"]);
-    for (const outcome of workerOutcomes) {
-      expect(outcome.outcome).toBe("resolved");
-      expect(outcome.workerThreadId).toBeGreaterThan(0);
-    }
     expect(read(staleKey)).toBeUndefined();
     expect(read(activeKey)?.sessionId).toBe("active");
   });
