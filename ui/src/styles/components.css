@@ -3642,9 +3642,8 @@ td.data-table-key-col {
 }
 
 .agent-select__avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: inline-grid;
+  place-items: center;
   width: 20px;
   height: 20px;
   border-radius: 50%;

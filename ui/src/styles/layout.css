@@ -2140,6 +2140,8 @@ openclaw-settings-save-indicator:empty {
   justify-content: center;
   width: 18px;
   height: 18px;
+  aspect-ratio: 1;
+  flex-shrink: 0;
   overflow: hidden;
   border: 1.5px solid var(--sidebar-bg, var(--bg));
   border-radius: var(--radius-full);
@@ -2211,7 +2213,9 @@ openclaw-settings-save-indicator:empty {
 .viewer-avatar--profile {
   width: 40px;
   height: 40px;
-  border-color: color-mix(in srgb, var(--border) 72%, transparent);
+  border: 0;
+  outline: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  outline-offset: -1px;
   font-size: var(--control-ui-text-sm);
 }
 

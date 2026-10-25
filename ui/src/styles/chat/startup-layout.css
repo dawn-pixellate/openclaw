@@ -284,7 +284,9 @@
 .chat-avatar {
   width: 36px;
   height: 36px;
-  border-radius: var(--radius-full);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  overflow: hidden;
   background: var(--panel-strong);
   display: grid;
   place-items: center;
@@ -293,7 +295,9 @@
   flex-shrink: 0;
   align-self: flex-start;
   margin-bottom: 4px;
-  border: 1px solid var(--border);
+  border: 0;
+  outline: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  outline-offset: -1px;
 }
 
 .chat-bubble {
