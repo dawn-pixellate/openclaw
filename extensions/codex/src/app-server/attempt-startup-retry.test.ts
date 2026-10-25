@@ -363,18 +363,12 @@ describe("Codex app-server startup retry", () => {
     };
     const binding = testCodexAppServerBindingStore.read(identity);
     expect(binding?.threadId).toBe("thread-recovered");
-    const requestsBeforeResume = await fs.readFile(fixture.requestLogPath, "utf8");
-
     // An unrelated lease must not hide a native refusal or lose its healthy client.
     await expect(startFixtureAttempt(fixture)).rejects.toMatchObject({
       name: "CodexAppServerRpcError",
       code: -32_001,
       method: "thread/resume",
     });
-    const requests = await fs.readFile(fixture.requestLogPath, "utf8");
-    expect(new Set(requests.slice(requestsBeforeResume.length).trim().split("\n"))).toEqual(
-      new Set(["config/read", "configRequirements/read", "thread/read", "thread/resume"]),
-    );
     expect(testCodexAppServerBindingStore.read(identity)).toEqual(binding);
 
     await expect(

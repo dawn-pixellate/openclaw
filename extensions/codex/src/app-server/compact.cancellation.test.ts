@@ -341,6 +341,13 @@ describe("maybeCompactCodexAppServerSession", () => {
     });
     const sessionFile = await writeCompactionTestBinding(tempDir);
     const abortController = new AbortController();
+    const captureSource = (turnId: string, signal?: AbortSignal) =>
+      codexNativeSubagentMonitorRuntime.captureModelSource({
+        client: harness.client,
+        threadId: "thread-1",
+        turnId,
+        signal,
+      });
     const closeAndWait = vi.spyOn(harness.client, "closeAndWait");
     const pending = maybeCompactCodexAppServerSession(
       compactionParams(sessionFile, abortController.signal),
@@ -349,21 +356,11 @@ describe("maybeCompactCodexAppServerSession", () => {
     try {
       const requestId = await compactWritten.promise;
       harness.send(turnEvent("thread-1", "completed-turn", "inProgress"));
-      const unrelatedCapture = codexNativeSubagentMonitorRuntime.captureModelSource({
-        client: harness.client,
-        threadId: "thread-1",
-        turnId: "unrelated-turn",
-        signal: abortController.signal,
-      });
+      const unrelatedCapture = captureSource("unrelated-turn", abortController.signal);
       for (const method of ["item/started", "item/completed"] as const) {
         harness.send(compactionItemEvent(method, "completed-turn", "completed-item"));
         if (method === "item/started") {
-          const capture = await codexNativeSubagentMonitorRuntime.captureModelSource({
-            client: harness.client,
-            threadId: "thread-1",
-            turnId: "completed-turn",
-            signal: abortController.signal,
-          });
+          const capture = await captureSource("completed-turn", abortController.signal);
           try {
             expect(capture).toBeDefined();
             capture?.assertCurrent();
@@ -378,13 +375,7 @@ describe("maybeCompactCodexAppServerSession", () => {
       harness.send({ id: requestId, result: {} });
 
       await expect(pending).resolves.toMatchObject({ ok: true, compacted: true });
-      await expect(
-        codexNativeSubagentMonitorRuntime.captureModelSource({
-          client: harness.client,
-          threadId: "thread-1",
-          turnId: "completed-turn",
-        }),
-      ).resolves.toBeUndefined();
+      await expect(captureSource("completed-turn")).resolves.toBeUndefined();
       expect(closeAndWait).not.toHaveBeenCalled();
       expect(harness.client.getCloseError()).toBeUndefined();
       await expect(readCodexAppServerBinding(sessionFile)).resolves.toMatchObject({

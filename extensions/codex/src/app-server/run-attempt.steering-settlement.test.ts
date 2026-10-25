@@ -222,6 +222,22 @@ function messageText({ content }: Record<string, unknown>): string {
       : "";
 }
 
+function nativeSteer() {
+  const steer = expectDefined(
+    f.harness.requests.find((request) => request.method === "turn/steer"),
+    "native steer",
+  );
+  const params = expectDefined(
+    isJsonObject(steer.params) ? steer.params : undefined,
+    "steer params",
+  );
+  const clientId = expectDefined(
+    typeof params.clientUserMessageId === "string" ? params.clientUserMessageId : undefined,
+    "native steer correlation",
+  );
+  return { params, clientId };
+}
+
 it("seals native steering when terminal receipt arrives behind its queued prefix write", async () => {
   const lock = await f.hold();
   const mirror = vi.spyOn(codexTranscriptMirrorRuntime, "mirror");
@@ -248,22 +264,11 @@ it("seals native steering when terminal receipt arrives behind its queued prefix
 it("keeps one steering prefix and source through degraded tainted native completion", async () => {
   expect(f.queue()).toBe(true);
   await vi.waitFor(() => expect(f.accepted).toHaveBeenCalledExactlyOnceWith(true), fastWait);
-  const steer = expectDefined(
-    f.harness.requests.find((request) => request.method === "turn/steer"),
-    "native steer",
-  );
+  const { params, clientId } = nativeSteer();
   expect(f.recorder.persistApproved).toHaveBeenCalledOnce();
-  expect(steer.params).toMatchObject({
+  expect(params).toMatchObject({
     input: [{ type: "text", text: steerText, text_elements: [] }],
   });
-  const native = expectDefined(
-    isJsonObject(steer.params) ? steer.params : undefined,
-    "native steer parameters",
-  );
-  const clientId = expectDefined(
-    typeof native.clientUserMessageId === "string" ? native.clientUserMessageId : undefined,
-    "native steer correlation",
-  );
   await f.item({
     id: "steered-user",
     type: "userMessage",
@@ -355,16 +360,7 @@ it("persists a controller-adapted human steer before native dispatch", async () 
     await vi.waitFor(() => expect(f.accepted).toHaveBeenCalledExactlyOnceWith(true), fastWait);
     expect(f.harness.requests.filter((request) => request.method === "turn/steer")).toHaveLength(1);
     expect(f.recorder.hasPersisted()).toBe(true);
-    const steer = expectDefined(
-      f.harness.requests.find((request) => request.method === "turn/steer"),
-      "native steer",
-    );
-    const clientId = expectDefined(
-      isJsonObject(steer.params) && typeof steer.params.clientUserMessageId === "string"
-        ? steer.params.clientUserMessageId
-        : undefined,
-      "native steer correlation",
-    );
+    const { clientId } = nativeSteer();
     const userItem = {
       id: "adapted-human",
       type: "userMessage",
@@ -376,17 +372,14 @@ it("persists a controller-adapted human steer before native dispatch", async () 
     expect(
       (await f.readMessages()).filter((message) => messageText(message) === steerText),
     ).toHaveLength(1);
-    const finalItem = f.item({
+    const final = {
       id: "adapted-human-final",
       type: "agentMessage",
       phase: "final_answer",
       text: codaText,
-    });
-    await f.complete([
-      prefix,
-      userItem,
-      { id: "adapted-human-final", type: "agentMessage", phase: "final_answer", text: codaText },
-    ]);
+    };
+    const finalItem = f.item(final);
+    await f.complete([prefix, userItem, final]);
     await finalItem;
     expect(readAttemptTerminal(await f.run)).toMatchObject(successfulTerminal);
     expect(f.recorder.persistApproved).toHaveBeenCalledOnce();

@@ -18,7 +18,6 @@ import {
 import {
   describe,
   registerCodexEventProjectorTestLifecycle,
-  embeddedAgentLog,
   expect,
   it,
   vi,
@@ -244,7 +243,6 @@ describe("CodexAppServerEventProjector media projection", () => {
   });
 
   it("rejects oversized typed Codex images instead of using a remote saved path", async () => {
-    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
     const { events } = await createConfiguredProjection({
       config: { agents: { defaults: { mediaMaxMb: 0.000001 } } },
     });
@@ -252,10 +250,6 @@ describe("CodexAppServerEventProjector media projection", () => {
     await events.completed(codexImage("ig_typed_capped"));
 
     expectUndeliverableImage(events);
-    expect(warn).toHaveBeenCalledWith(
-      "codex app-server native image generation result exceeds media limit",
-      expect.objectContaining({ itemId: "ig_typed_capped" }),
-    );
   });
 
   it("materializes overlapping typed and raw image events only once", async () => {

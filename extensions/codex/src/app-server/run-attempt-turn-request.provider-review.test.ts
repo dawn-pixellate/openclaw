@@ -6,10 +6,7 @@ import type { CodexTurn, CodexUserInput } from "./protocol.js";
 import { prepareCodexAttemptTurnRequest } from "./run-attempt-turn-request.js";
 
 const cleanup = vi.hoisted(() => ({ interrupt: vi.fn(), retire: vi.fn() }));
-const references = vi.hoisted(() => ({
-  delivered: false,
-  accepted: vi.fn(),
-}));
+const references = vi.hoisted(() => ({ delivered: false, accepted: vi.fn() }));
 vi.mock("openclaw/plugin-sdk/agent-harness-runtime", () => ({
   embeddedAgentLog: { debug: vi.fn(), warn: vi.fn() },
   formatErrorMessage: String,
@@ -103,21 +100,20 @@ function createAcknowledgment() {
   return { acknowledgment: Object.freeze(methods) as Acknowledgment, acceptNativeTurn };
 }
 function createNativeThread(): { latest: CodexTurn } {
-  return {
-    latest: {
-      id: "failed-turn",
-      status: "failed",
-      items: [],
-      error: {
-        message: "Paused",
-        codexErrorInfo: "misalignmentPolicyViolation",
-        misalignment: {
-          detailedExplanation: findings.explanation,
-          steer: findings.continuation,
-        },
+  const latest: CodexTurn = {
+    id: "failed-turn",
+    status: "failed",
+    items: [],
+    error: {
+      message: "Paused",
+      codexErrorInfo: "misalignmentPolicyViolation",
+      misalignment: {
+        detailedExplanation: findings.explanation,
+        steer: findings.continuation,
       },
     },
   };
+  return { latest };
 }
 async function prepare(native = createNativeThread(), usesSupervisionConnection = true) {
   const host = createAcknowledgment();
@@ -142,7 +138,6 @@ async function prepare(native = createNativeThread(), usesSupervisionConnection 
   const liveThreadOwnership = { assertCurrent: vi.fn(), release: vi.fn(), forget: vi.fn() };
   const route = { armTurn: vi.fn(), cancelTurn: vi.fn() };
   const nativeProcessAuthority = { bindTurn: vi.fn() };
-  const releaseCurrentRoute = vi.fn();
   const turnState = { codexTurnPromptText: "" };
   const resources = {
     state: {
@@ -157,7 +152,7 @@ async function prepare(native = createNativeThread(), usesSupervisionConnection 
       },
       codexExecutionCwd: "/synthetic/workspace",
     },
-    releaseCurrentRoute,
+    releaseCurrentRoute: vi.fn(),
     nativeProcessAuthority,
     prompt: {
       turnState,
@@ -220,7 +215,6 @@ async function prepare(native = createNativeThread(), usesSupervisionConnection 
     start: prepared.startCodexTurn,
     request,
     client,
-    releaseCurrentRoute,
     resources,
     route,
     nativeProcessAuthority,
@@ -264,7 +258,14 @@ function expectInterrupted(attempt: Attempt) {
     threadId: "same-thread",
     turnId: "new-turn",
   });
-  expect(attempt.releaseCurrentRoute).toHaveBeenCalledOnce();
+  expect(attempt.resources.releaseCurrentRoute).toHaveBeenCalledOnce();
+}
+function expectNotAccepted(attempt: Attempt) {
+  expect(attempt.host.acceptNativeTurn).not.toHaveBeenCalled();
+  expect(references.accepted).not.toHaveBeenCalled();
+}
+function expectOnlyReviewRead(attempt: Attempt) {
+  expect(attempt.request.mock.calls.map(([method]) => method)).toEqual(["thread/turns/list"]);
 }
 
 describe("native acknowledged turn requests", () => {
@@ -272,13 +273,11 @@ describe("native acknowledged turn requests", () => {
     "rejects a changed %s after reading the native provider review",
     async (kind) => {
       const attempt = await prepare();
-      const { host, native } = attempt;
       changeAfterRequest(attempt, "thread/turns/list", kind);
       await expect(attempt.start()).rejects.toThrow(/ownership changed/);
-      expect(attempt.request.mock.calls.map(([method]) => method)).toEqual(["thread/turns/list"]);
-      expect(native.latest.status).toBe("failed");
-      expect(host.acceptNativeTurn).not.toHaveBeenCalled();
-      expect(references.accepted).not.toHaveBeenCalled();
+      expectOnlyReviewRead(attempt);
+      expect(attempt.native.latest.status).toBe("failed");
+      expectNotAccepted(attempt);
       expect(cleanup.interrupt).not.toHaveBeenCalled();
     },
   );
@@ -298,7 +297,6 @@ describe("native acknowledged turn requests", () => {
     "settles the dispatched thread when its %s changes before the accepted response",
     async (kind) => {
       const attempt = await prepare();
-      const { host } = attempt;
       changeAfterRequest(attempt, "turn/start", kind);
       await expect(attempt.start()).rejects.toThrow("Could not continue this chat");
       expect(attempt.nativeProcessAuthority.bindTurn).toHaveBeenCalledExactlyOnceWith(
@@ -307,8 +305,7 @@ describe("native acknowledged turn requests", () => {
         "new-turn",
       );
       expectInterrupted(attempt);
-      expect(host.acceptNativeTurn).not.toHaveBeenCalled();
-      expect(references.accepted).not.toHaveBeenCalled();
+      expectNotAccepted(attempt);
     },
   );
 
@@ -384,7 +381,7 @@ describe("native acknowledged turn requests", () => {
       const { host: freshHost } = second;
       expect(freshHost.acknowledgment).not.toBe(firstHost.acknowledgment);
       await expect(second.start()).rejects.toThrow("native provider review changed");
-      expect(second.request.mock.calls.map(([method]) => method)).toEqual(["thread/turns/list"]);
+      expectOnlyReviewRead(second);
       expect(freshHost.acceptNativeTurn).not.toHaveBeenCalled();
       expect(cleanup.interrupt).toHaveBeenCalledTimes(1);
     },
