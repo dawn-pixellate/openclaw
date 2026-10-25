@@ -28,6 +28,31 @@ const isEntry = (entries: readonly string[], file: string) =>
 afterEach(() => vi.restoreAllMocks());
 
 describe("check-deadcode-exports", () => {
+  it("models the PostgreSQL broker fixture only when both consumers exist", () => {
+    const compile = knipConfig.compilers.mjs;
+    const filePath = "config/knip-dynamic-consumers.mjs";
+    expect(compile("// dynamic consumers", filePath)).toContain(
+      'import { createSqliteWorkerBackend as __dynamic2_0 } from "../scripts/perf/pg-pool-broker.fixture.mts";',
+    );
+
+    const readFileSync = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, "readFileSync").mockImplementation((file, options) => {
+      const source = readFileSync(file, options);
+      return path.resolve(String(file)) === path.resolve("scripts/perf/pg-pool-lifecycle.mts")
+        ? String(source).replace('moduleUrl: new URL("./pg-pool-broker.fixture.mts", self),', "")
+        : source;
+    });
+    expect(compile("// dynamic consumers", filePath)).not.toContain("pg-pool-broker.fixture.mts");
+
+    vi.mocked(fs.readFileSync).mockImplementation((file, options) => {
+      const source = readFileSync(file, options);
+      return path.resolve(String(file)) === path.resolve("src/infra/sqlite-store.worker.ts")
+        ? String(source).replace('"createSqliteWorkerBackend"', '""')
+        : source;
+    });
+    expect(compile("// dynamic consumers", filePath)).not.toContain("pg-pool-broker.fixture.mts");
+  });
+
   it("makes tests in every workspace roots of the full-tree export audit", () => {
     expectEntries(knipConfig.workspaces["."].entry, [
       "config/knip.config.ts!",
@@ -219,11 +244,7 @@ const catalog = module.loadControlUiSourceCatalog();`;
       'import { gatewayBenchTaskOperation as __dynamic1_0 } from "../scripts/lib/gateway-bench-worker-messages.ts";',
     );
     expect(compiled).toContain(
-      'import { fetchWithSsrFGuard as __dynamic2_0 } from "../extensions/team-reports/src/report-run.benchmark-fixtures.test-support.ts";',
-    );
-
-    expect(compiled).toContain(
-      'import { createSqliteWorkerBackend as __dynamic3_0 } from "../scripts/perf/pg-pool-broker.fixture.mts";',
+      'import { fetchWithSsrFGuard as __dynamic3_0 } from "../extensions/team-reports/src/report-run.benchmark-fixtures.test-support.ts";',
     );
 
     const readFileSync = fs.readFileSync.bind(fs);
@@ -255,12 +276,6 @@ const catalog = module.loadControlUiSourceCatalog();`;
           "",
         );
       }
-      if (path.resolve(String(file)) === path.resolve("scripts/perf/pg-pool-lifecycle.mts")) {
-        return String(source).replace(
-          'moduleUrl: new URL("./pg-pool-broker.fixture.mts", self),',
-          "",
-        );
-      }
       return source;
     });
     const withoutConsumers = compile("// dynamic consumers", "config/knip-dynamic-consumers.mjs");
@@ -269,17 +284,6 @@ const catalog = module.loadControlUiSourceCatalog();`;
     expect(withoutConsumers).not.toContain("runtimeProcessWorkerDependencies");
     expect(withoutConsumers).not.toContain("gatewayBenchTaskOperation");
     expect(withoutConsumers).not.toContain("fetchWithSsrFGuard");
-    expect(withoutConsumers).not.toContain("pg-pool-broker.fixture.mts");
-
-    vi.mocked(fs.readFileSync).mockImplementation((file, options) => {
-      const source = readFileSync(file, options);
-      return path.resolve(String(file)) === path.resolve("src/infra/sqlite-store.worker.ts")
-        ? String(source).replace('"createSqliteWorkerBackend"', '""')
-        : source;
-    });
-    expect(compile("// dynamic consumers", "config/knip-dynamic-consumers.mjs")).not.toContain(
-      "pg-pool-broker.fixture.mts",
-    );
   });
 
   it("models retained updater named exports without fabricating private imports", () => {

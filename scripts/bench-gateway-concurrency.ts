@@ -274,7 +274,6 @@ type FailedBenchmarkAttempt = Extract<BenchmarkAttempt, { status: "failure" }> &
 type CliOptions = GatewayBenchRuntimeOptions & {
   controlUiLoad?: ControlUiLoadOptions & { cgroupParent: string; transpilerCache: string };
   provider: "mock" | "openai";
-  postgres: boolean;
   agentCount: number;
   agentWarmupTurns: number;
   browserHistoryMessages: number;
@@ -310,6 +309,7 @@ type CliOptions = GatewayBenchRuntimeOptions & {
   visibleObserver: boolean;
   warmup: number;
   workspaceFanout: boolean;
+  postgres: boolean;
 };
 
 const DEFAULT_CADENCE_MS = 100;
@@ -1930,11 +1930,11 @@ async function runGatewaySample(
   const postgresConnection = options.postgres ? process.env[POSTGRES_CONNECTION_ENV] : undefined;
 
   try {
-    if (options.postgres && !postgresConnection?.trim()) {
-      throw new Error(`--postgres requires ${POSTGRES_CONNECTION_ENV}`);
-    }
     if (options.provider === "openai" && !process.env.OPENAI_API_KEY?.trim()) {
       throw new Error("OpenAI benchmark requires OPENAI_API_KEY");
+    }
+    if (options.postgres && !postgresConnection?.trim()) {
+      throw new Error(`--postgres requires ${POSTGRES_CONNECTION_ENV}`);
     }
     const fixtureRoot = mkdtempSync(
       path.join(realpathSync(tmpdir()), "openclaw-gateway-concurrency-"),
