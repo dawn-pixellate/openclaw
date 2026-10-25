@@ -23,6 +23,7 @@
   --popover: #191c24;
   --popover-foreground: #f0f0f2;
   --session-hovercard-surface: color-mix(in srgb, var(--card) 94%, black 6%);
+  --session-hovercard-attribution-surface: color-mix(in srgb, var(--text) 6%, transparent);
 
   --panel: #0e1015;
   --panel-strong: #191c24;
@@ -278,6 +279,8 @@
      panels and dialogs keep their independent elevation hierarchy. */
   --overlay-border: color-mix(in srgb, var(--border-strong) 64%, transparent);
   --overlay-shadow: 0 1px 2px rgb(0 0 0 / 0.18), 0 8px 24px rgb(0 0 0 / 0.24);
+  --hovercard-shadow: var(--overlay-shadow);
+  --floating-panel-border: var(--overlay-border);
   --overlay-modal-backdrop: color-mix(in oklab, black 60%, transparent);
   --overlay-palette-backdrop: color-mix(in oklab, black 12%, transparent);
   --overlay-modal-radius: 0.75rem;
@@ -547,6 +550,7 @@
   --popover: #ffffff;
   --popover-foreground: #211e1a;
   --session-hovercard-surface: var(--card);
+  --session-hovercard-attribution-surface: color-mix(in srgb, var(--text) 4%, transparent);
 
   --panel: #faf9f7;
   --panel-strong: #f4f1ec;
