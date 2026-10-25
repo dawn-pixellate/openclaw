@@ -130,7 +130,7 @@ try {
           results.push({ phase, method, ok: false, error: message });
           assert(
             allowMaintenanceRefusal &&
-              /maintenance|revok|closed|retir|not current|admission|unavailable|interrupted/i.test(
+              /maintenance|revok|clos(?:ed|ing)|retir|not current|admission|unavailable|interrupted/i.test(
                 message,
               ),
             message,
@@ -141,26 +141,32 @@ try {
   }
   try {
     await burst("before-maintenance");
-    const during = burst("during-maintenance", true);
-    await withAgentDatabaseMaintenanceLease({ env: process.env }, async (maintenance) => {
-      assert.equal(cached.db.isOpen, false, "maintenance must close cached handles first");
-      assert.equal(
-        retained.claim.isCurrent(),
-        false,
-        "explicit close must revoke an outstanding borrower",
-      );
-      assert.throws(retained.claim.assertCurrent, /no longer current/);
-      await migrateOpenClawAgentDatabaseForMaintenance(
-        { agentId: "main", pathname: databasePath, env: process.env },
-        maintenance,
-      );
-      await migrateOpenClawAgentDatabaseForMaintenance(
-        { agentId: "legacy", pathname: legacyPath, env: process.env },
-        maintenance,
-      );
-      maintenance.assertOwned();
-    });
-    await during;
+    const concurrent = await Promise.allSettled([
+      burst("during-maintenance", true),
+      withAgentDatabaseMaintenanceLease({ env: process.env }, async (maintenance) => {
+        assert.equal(cached.db.isOpen, false, "maintenance must close cached handles first");
+        assert.equal(
+          retained.claim.isCurrent(),
+          false,
+          "explicit close must revoke an outstanding borrower",
+        );
+        assert.throws(retained.claim.assertCurrent, /no longer current/);
+        await migrateOpenClawAgentDatabaseForMaintenance(
+          { agentId: "main", pathname: databasePath, env: process.env },
+          maintenance,
+        );
+        await migrateOpenClawAgentDatabaseForMaintenance(
+          { agentId: "legacy", pathname: legacyPath, env: process.env },
+          maintenance,
+        );
+        maintenance.assertOwned();
+      }),
+    ]);
+    for (const outcome of concurrent) {
+      if (outcome.status === "rejected") {
+        throw outcome.reason;
+      }
+    }
     await burst("after-maintenance");
     const history = await writer.request<{ messages: unknown[] }>("chat.history", {
       sessionKey: key,
