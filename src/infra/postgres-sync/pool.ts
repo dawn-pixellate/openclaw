@@ -6,7 +6,10 @@ import {
   workerData,
 } from "node:worker_threads";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
-import { getDatabaseEngineSelection } from "../database-engine/context.js";
+import {
+  getDatabaseEngineSelection,
+  type DatabaseEngineSelection,
+} from "../database-engine/context.js";
 import { resolveRuntimeProcessEntrypointUrl } from "../runtime-process-url.js";
 import { resolveRuntimeWorkerThreadExecArgv } from "../runtime-worker-url.js";
 import { trackNativeWorkerForCpu } from "../worker-cpu.js";
@@ -186,7 +189,7 @@ function startPool(): PostgresPoolEndpoints {
   return endpoints;
 }
 
-function getPool(): PostgresPoolEndpoints {
+export function getPostgresPool(): PostgresPoolEndpoints {
   if (!state.nextStep) {
     state.refresh?.();
   }
@@ -194,15 +197,16 @@ function getPool(): PostgresPoolEndpoints {
 }
 
 /** A child inherits setup endpoints, never a forwarding hop for SQL requests. */
-export function createPostgresPoolEndpoints(): PostgresPoolEndpoints | undefined {
-  const selection = getDatabaseEngineSelection();
+export function createPostgresPoolEndpoints(
+  selection: DatabaseEngineSelection | undefined = getDatabaseEngineSelection(),
+): PostgresPoolEndpoints | undefined {
   if (
     !state.endpoints &&
     (!selection || !Object.values(selection.effectiveEngines).includes("postgres"))
   ) {
     return undefined;
   }
-  const pool = getPool();
+  const pool = getPostgresPool();
   return {
     ...pool,
     services: pool.services.map(({ port, signal }) => {
@@ -218,7 +222,7 @@ export function postgresPoolTransferList(pool?: PostgresPoolEndpoints): MessageP
 }
 
 export function selectPostgresPoolService(): PostgresPoolEndpoint & { nextStep?: string } {
-  const pool = getPool();
+  const pool = getPostgresPool();
   const index = (Atomics.add(new Uint32Array(pool.allocation), 0, 1) >>> 0) % 4;
   return { ...pool.services[index]!, nextStep: pool.nextStep };
 }
@@ -230,7 +234,7 @@ export async function preparePostgresPoolForUpdate(nextStep: string): Promise<vo
     state.endpoints ||
     (selection && Object.values(selection.effectiveEngines).includes("postgres"))
   ) {
-    getPool().nextStep = nextStep;
+    getPostgresPool().nextStep = nextStep;
     const workers = state.workers ?? [];
     workers.forEach((worker) => worker.ref());
     try {

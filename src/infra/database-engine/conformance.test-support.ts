@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 import { openNodeSqliteDatabase } from "../node-sqlite.js";
+import { createPostgresPoolEndpoints, postgresPoolTransferList } from "../postgres-sync/pool.js";
 import {
   resolveRuntimeWorkerThreadExecArgv,
   resolveRuntimeWorkerUrl,
@@ -15,9 +16,15 @@ export function spawnConformanceWorker(
   const anchor = openNodeSqliteDatabase(location);
   prepare?.(anchor);
   const url = resolveRuntimeWorkerUrl(entrypoint);
+  const postgresPool = createPostgresPoolEndpoints();
   const worker = new Worker(url, {
     execArgv: resolveRuntimeWorkerThreadExecArgv(url),
-    workerData: { ...data, admissions: captureSqliteDatabaseAdmissions(undefined, { location }) },
+    workerData: {
+      ...data,
+      admissions: captureSqliteDatabaseAdmissions(undefined, { location }),
+      postgresPool,
+    },
+    transferList: postgresPoolTransferList(postgresPool),
   });
   return { anchor, worker };
 }

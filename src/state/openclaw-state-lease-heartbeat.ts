@@ -447,11 +447,12 @@ export function startOpenClawStateLeaseHeartbeat(
     // Keep the lease worker isolated from every other ambient environment setting.
     const sourceTsconfig = execArgv.length > 0 ? process.env.TSX_TSCONFIG_PATH : undefined;
     startupContext?.admission.assertCurrent();
+    const databaseEngineSelection =
+      startupContext?.databaseEngineSelection ?? getDatabaseEngineSelection();
     const data = {
-      databaseEngineSelection:
-        startupContext?.databaseEngineSelection ?? getDatabaseEngineSelection(),
+      databaseEngineSelection,
       databaseAdmissionPort: databaseAdmission.port,
-      postgresPool: createPostgresPoolEndpoints(),
+      postgresPool: createPostgresPoolEndpoints(databaseEngineSelection),
       path: databasePath,
       expectedIdentity,
       ...(startupContext ? { deferActivation: true as const } : {}),
