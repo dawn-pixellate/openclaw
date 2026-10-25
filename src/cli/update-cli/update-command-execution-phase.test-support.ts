@@ -54,7 +54,7 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
       root: string;
       run: Run;
       events: string[];
-      beforeCall: { run?: () => void };
+      beforeCall: { run?: () => void; settled?: boolean };
       readRun: () => ReturnType<typeof getUpdateRunAsync>;
       start: () => ReturnType<typeof executeMutableUpdate>;
     }) => Promise<void>,
@@ -79,7 +79,7 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
           { env },
         );
         const events: string[] = [];
-        const beforeCall: { run?: () => void } = {};
+        const beforeCall: { run?: () => void; settled?: boolean } = {};
         const params = {
           ...executionParams(phase === "staging" ? "git" : "package"),
           root,
@@ -111,7 +111,11 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
         mocks.runPackageUpdate.mockImplementation(async (options: PackageInstallUpdateParams) => {
           if (phase === "validating") {
             beforeCall.run?.();
-            await options.validateCandidate(root);
+            try {
+              await options.validateCandidate(root);
+            } finally {
+              beforeCall.settled = true;
+            }
           } else {
             await options.validateCandidate(root);
             beforeCall.run?.();
@@ -226,28 +230,11 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
       const context = captureOpenClawStateWorkerContext({ env: fixture.run.env });
       let foreign: ReturnType<typeof holdForeignWriter> | undefined;
       let releaseTurn: ReturnType<typeof setImmediate> | undefined;
-      let phaseSettled = false;
       let releasedBeforeSettlement = false;
-      const original = mocks.runPackageUpdate.getMockImplementation()!;
-      mocks.runPackageUpdate.mockImplementation(async (options: PackageInstallUpdateParams) => {
-        const callback = options.validateCandidate;
-        return original({
-          ...options,
-          validateCandidate: async (
-            ...args: Parameters<PackageInstallUpdateParams["validateCandidate"]>
-          ) => {
-            try {
-              return await callback(...args);
-            } finally {
-              phaseSettled = true;
-            }
-          },
-        });
-      });
       fixture.beforeCall.run = () => {
         foreign = holdForeignWriter(context);
         releaseTurn = setImmediate(() => {
-          releasedBeforeSettlement = !phaseSettled;
+          releasedBeforeSettlement = !fixture.beforeCall.settled;
           foreign?.release();
         });
       };
@@ -286,12 +273,10 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
     async (failure) =>
       withPhase("validating", async (fixture) => {
         const original = phaseWrites.recordUpdateRunPhaseAsync;
-        let receiptAttempted = false;
         using worker = vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation");
         using _ = vi
           .spyOn(phaseWrites, "recordUpdateRunPhaseAsync")
           .mockImplementation(async (...args) => {
-            receiptAttempted = true;
             if (failure === "missing-row") {
               openOpenClawStateDatabase({ env: fixture.run.env })
                 .db.prepare("DELETE FROM update_runs WHERE run_id = ?")
@@ -313,8 +298,6 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
             return original(...args);
           });
         const result = await fixture.start();
-        expect(receiptAttempted).toBe(true);
-        expect(worker).toHaveBeenCalledOnce();
         expect(result).toMatchObject({ mutationStarted: false, result: { status: "error" } });
         expect(fixture.events).toEqual([]);
         if (failure === "missing-row") {

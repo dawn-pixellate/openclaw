@@ -51,7 +51,7 @@ function parentScript() {
         ()=>execFileUtf8(argv[0],argv.slice(1),{timeout})
       );
       fs.writeFileSync(outcome,JSON.stringify(result));
-      if((Array.isArray(result)?result:[result]).some(entry=>entry.code!==0))throw Error("native-failed:"+JSON.stringify(result));
+      if(result.code!==0)throw Error("native-failed:"+JSON.stringify(result));
     });
   } catch(error) { process.stderr.write(error.message); process.exitCode=1; }
 `;
@@ -65,7 +65,6 @@ function setup() {
     a: file("A"),
     b: file("B"),
     temp: file("control"),
-    controllers: file("controllers"),
     started: file("started.json"),
     request: file("request.json"),
     ready: file("parent-ready"),
@@ -73,7 +72,7 @@ function setup() {
     effect: file("effect"),
     outcome: file("outcome.json"),
   };
-  for (const dir of [fixture.a, fixture.b, fixture.temp, fixture.controllers]) {
+  for (const dir of [fixture.a, fixture.b, fixture.temp]) {
     fs.mkdirSync(dir);
   }
   return fixture;
@@ -85,7 +84,7 @@ function startParent(killProcessTree: boolean) {
   const abort = new AbortController();
   let parentPid: number | undefined;
   let dispatched = false;
-  let expectedControllers = 0;
+  let missingExecutable = false;
   let behaviorTimer: ReturnType<typeof setTimeout> | undefined;
   const pending = runCommandWithTimeout(
     [process.execPath, "--input-type=module", "-e", parentScript(), "--", JSON.stringify(fixture)],
@@ -113,7 +112,7 @@ function startParent(killProcessTree: boolean) {
       }
       dispatched = true;
       // The missing executable has no controller; every Node command records its own receipt.
-      expectedControllers = missing ? 0 : 1;
+      missingExecutable = missing;
       behaviorTimer = setTimeout(
         () => abort.abort(new Error("Fixture behavior deadline expired")),
         deadline,
@@ -145,19 +144,15 @@ function startParent(killProcessTree: boolean) {
       if (parentPid !== undefined) {
         expect(isPidAlive(parentPid)).toBe(false);
       }
-      const receipts = () =>
-        fs.readdirSync(fixture.controllers).filter((file) => file.endsWith(".json"));
       // The real owner can settle a timeout or spawn failure before any controller starts.
       if (dispatched && !fs.existsSync(fixture.outcome)) {
-        if (expectedControllers === 0) {
+        if (missingExecutable) {
           throw new Error(`Native launch did not report settlement; retaining ${fixture.root}`);
         }
-        await expect.poll(() => receipts().length, { timeout: 5000 }).toBe(expectedControllers);
+        await expect.poll(() => fs.existsSync(fixture.started), { timeout: 5000 }).toBe(true);
       }
-      for (const receipt of receipts()) {
-        const native: { pid: number; gate: number } = readJson(
-          path.join(fixture.controllers, receipt),
-        );
+      if (fs.existsSync(fixture.started)) {
+        const native: { pid: number; gate: number } = readJson(fixture.started);
         await waitForDead(native.pid, AbortSignal.timeout(NATIVE_CLEANUP_GUARD_MS));
         await waitForDead(native.gate, AbortSignal.timeout(NATIVE_CLEANUP_GUARD_MS));
         await expect
@@ -199,12 +194,9 @@ const expectEffect = (fixture: ReturnType<typeof setup>) =>
 function controllerScript(fixture: ReturnType<typeof setup>, script: string): string {
   return `
     const fs=require("node:fs");
-    const receipt=${JSON.stringify(fixture.controllers)}+"/"+process.pid+".json";
-    fs.writeFileSync(receipt+".tmp",JSON.stringify({pid:process.pid,gate:process.ppid}));
-    fs.renameSync(receipt+".tmp",receipt);
     const started=${JSON.stringify(fixture.started)};
-    fs.copyFileSync(receipt,receipt+".started");
-    fs.renameSync(receipt+".started",started);
+    fs.writeFileSync(started+".tmp",JSON.stringify({pid:process.pid,gate:process.ppid}));
+    fs.renameSync(started+".tmp",started);
     const cleanup=setInterval(()=>{
       if(fs.existsSync(${JSON.stringify(fixture.finish)})){
         fs.writeFileSync(${JSON.stringify(fixture.effect)},"finished");

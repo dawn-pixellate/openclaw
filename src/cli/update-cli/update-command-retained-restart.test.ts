@@ -134,14 +134,13 @@ describe.skipIf(process.platform === "win32")("retained POSIX native restart", (
     const receipts = await openFixtureReceiptChannel();
     const definition = path.join(a, "unit");
     fs.writeFileSync(definition, "original Node A and service definition");
-    let pid = 0;
     let complete = false;
     let work: Promise<void> | undefined;
     const releaseChild = () => receipts.release("native", "release");
     // Directory notifications can coalesce. Keep readiness and release outside
     // native custody so a failed observer can still unblock the owned child.
     const started = receipts.waitFor("native", "pid:").then(async () => {
-      pid = Number(fs.readFileSync(effect, "utf8"));
+      const pid = Number(fs.readFileSync(effect, "utf8"));
       await receipts.waitFor("native", `pid:${pid}:`);
       expect(pid).toBeGreaterThan(0);
       expect(pid).not.toBe(process.pid);
@@ -185,18 +184,11 @@ describe.skipIf(process.platform === "win32")("retained POSIX native restart", (
           complete = true;
         });
         work = running;
-        const observe = async () => {
-          await withinTest(Promise.race([started, running]), signal);
-          expect(complete).toBe(false);
-          expectOwners("busy");
-          expect(createManagedHandoffLeaseStore().read(c)).toEqual({ kind: "absent" });
-        };
-        try {
-          await observe();
-        } finally {
-          releaseChild();
-          await running.catch(() => undefined);
-        }
+        await withinTest(Promise.race([started, running]), signal);
+        expect(complete).toBe(false);
+        expectOwners("busy");
+        expect(createManagedHandoffLeaseStore().read(c)).toEqual({ kind: "absent" });
+        releaseChild();
         await running;
         expect(native.mock.calls.map((call) => call[1][0])).toEqual(["reset-failed", "restart"]);
         expect(fs.readFileSync(definition, "utf8")).toBe("original Node A and service definition");
