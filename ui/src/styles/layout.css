@@ -1062,7 +1062,7 @@ openclaw-settings-save-indicator:empty {
   display: flex;
   min-height: 100%;
   overflow: visible;
-  border-inline-end: var(--resize-handle-line-size) solid var(--resize-handle-rest-color);
+  border-inline-end: var(--shell-divider-size) solid var(--resize-handle-rest-color);
   transition: clip-path var(--shell-focus-duration) var(--shell-focus-ease);
 }
 
@@ -1070,14 +1070,22 @@ openclaw-settings-save-indicator:empty {
   display: none;
 }
 
-/* The shell owns the resting boundary. The wider resize target takes over
-   that same edge during interaction, avoiding a doubled divider. */
+/* Keep the full resize target on the content side of the boundary so it
+   cannot intercept the sidebar scrollbar. The shell owns the resting line. */
 .sidebar-resizer {
-  --resize-handle-line-inline: 100%;
+  --resize-handle-size: 14px;
+  --resize-handle-rest-color: transparent;
+  --resize-handle-line-inline: 0%;
   grid-area: nav;
   align-self: stretch;
   justify-self: end;
+  margin-inline-end: calc(-1 * var(--resize-handle-size));
   z-index: 20;
+}
+
+.sidebar-resizer::before {
+  left: 0;
+  right: 0;
 }
 
 .sidebar {
