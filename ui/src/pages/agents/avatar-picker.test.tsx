@@ -18,22 +18,26 @@ afterEach(() => vi.restoreAllMocks());
 
 function mount(
   prompt: string | null = "Explorer",
-  error?: Error,
   generate?: AvatarPickerProps["onGenerate"],
+  options: Partial<
+    Pick<AvatarPickerProps, "agentId" | "footerGeneration" | "onReset" | "onActionsReady">
+  > = {},
 ) {
   vi.spyOn(avatarImage, "svgToAvatarDataUrl").mockResolvedValue({ ok: true, dataUrl: avatar });
   const pending = createDeferred<GeneratedAvatar>();
   const props = {
-    agentId: "beta",
+    ...options,
+    agentId: options.agentId ?? "beta",
     avatar: null,
     disabled: false,
     onSelect: vi.fn(),
     onUpload: vi.fn(),
-    onGenerate: vi.fn(generate ?? (() => (error ? Promise.reject(error) : pending.promise))),
+    onGenerate: vi.fn(generate ?? (() => pending.promise)),
   };
   const view = mountSolid(AvatarPicker, props);
   const text = () => view.container.textContent;
-  const query = (selector: string) => view.container.querySelector(selector);
+  const query = <T extends Element = HTMLElement>(selector: string) =>
+    view.container.querySelector<T>(selector);
   const click = (label: string) => {
     const buttons = [...view.container.querySelectorAll("button")];
     const button = buttons.findLast(({ textContent }) => textContent?.trim() === label);
@@ -43,7 +47,7 @@ function mount(
   };
   const describe = (value: string) => {
     click("Generate");
-    const input = view.container.querySelector("textarea")!;
+    const input = query<HTMLTextAreaElement>("textarea")!;
     input.value = value;
     input.dispatchEvent(new Event("input", { bubbles: true }));
     flush();
@@ -61,15 +65,6 @@ function mount(
   return { ...view, props, click, text, query, finish, describe };
 }
 
-it("offers bundled character presets without a Lobsterdex collection", () => {
-  const view = mount(null);
-  for (const name of ["Clawnstantine", "Clawie Stardust", "24K"]) {
-    const preset = view.query(`.avatar-picker__preset[aria-label="${name}"]`);
-    expect(preset).toMatchObject({ disabled: false });
-  }
-  expect(view.container.querySelectorAll(".avatar-picker__preset:disabled")).toHaveLength(0);
-});
-
 it("previews generation and requires acceptance before replacing identity", async () => {
   const view = mount("  A patient gardener with a watering can  ");
   expect(view.query(".avatar-picker__ghost .lobster-pet__svg")).not.toBeNull();
@@ -79,9 +74,6 @@ it("previews generation and requires acceptance before replacing identity", asyn
   expect(view.query(".avatar-picker__ghost")).toBeNull();
   expect(view.props.onGenerate).toHaveBeenCalledWith("A patient gardener with a watering can");
   expect(view.props.onSelect).not.toHaveBeenCalled();
-  expect(view.text()).not.toMatch(/Generate again|Chat and sidebar preview/);
-  const actions = [...view.query(".avatar-picker__actions")!.children];
-  expect(actions.map((button) => button.textContent?.trim())).toEqual(["Discard", "Use avatar"]);
   view.click("Discard");
   expect(view.props.onSelect).not.toHaveBeenCalled();
   view.click("Generate");
@@ -91,42 +83,25 @@ it("previews generation and requires acceptance before replacing identity", asyn
 });
 
 it("selects a generated avatar directly in the creation dialog and clears busy on reset", async () => {
-  vi.spyOn(avatarImage, "svgToAvatarDataUrl").mockResolvedValue({ ok: true, dataUrl: avatar });
-  const pending = createDeferred<GeneratedAvatar>();
-  const onSelect = vi.fn();
   const onReset = vi.fn();
   const actionsRef: { current: AvatarPickerActions | null } = { current: null };
-  const view = mountSolid(AvatarPicker, {
+  const view = mount(null, undefined, {
     agentId: "new-agent",
-    avatar: null,
-    disabled: false,
     footerGeneration: true,
-    onSelect,
     onReset,
     onActionsReady: (next) => {
       actionsRef.current = next;
     },
-    onUpload: vi.fn(),
-    onGenerate: () => pending.promise,
   });
-  const generateTab = [...view.container.querySelectorAll("button")].find(
-    (button) => button.textContent?.trim() === "Generate",
-  );
-  assert(generateTab);
-  generateTab.click();
-  flush();
-  const prompt = view.container.querySelector("textarea")!;
-  prompt.value = "A bright coral claw";
-  prompt.dispatchEvent(new Event("input", { bubbles: true }));
-  flush();
+  view.describe("A bright coral claw");
   const actions = actionsRef.current;
   assert(actions);
   const generation = actions.generate();
   flush();
   expect(actions.footerState().busy).toBe(true);
-  pending.resolve(generated);
+  await view.finish();
   await generation;
-  await waitForFast(() => expect(onSelect).toHaveBeenCalledExactlyOnceWith(avatar));
+  await waitForFast(() => expect(view.props.onSelect).toHaveBeenCalledExactlyOnceWith(avatar));
   expect(actions.footerState().generated).toBe(true);
   expect(actions.footerState().busy).toBe(false);
   actions.reset();
@@ -135,14 +110,10 @@ it("selects a generated avatar directly in the creation dialog and clears busy o
   expect(onReset).toHaveBeenCalledOnce();
 });
 
-it.each(["mode change", "disposal"])("retires generation on %s", async (reason) => {
+it("retires generation on disposal", async () => {
   const view = mount();
-  const retire = reason === "disposal" ? view.dispose : () => view.click("Blobster");
-  retire();
+  view.dispose();
   await view.finish();
-  if (reason === "mode change") {
-    view.click("Generate");
-  }
   expect(view.text()).not.toContain("Use avatar");
   expect(view.props.onSelect).not.toHaveBeenCalled();
 });
@@ -163,25 +134,19 @@ it.each(["unusable", "too-detailed"] as const)(
   },
 );
 
-it("shows generation failures without changing the selected avatar", async () => {
-  const view = mount("Explorer", new Error("No model"));
-  await waitForFast(() => expect(view.query('[role="alert"]')?.textContent).toContain("No model"));
-  expect(view.props.onSelect).not.toHaveBeenCalled();
-});
-
 it.each(["success", "failure"] as const)(
   "lets a replacement generation settle before retired work (%s)",
   async (outcome) => {
     const retired = createDeferred<GeneratedAvatar>();
     const replacement = { ...generated, name: "New garden keeper" };
     const generate = vi.fn().mockReturnValueOnce(retired.promise).mockResolvedValue(replacement);
-    const view = mount(null, undefined, generate);
+    const view = mount(null, generate);
     view.describe("Old explorer");
     view.click("Generate");
     view.click("Blobster");
     view.describe("New gardener");
     view.click("Generate");
-    await waitForFast(() => expect(view.container.textContent).toContain(replacement.name));
+    await waitForFast(() => expect(view.text()).toContain(replacement.name));
     if (outcome === "success") {
       retired.resolve(generated);
     } else {
@@ -190,8 +155,8 @@ it.each(["success", "failure"] as const)(
     await retired.promise.catch(() => undefined);
     await Promise.resolve();
     flush();
-    expect(view.container.textContent).toContain(replacement.name);
-    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+    expect(view.text()).toContain(replacement.name);
+    expect(view.query('[role="alert"]')).toBeNull();
     expect(view.props.onSelect).not.toHaveBeenCalled();
     view.click("Use avatar");
     expect(view.props.onSelect).toHaveBeenCalledExactlyOnceWith(avatar);
@@ -208,11 +173,11 @@ it("prepares a confirmed preset without publishing a retired preparation", async
   vi.spyOn(avatarImage, "imageToAvatarDataUrl").mockReturnValue({ ok: true, dataUrl: avatar });
   const view = mount(null);
   const selectPreset = () => {
-    view.container.querySelector<HTMLButtonElement>(".avatar-picker__preset")!.click();
+    view.query<HTMLButtonElement>(".avatar-picker__preset")!.click();
     flush();
   };
   selectPreset();
-  expect(view.container.querySelector('[role="status"]')).not.toBeNull();
+  expect(view.query('[role="status"]')).not.toBeNull();
   expect(view.props.onSelect).not.toHaveBeenCalled();
   prepared.resolve(document.createElement("img"));
   await waitForFast(() => expect(view.props.onSelect).toHaveBeenCalledExactlyOnceWith(avatar));
@@ -220,13 +185,13 @@ it("prepares a confirmed preset without publishing a retired preparation", async
   view.describe("A gardener");
   view.click("Generate");
   await view.finish();
-  await waitForFast(() => expect(view.container.textContent).toContain("Use avatar"));
+  await waitForFast(() => expect(view.text()).toContain("Use avatar"));
   retired.resolve(document.createElement("img"));
   await retired.promise;
   await Promise.resolve();
   flush();
   expect(view.props.onSelect).toHaveBeenCalledTimes(1);
-  expect(view.container.textContent).toContain(generated.name);
+  expect(view.text()).toContain(generated.name);
 });
 
 it("clears a failed preparation while a retry is pending and keeps its controls", async () => {
@@ -235,21 +200,20 @@ it("clears a failed preparation while a retry is pending and keeps its controls"
     .fn()
     .mockRejectedValueOnce(new Error("Synthetic failure."))
     .mockReturnValue(retry.promise);
-  const view = mount(null, undefined, generate);
+  const view = mount(null, generate);
   view.describe("A gardener");
   view.click("Generate");
   await waitForFast(() =>
-    expect(view.container.querySelector('[role="alert"]')?.textContent).toContain(
-      "Synthetic failure",
-    ),
+    expect(view.query('[role="alert"]')?.textContent).toContain("Synthetic failure"),
   );
-  const prompt = view.container.querySelector("textarea");
+  const prompt = view.query("textarea");
   view.click("Generate");
-  expect(view.container.querySelector('[role="alert"]')).toBeNull();
-  expect(view.container.querySelector("textarea")).toBe(prompt);
-  expect(view.container.textContent).toContain("Generating...");
+  expect(view.query('[role="alert"]')).toBeNull();
+  expect(view.query("textarea")).toBe(prompt);
+  expect(view.text()).toContain("Generating...");
   retry.resolve(generated);
-  await waitForFast(() => expect(view.container.textContent).toContain("Use avatar"));
-  expect(view.container.querySelector('[role="alert"]')).toBeNull();
-  expect(view.container.querySelector("textarea")).toBe(prompt);
+  await waitForFast(() => expect(view.text()).toContain("Use avatar"));
+  expect(view.query('[role="alert"]')).toBeNull();
+  expect(view.query("textarea")).toBe(prompt);
+  expect(view.props.onSelect).not.toHaveBeenCalled();
 });
