@@ -157,13 +157,8 @@ function createRuntimeHooks() {
   });
 }
 
-async function resolveModelForTest(
-  provider: string,
-  modelId: string,
-  agentDir = "/tmp/agent",
-  cfg?: OpenClawConfig,
-) {
-  return resolveModelAsync(provider, modelId, agentDir, cfg, {
+async function resolveModelForTest(provider: string, modelId: string, cfg?: OpenClawConfig) {
+  return resolveModelAsync(provider, modelId, "/tmp/agent", cfg, {
     runtimeHooks: createRuntimeHooks(),
   });
 }
@@ -190,7 +185,7 @@ function mockSpark() {
   });
 }
 const resolveSpark = (cfg?: OpenClawConfig, provider = "openai") =>
-  resolveModelForTest(provider, spark, "/tmp/agent", cfg);
+  resolveModelForTest(provider, spark, cfg);
 
 describe("resolveModel forward-compat errors and overrides", () => {
   it.each(configuredPricingCases)(
@@ -215,10 +210,7 @@ describe("resolveModel forward-compat errors and overrides", () => {
       const source = {
         models: {
           providers: {
-            [` ${provider.toUpperCase()} `]: {
-              ...providerConfig,
-              models: sourceModels,
-            },
+            [` ${provider.toUpperCase()} `]: { ...providerConfig, models: sourceModels },
           },
         },
       } as unknown as OpenClawConfig;
@@ -233,7 +225,7 @@ describe("resolveModel forward-compat errors and overrides", () => {
       setRuntimeConfigSnapshot(runtime, source);
 
       for (const cfg of [runtime, structuredClone(runtime)]) {
-        const result = await resolveModelForTest(provider, modelId, "/tmp/agent", cfg);
+        const result = await resolveModelForTest(provider, modelId, cfg);
         const fallback = normalizeConfiguredProviderModel({
           provider,
           modelId,
@@ -251,7 +243,6 @@ describe("resolveModel forward-compat errors and overrides", () => {
           contextWindow: 8192,
           maxTokens: 512,
           compat: { supportsTools: false },
-          cost: expected,
         });
         expect(result.model?.cost).toEqual(expected);
         expect(fallback?.cost).toEqual(expected);
@@ -300,7 +291,6 @@ describe("resolveModel forward-compat errors and overrides", () => {
     const result = await resolveModelForTest(
       "azure-openai-responses",
       "customer-gpt-deployment",
-      "/tmp/agent",
       configWithProvider("azure-openai-responses", { baseUrl }),
     );
     expect(result.error).toBeUndefined();
@@ -317,7 +307,6 @@ describe("resolveModel forward-compat errors and overrides", () => {
     const result = await resolveModelForTest(
       "openai",
       "gpt-5.4",
-      "/tmp/agent",
       configWithProvider("openai", {
         baseUrl: "https://custom.example.com",
         headers: { "X-Custom-Auth": "token-123" },

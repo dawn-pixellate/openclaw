@@ -245,6 +245,7 @@ export function registerCompactionSafeguardTests({
         const primary = "summary-primary";
         const backup = "summary-backup";
         const explicitModel = scenario === "explicit model timeout";
+        const maxRetries = scenario === "corrective 408" ? 1 : 0;
         const fallbackSummary = [
           "## Decisions\nReview the deployment checklist before rollout.",
           "## Open TODOs\nCompare the remaining options.",
@@ -287,7 +288,7 @@ export function registerCompactionSafeguardTests({
             model,
             recentTurnsPreserve: 0,
             qualityGuardEnabled: true,
-            qualityGuardMaxRetries: scenario === "corrective 408" ? 1 : 0,
+            qualityGuardMaxRetries: maxRetries,
           });
           return [];
         });
@@ -305,7 +306,7 @@ export function registerCompactionSafeguardTests({
                 thinkingLevel: "off" as const,
                 ...(explicitModel ? { model: `openai/${primary}` } : {}),
                 recentTurnsPreserve: 0,
-                qualityGuard: { enabled: true, maxRetries: scenario === "corrective 408" ? 1 : 0 },
+                qualityGuard: { enabled: true, maxRetries },
               },
             },
           },
@@ -323,11 +324,12 @@ export function registerCompactionSafeguardTests({
           fallback ? [primary, backup] : [primary],
         );
         expect(config).toEqual(configBefore);
+        const compaction = sessionManager
+          .getBranch()
+          .findLast((entry) => entry.type === "compaction");
         if (outcome === "degrade") {
           expect(result).toMatchObject({ ok: true, compacted: true });
-          expect(
-            sessionManager.getBranch().findLast((entry) => entry.type === "compaction"),
-          ).toMatchObject({
+          expect(compaction).toMatchObject({
             summary: expect.stringContaining("Missing required sections."),
             details: { qualityDegraded: true },
           });
@@ -344,9 +346,7 @@ export function registerCompactionSafeguardTests({
           expect(result.result?.summary).toContain(
             "Review the deployment checklist before rollout.",
           );
-          expect(
-            sessionManager.getBranch().findLast((entry) => entry.type === "compaction"),
-          ).toMatchObject({
+          expect(compaction).toMatchObject({
             summary: expect.stringContaining(expectedSummaryRequest),
             details: { latestUnresolvedUserRequest: "Keep the rollout notes." },
           });

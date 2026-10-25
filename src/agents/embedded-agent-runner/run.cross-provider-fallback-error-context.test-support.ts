@@ -1,6 +1,6 @@
-// Full-entry coverage for current-attempt error context across model fallback.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import { createApiKeyCredential } from "../auth-profiles/credential-fixtures.test-support.js";
 import { makeAssistantMessageFixture } from "../test-helpers/assistant-message-fixtures.js";
 import { createModelFallbackConfig } from "../test-helpers/model-fallback-config-fixture.js";
 import { makeAttemptResult } from "./run.overflow-compaction.fixture.js";
@@ -41,33 +41,29 @@ function isCurrentAttemptAssistant(value: unknown): value is CurrentAttemptAssis
   );
 }
 
-function staleQuotaAssistant() {
-  return makeAssistantMessageFixture({
-    stopReason: "error",
-    errorMessage: "You exceeded your current OpenAI quota.",
+const makeCandidateAssistant = (overrides: Parameters<typeof makeAssistantMessageFixture>[0]) =>
+  makeAssistantMessageFixture({
+    provider: "deepseek",
+    model: "deepseek-chat",
+    content: [],
+    ...overrides,
+  });
+const staleQuotaAssistant = () =>
+  makeCandidateAssistant({
     provider: "openai",
     model: "gpt-5.4",
-    content: [],
+    errorMessage: "You exceeded your current OpenAI quota.",
   });
-}
 
 function setupDeepseekFallbackErrorMatchers() {
-  // DeepSeek matchers prove failover classification uses the current candidate
-  // assistant instead of stale history from the previous provider.
-  mockedIsFailoverAssistantError.mockImplementation((...args: unknown[]) => {
-    const assistant = args[0];
-    return isCurrentAttemptAssistant(assistant) && assistant.provider === "deepseek";
-  });
-  mockedIsRateLimitAssistantError.mockImplementation((...args: unknown[]) => {
-    const assistant = args[0];
-    return isCurrentAttemptAssistant(assistant) && assistant.provider === "deepseek";
-  });
+  const isDeepseek = (value: unknown) =>
+    isCurrentAttemptAssistant(value) && value.provider === "deepseek";
+  mockedIsFailoverAssistantError.mockImplementation(isDeepseek);
+  mockedIsRateLimitAssistantError.mockImplementation(isDeepseek);
   mockedClassifyFailoverReason.mockReturnValue("rate_limit");
 }
 
 function captureFormattedAssistant() {
-  // Capture the assistant passed to formatting so tests can inspect which
-  // provider/model error object drove the final failover message.
   let lastFormattedAssistant: unknown;
   mockedFormatAssistantErrorText.mockImplementation((...args: unknown[]) => {
     lastFormattedAssistant = args[0];
@@ -79,15 +75,6 @@ function captureFormattedAssistant() {
   return () => lastFormattedAssistant;
 }
 
-function expectDeepseekAssistant(value: unknown) {
-  if (!isCurrentAttemptAssistant(value)) {
-    throw new Error(`Expected DeepSeek assistant, got ${String(value)}`);
-  }
-  expect(value.provider).toBe("deepseek");
-  expect(value.model).toBe("deepseek-chat");
-  expect(value.errorMessage).toBe(DEEPSEEK_ERROR_MESSAGE);
-}
-
 function makeCrossProviderFallbackConfig() {
   return createModelFallbackConfig("openai/gpt-5.4", [
     "deepseek/deepseek-chat",
@@ -95,15 +82,20 @@ function makeCrossProviderFallbackConfig() {
   ]);
 }
 
-function makeDeepseekFallbackRunParams(runId: string) {
+function makeFallbackRunParams(
+  runId: string,
+  ownedState = state,
+  provider = "deepseek",
+  model = "deepseek-chat",
+) {
   return {
-    ...createOverflowRunParams(state),
+    ...createOverflowRunParams(ownedState),
     runId,
     config: makeCrossProviderFallbackConfig(),
     agentHarnessRuntimeOverride: "openclaw",
-    provider: "deepseek",
-    model: "deepseek-chat",
-    authProfileId: "deepseek:test",
+    provider,
+    model,
+    authProfileId: `${provider}:test`,
     authProfileIdSource: "user",
     modelFallbacksOverride: ["deepseek/deepseek-chat"],
   } satisfies Parameters<typeof runEmbeddedAgent>[0];
@@ -113,16 +105,8 @@ function useCrossProviderAuthFixture() {
   const store = {
     version: 1 as const,
     profiles: {
-      "anthropic:test": {
-        type: "api_key" as const,
-        provider: "anthropic",
-        key: "fixture",
-      },
-      "deepseek:test": {
-        type: "api_key" as const,
-        provider: "deepseek",
-        key: "fixture",
-      },
+      "anthropic:test": createApiKeyCredential("anthropic", "fixture"),
+      "deepseek:test": createApiKeyCredential("deepseek", "fixture"),
     },
   };
   mockedEnsureAuthProfileStore.mockReturnValue(store);
@@ -158,29 +142,15 @@ function setupCompactionRemovedFallbackAttempt() {
   );
 }
 
-function runCompactionRemovedFallbackAttempt(ownedState: OpenClawTestState) {
-  return runEmbeddedAgent({
-    ...createOverflowRunParams(ownedState),
-    runId: "run-compaction-fallback-error-context",
-    config: makeCrossProviderFallbackConfig(),
-    agentHarnessRuntimeOverride: "openclaw",
-    provider: "anthropic",
-    model: "test-model",
-    authProfileId: "anthropic:test",
-    authProfileIdSource: "user",
-    modelFallbacksOverride: ["deepseek/deepseek-chat"],
-  });
-}
-
-async function expectDeepseekFallbackError(promise: Promise<unknown>) {
-  await expect(promise).rejects.toBeInstanceOf(MockedFailoverError);
-  // The user-facing copy is composed by the real (unmocked) renderer; the
-  // current-attempt provider/model appearing in it is the attribution proof.
-  await expect(promise).rejects.toThrow("deepseek (deepseek-chat) returned a billing error");
-  expect(mockedIsRateLimitAssistantError).toHaveBeenCalledTimes(1);
-  const rateLimitCalls = mockedIsRateLimitAssistantError.mock.calls as unknown[][];
-  expectDeepseekAssistant(rateLimitCalls.at(-1)?.[0]);
-}
+const runCompactionRemovedFallbackAttempt = (ownedState: OpenClawTestState) =>
+  runEmbeddedAgent(
+    makeFallbackRunParams(
+      "run-compaction-fallback-error-context",
+      ownedState,
+      "anthropic",
+      "test-model",
+    ),
+  );
 
 describe("runEmbeddedAgent cross-provider fallback error handling", () => {
   beforeAll(async () => {
@@ -219,28 +189,27 @@ describe("runEmbeddedAgent cross-provider fallback error handling", () => {
     mockedRunEmbeddedAttempt.mockResolvedValueOnce(
       makeAttemptResult({
         assistantTexts: [],
-        lastAssistant: makeAssistantMessageFixture({
-          stopReason: "error",
+        lastAssistant: makeCandidateAssistant({
           errorMessage: "You have hit your ChatGPT usage limit (plus plan).",
           provider: "openai",
           model: "gpt-5.4",
-          content: [],
         }),
-        currentAttemptAssistant: makeAssistantMessageFixture({
-          stopReason: "error",
-          errorMessage: DEEPSEEK_ERROR_MESSAGE,
-          provider: "deepseek",
-          model: "deepseek-chat",
-          content: [],
-        }),
+        currentAttemptAssistant: makeCandidateAssistant({ errorMessage: DEEPSEEK_ERROR_MESSAGE }),
       }),
     );
 
     const promise = runEmbeddedAgent(
-      makeDeepseekFallbackRunParams("run-cross-provider-fallback-error-context"),
+      makeFallbackRunParams("run-cross-provider-fallback-error-context"),
     );
 
-    await expectDeepseekFallbackError(promise);
+    await expect(promise).rejects.toBeInstanceOf(MockedFailoverError);
+    await expect(promise).rejects.toThrow("deepseek (deepseek-chat) returned a billing error");
+    expect(mockedIsRateLimitAssistantError).toHaveBeenCalledTimes(1);
+    expect(mockedIsRateLimitAssistantError.mock.calls.at(-1)?.[0]).toMatchObject({
+      provider: "deepseek",
+      model: "deepseek-chat",
+      errorMessage: DEEPSEEK_ERROR_MESSAGE,
+    });
   });
 
   it("uses the completed assistant when compaction removes the current attempt slice", async () => {
@@ -261,8 +230,6 @@ describe("runEmbeddedAgent cross-provider fallback error handling", () => {
   });
 
   it("does not reuse a prior provider session assistant when the current candidate times out", async () => {
-    // Timeout failover has no reliable current assistant. Reusing the previous
-    // provider's session error would misattribute the failed candidate.
     const getLastFormattedAssistant = captureFormattedAssistant();
     mockedRunEmbeddedAttempt.mockResolvedValueOnce(
       makeAttemptResult({
@@ -273,9 +240,7 @@ describe("runEmbeddedAgent cross-provider fallback error handling", () => {
       }),
     );
 
-    const promise = runEmbeddedAgent(
-      makeDeepseekFallbackRunParams("run-stale-session-assistant-timeout"),
-    );
+    const promise = runEmbeddedAgent(makeFallbackRunParams("run-stale-session-assistant-timeout"));
 
     await expect(promise).rejects.toBeInstanceOf(MockedFailoverError);
     await expect(promise).rejects.toThrow("LLM request timed out.");
@@ -298,7 +263,7 @@ describe("runEmbeddedAgent cross-provider fallback error handling", () => {
     );
 
     const result = await runEmbeddedAgent(
-      makeDeepseekFallbackRunParams("run-stale-session-assistant-non-timeout"),
+      makeFallbackRunParams("run-stale-session-assistant-non-timeout"),
     );
 
     expect(mockedIsFailoverAssistantError).toHaveBeenCalledWith(undefined);
@@ -316,18 +281,15 @@ describe("runEmbeddedAgent cross-provider fallback error handling", () => {
       makeAttemptResult({
         assistantTexts: [],
         terminal: { kind: "timeout", phase: "prompt", source: "runtime" },
-        currentAttemptAssistant: makeAssistantMessageFixture({
+        currentAttemptAssistant: makeCandidateAssistant({
           stopReason: "stop",
           errorMessage: "500 stale provider diagnostic",
-          provider: "deepseek",
-          model: "deepseek-chat",
-          content: [],
         }),
       }),
     );
 
     const promise = runEmbeddedAgent(
-      makeDeepseekFallbackRunParams("run-successful-assistant-stale-error-timeout"),
+      makeFallbackRunParams("run-successful-assistant-stale-error-timeout"),
     );
 
     await expect(promise).rejects.toBeInstanceOf(MockedFailoverError);
@@ -348,11 +310,9 @@ describe("runEmbeddedAgent cross-provider fallback error handling", () => {
       mockedRunEmbeddedAttempt.mockResolvedValue(
         makeAttemptResult({
           assistantTexts: ["Successful reply"],
-          currentAttemptAssistant: makeAssistantMessageFixture({
+          currentAttemptAssistant: makeCandidateAssistant({
             stopReason: "stop",
             errorMessage: 'think value "high" is not supported for this model',
-            provider: "deepseek",
-            model: "deepseek-chat",
             content: [{ type: "text", text: "Successful reply" }],
           }),
         }),
