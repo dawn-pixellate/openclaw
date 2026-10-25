@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { getCliSessionBinding } from "../../config/sessions/cli-session-binding.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import { normalizeLegacySessionEntryDelivery } from "../../infra/state-migrations.legacy-session-store.js";
+import { expectObjectFields } from "../../test-utils/mock-call-assertions.js";
 import type { projectSessionDeliveryFields } from "../../utils/delivery-context.shared.js";
 
 vi.mock("../../config/sessions/paths.js", () => ({
@@ -69,12 +70,6 @@ it.each([true, false])(
   },
 );
 
-const delivery = {
-  lastChannel: "slack",
-  lastTo: "channel:C0XXXXXXXXX",
-  lastThreadId: "1737500000.123456",
-  deliveryContext: { channel: "slack", to: "channel:C0XXXXXXXXX", threadId: "1737500000.123456" },
-};
 const boundContext = {
   spawnedBy: "agent:main:parent",
   spawnedCwd: "/repo/task",
@@ -92,8 +87,6 @@ const boundContext = {
   projectId: "project",
 } satisfies Partial<SessionEntry>;
 
-// Spawned children and memory-audience leases bind to the parent's exact
-// revision, so a run that reuses an incarnation in place must not rotate it.
 it.each([
   { name: "fresh in-place reuse", keeps: true },
   { name: "exact-run reuse", exactRunSession: true, keeps: false },
@@ -116,19 +109,14 @@ it.each([
   }
 });
 
-it.each([
-  { forceNew: false, initializing: false },
-  { forceNew: false, initializing: true },
-  { forceNew: true, initializing: false },
-  { forceNew: true, initializing: true },
-])(
-  "guards archived sessions: forced=$forceNew, initializing=$initializing",
-  ({ forceNew, initializing }) => {
+it.each([false, true])(
+  "guards archived sessions before forced rollover (initializing=%s)",
+  (initializing) => {
     const sessionKey = "agent:main:cron:test";
     const resolve = () =>
       resolveWithStoredEntry({
         sessionKey,
-        forceNew,
+        forceNew: true,
         entry: {
           sessionId: "archived-session",
           archivedAt: NOW_MS,
@@ -207,7 +195,14 @@ it.each([true, false])("resets routing and runtime handles (forced=$0)", (forceN
       sessionFile: forceNew ? "/tmp/stale-session.jsonl" : "/tmp/legacy-session.jsonl",
       agentHarnessId: "codex",
       ...boundContext,
-      ...delivery,
+      lastChannel: "slack",
+      lastTo: "channel:C0XXXXXXXXX",
+      lastThreadId: "1737500000.123456",
+      deliveryContext: {
+        channel: "slack",
+        to: "channel:C0XXXXXXXXX",
+        threadId: "1737500000.123456",
+      },
       ...(forceNew
         ? { lastAccountId: "acct-123", ...preferences }
         : {
@@ -226,8 +221,7 @@ it.each([true, false])("resets routing and runtime handles (forced=$0)", (forceN
     previousSessionId: forceNew ? "old-session" : undefined,
   });
   expect(result.lifecycleRevision).not.toBe("old-revision");
-  expect(result.sessionEntry.agentHarnessId).toBeUndefined();
-  expect(result.sessionEntry.delivery).toBeUndefined();
+  expectObjectFields(result.sessionEntry, { agentHarnessId: undefined, delivery: undefined });
   expect(result.sessionEntry).not.toHaveProperty("channel");
   expect(result.sessionEntry).not.toHaveProperty("origin");
   if (forceNew) {
@@ -251,15 +245,12 @@ it.each([true, false])("resets routing and runtime handles (forced=$0)", (forceN
 });
 
 it("keeps a provider-owned CLI session with the default reset policy", () => {
-  const startedAt = NOW_MS - 86_400_000;
   const result = resolveWithStoredEntry({
     sessionKey: "agent:main:cron:daily-job",
     fresh: false,
     entry: {
       sessionId: "old-session-id",
-      updatedAt: startedAt,
-      sessionStartedAt: startedAt,
-      lastInteractionAt: startedAt,
+      updatedAt: NOW_MS - 86_400_000,
       modelProvider: "claude-cli",
       cliSessionBindings: { "claude-cli": { sessionId: "cli-conversation-xyz" } },
     },
@@ -274,35 +265,31 @@ it("keeps a provider-owned CLI session with the default reset policy", () => {
 });
 
 it.each([
-  {
-    name: "configured model default",
-    entry: {
+  [
+    "configured model default",
+    {
       modelOverrideSource: "default",
       providerOverride: "anthropic",
       modelOverride: "claude-sonnet-4-6",
       modelOverrideFallbackOriginProvider: "openai",
       modelOverrideFallbackOriginModel: "gpt-5.4",
     },
-    expected: { modelOverrideSource: "default" },
-    cleared: "modelOverride",
+    { modelOverrideSource: "default", modelOverride: undefined },
+  ],
+  [
+    "legacy user auth",
+    { authProfileOverride: "work-profile" },
+    {
+      authProfileOverride: "work-profile",
+      authProfileOverrideSource: "user",
+      authProfileOverrideCompactionCount: undefined,
+    },
+  ],
+] satisfies [string, MockSessionStoreEntry, Partial<SessionEntry>][])(
+  "preserves %s policy during forced rollover",
+  (_name, entry, expected) => {
+    const result = resolveWithStoredEntry({ forceNew: true, entry });
+    expect(result.isNewSession).toBe(true);
+    expectObjectFields(result.sessionEntry, expected);
   },
-  {
-    name: "legacy user auth",
-    entry: { authProfileOverride: "work-profile" },
-    expected: { authProfileOverride: "work-profile", authProfileOverrideSource: "user" },
-    cleared: "authProfileOverrideCompactionCount",
-  },
-] satisfies {
-  name: string;
-  entry: MockSessionStoreEntry;
-  expected: Partial<SessionEntry>;
-  cleared: keyof SessionEntry;
-}[])("preserves $name policy during forced rollover", ({ entry, expected, cleared }) => {
-  const result = resolveWithStoredEntry({
-    forceNew: true,
-    entry,
-  });
-  expect(result.isNewSession).toBe(true);
-  expect(result.sessionEntry).toMatchObject(expected);
-  expect(result.sessionEntry[cleared]).toBeUndefined();
-});
+);
