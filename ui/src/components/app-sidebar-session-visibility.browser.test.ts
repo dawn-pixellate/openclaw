@@ -79,29 +79,14 @@ function runState(
 
 function visibilityProbe() {
   const NativeObserver = IntersectionObserver;
-  const observers: IntersectionObserver[] = [];
   const activeObservers = new Set<IntersectionObserver>();
   const observed = new Set<Element>();
-  const intersections = new Map<Element, IntersectionObserverEntry>();
-  let delivery = Promise.withResolvers<void>();
-  let deliveryReady = () => true;
   vi.stubGlobal(
     "IntersectionObserver",
     class extends NativeObserver {
       constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
-        super((entries, observer) => {
-          callback(entries, observer);
-          if (options?.root instanceof Element && options.root.matches(".sidebar-shell__body")) {
-            for (const entry of entries) {
-              intersections.set(entry.target, entry);
-            }
-            if (deliveryReady()) {
-              delivery.resolve();
-            }
-          }
-        }, options);
+        super(callback, options);
         if (options?.root instanceof Element && options.root.matches(".sidebar-shell__body")) {
-          observers.push(this);
           activeObservers.add(this);
         }
       }
@@ -121,19 +106,7 @@ function visibilityProbe() {
       }
     },
   );
-  return {
-    observers,
-    activeObservers,
-    observed,
-    intersections,
-    get delivered() {
-      return delivery.promise;
-    },
-    reset(ready = () => true) {
-      deliveryReady = ready;
-      delivery = Promise.withResolvers<void>();
-    },
-  };
+  return { activeObservers, observed };
 }
 
 it("unmounts offscreen session content and restores its live indicators when scrolled back", async () => {
