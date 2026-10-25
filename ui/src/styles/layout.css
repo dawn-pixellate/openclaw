@@ -1427,7 +1427,7 @@ openclaw-settings-save-indicator:empty {
 /* Pointer hover shares the session-row fill so the whole header reads as one
    grabbable row; keyboard focus keeps the label lift and its own focus ring. */
 .sidebar-recent-sessions__head:hover {
-  background: color-mix(in srgb, var(--bg-hover) 78%, transparent);
+  background: var(--surface-hover);
 }
 
 .sidebar-recent-sessions__head:where(:hover, :has(:focus-visible)),
@@ -1991,10 +1991,7 @@ openclaw-settings-save-indicator:empty {
 }
 
 .sidebar-recent-session:hover {
-  --session-row-bg: var(
-    --session-row-hover-tint,
-    color-mix(in srgb, var(--bg-hover) 78%, transparent)
-  );
+  --session-row-bg: var(--session-row-hover-tint, var(--surface-hover));
 
   color: var(--text);
 }
@@ -2005,7 +2002,7 @@ openclaw-settings-save-indicator:empty {
    Doubled class outranks .sidebar-recent-session:hover so the selection fill
    does not degrade to the weaker hover fill while the row is under pointer. */
 .sidebar-recent-session.sidebar-recent-session--active {
-  --session-row-bg: color-mix(in srgb, var(--text) 10%, transparent);
+  --session-row-bg: var(--surface-selected);
 
   color: var(--text-strong);
 }
@@ -3074,7 +3071,7 @@ a:is(
 .settings-sidebar__item:hover,
 .nav-item:hover {
   color: var(--text);
-  background: color-mix(in srgb, var(--bg-hover) 84%, transparent);
+  background: var(--surface-hover);
   border-color: color-mix(in srgb, var(--border) 72%, transparent);
 }
 
@@ -3086,8 +3083,14 @@ a:is(
 .nav-item.active,
 .nav-item--active {
   color: var(--text-strong);
-  background: color-mix(in srgb, var(--accent-subtle) 88%, var(--bg-elevated) 12%);
-  border-color: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: var(--surface-selected);
+  border-color: var(--navigation-selected-border);
+}
+
+.settings-sidebar__item--active:hover,
+.nav-item--active:hover,
+.nav-item.active:hover {
+  background: var(--surface-selected-hover);
 }
 
 .nav-item.active .nav-item__icon,
@@ -3148,10 +3151,7 @@ a:is(
 }
 
 .sidebar-zone-entry .sidebar-recent-session:hover {
-  --session-row-bg: var(
-    --session-row-hover-tint,
-    color-mix(in srgb, var(--bg-hover) 84%, transparent)
-  );
+  --session-row-bg: var(--session-row-hover-tint, var(--surface-hover));
 
   --session-row-border: color-mix(in srgb, var(--border) 72%, transparent);
 
@@ -3159,16 +3159,23 @@ a:is(
 }
 
 .sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--active {
-  --session-row-bg: color-mix(in srgb, var(--text) 10%, transparent);
+  --session-row-bg: var(--surface-selected);
 
-  --session-row-border: color-mix(in srgb, var(--accent) 16%, transparent);
+  --session-row-border: var(--navigation-selected-border);
 
   color: var(--text-strong);
 }
 
+.sidebar-recent-session.sidebar-recent-session--active:hover,
+.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--active:hover {
+  --session-row-bg: var(--surface-selected-hover);
+}
+
 /* Multi-select overrides both tag and active fills, including pinned rows. */
 .sidebar-recent-session.sidebar-recent-session--selected,
-.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--selected {
+.sidebar-recent-session.sidebar-recent-session--selected:hover,
+.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--selected,
+.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--selected:hover {
   --session-row-bg: color-mix(in srgb, var(--accent) 14%, transparent);
 
   color: var(--text-strong);

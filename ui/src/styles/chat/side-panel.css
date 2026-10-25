@@ -440,7 +440,7 @@ openclaw-chat-detail-panel,
   width: 100%;
   align-items: center;
   border: 0;
-  color: var(--muted);
+  color: var(--text);
   font-size: var(--control-ui-text-sm);
   text-align: start;
   cursor: var(--cursor-action);
@@ -451,11 +451,7 @@ openclaw-chat-detail-panel,
   gap: 12px 8px;
   padding: 14px 12px;
   border-radius: var(--radius-lg);
-  background: var(--bg-hover);
-}
-
-.sidebar-region--desktop .side-panel-launcher__card {
-  background: var(--bg-elevated);
+  background: var(--bg-accent);
 }
 
 .sidebar-region--desktop .side-panel-launcher__card:is(:hover, :focus-visible) {
@@ -463,7 +459,7 @@ openclaw-chat-detail-panel,
 }
 
 .sidebar-region--desktop .side-panel-launcher__card[aria-disabled="true"] {
-  background: var(--bg-elevated);
+  background: var(--bg-accent);
   color: var(--muted);
   opacity: 0.5;
   cursor: not-allowed;
@@ -513,7 +509,7 @@ openclaw-chat-detail-panel,
 .side-panel-launcher__card:focus-visible,
 .side-panel-launcher__item:hover,
 .side-panel-launcher__item:focus-visible {
-  background: var(--bg-accent);
+  background: var(--bg-hover);
   color: var(--text);
 }
 
@@ -660,8 +656,9 @@ openclaw-chat-detail-panel,
 }
 
 .side-panel-position__option[aria-checked="true"] {
-  background: var(--border-strong);
-  border-color: var(--border-hover);
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  box-shadow: var(--shadow-sm);
 }
 
 .side-panel-position-menu__separator {
