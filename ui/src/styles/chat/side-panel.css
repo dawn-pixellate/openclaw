@@ -454,10 +454,6 @@ openclaw-chat-detail-panel,
   background: var(--bg-accent);
 }
 
-.sidebar-region--desktop .side-panel-launcher__card:is(:hover, :focus-visible) {
-  background: var(--bg-hover);
-}
-
 .sidebar-region--desktop .side-panel-launcher__card[aria-disabled="true"] {
   background: var(--bg-accent);
   color: var(--muted);

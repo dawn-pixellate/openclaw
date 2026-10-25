@@ -3166,16 +3166,14 @@ a:is(
   color: var(--text-strong);
 }
 
-.sidebar-recent-session.sidebar-recent-session--active:hover,
-.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--active:hover {
+.sidebar-recent-session.sidebar-recent-session--active:hover {
   --session-row-bg: var(--surface-selected-hover);
 }
 
 /* Multi-select overrides both tag and active fills, including pinned rows. */
 .sidebar-recent-session.sidebar-recent-session--selected,
 .sidebar-recent-session.sidebar-recent-session--selected:hover,
-.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--selected,
-.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--selected:hover {
+.sidebar-zone-entry .sidebar-recent-session.sidebar-recent-session--selected {
   --session-row-bg: color-mix(in srgb, var(--accent) 14%, transparent);
 
   color: var(--text-strong);
