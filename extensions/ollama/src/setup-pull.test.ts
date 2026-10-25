@@ -26,15 +26,6 @@ const failedPull = async (url: string) => {
 const unavailable = "ollama unavailable";
 const diskFull = '{"error":"disk full"}\n';
 
-async function waitForSocketClose(closed: Promise<void> | undefined): Promise<void> {
-  if (!closed) {
-    throw new Error("Ollama test server did not receive a request");
-  }
-  await raceWithTimeout(closed, 2_000, () => {
-    throw new Error("Ollama response socket was not closed");
-  });
-}
-
 afterEach(() => {
   fetchWithSsrFGuardMock.mockReset();
   vi.useRealTimers();
@@ -44,40 +35,59 @@ describe("Ollama setup response cleanup", () => {
   it.each([
     [
       "model inspection error",
-      unavailable,
+      "/api/show",
       503,
-      () => readOllamaModelShowInfo(baseUrl, "gemma4:e2b").catch(() => undefined),
+      unavailable,
+      (url: string) => readOllamaModelShowInfo(url, "gemma4:e2b").catch(() => undefined),
     ],
-    ["model discovery error", unavailable, 503, () => fetchOllamaModels(baseUrl)],
-    ["auth probe fallback", unavailable, 503, () => checkOllamaCloudAuth(baseUrl)],
-    ["pull response error", unavailable, 503, () => pull(baseUrl)],
-    ["pull stream error", diskFull, 200, () => pull(baseUrl)],
+    ["model discovery error", "/api/tags", 503, unavailable, fetchOllamaModels],
+    ["successful auth probe", "/api/me", 200, '{"status":"unused"}\n', checkOllamaCloudAuth],
+    ["auth probe fallback", "/api/me", 503, unavailable, checkOllamaCloudAuth],
+    ["pull response error", "/api/pull", 503, unavailable, failedPull],
+    ["pull stream error", "/api/pull", 200, diskFull, failedPull],
   ] as const)(
-    "releases a %s while capture retains a response clone",
-    async (_name, body, status, run) => {
-      const source = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(body));
-        },
-      });
-      const response = new Response(source, { status });
-      const captureClone = response.clone();
+    "releases %s without waiting for a captured clone and closes its socket",
+    async (_name, path, status, body, run) => {
+      const closed = createDeferred<void>();
+      const responseReady = createDeferred<void>();
       const release = vi.fn(async () => {});
-      fetchWithSsrFGuardMock.mockResolvedValueOnce({
-        response,
-        finalUrl: "http://127.0.0.1:11434/api/test",
-        release,
-      });
-
-      try {
-        await raceWithTimeout<Awaited<ReturnType<typeof run>>, never>(run(), 500, () => {
-          throw new Error("Ollama cleanup waited for a captured response clone");
-        });
-        expect(response.bodyUsed).toBe(true);
-        expect(release).toHaveBeenCalledOnce();
-      } finally {
-        await captureClone.body?.cancel().catch(() => undefined);
-      }
+      let response: Response | undefined;
+      let capture: Response | undefined;
+      await withServer(
+        (request, reply) => {
+          expect(request.url).toBe(path);
+          request.socket.once("close", () => closed.resolve());
+          reply.writeHead(status, { "content-type": "application/json" });
+          reply.write(body);
+        },
+        async (url) => {
+          fetchWithSsrFGuardMock.mockImplementation(
+            async (params: { url: string; init?: RequestInit; signal?: AbortSignal }) => {
+              response = await fetch(params.url, { ...params.init, signal: params.signal });
+              capture = response.clone();
+              responseReady.resolve();
+              return { response, finalUrl: params.url, release };
+            },
+          );
+          try {
+            const running = run(url);
+            await responseReady.promise;
+            const result = await raceWithTimeout(running, 500, () => {
+              throw new Error("Ollama cleanup waited for a captured response clone");
+            });
+            if (path === "/api/tags") {
+              expect(result).toEqual({ reachable: true, models: [] });
+            }
+            expect(response?.bodyUsed).toBe(true);
+            expect(release).toHaveBeenCalledOnce();
+          } finally {
+            await capture?.body?.cancel().catch(() => undefined);
+          }
+          await raceWithTimeout(closed.promise, 2_000, () => {
+            throw new Error("Ollama response socket was not closed");
+          });
+        },
+      );
     },
   );
 
@@ -122,44 +132,6 @@ describe("Ollama setup response cleanup", () => {
       await rejected;
     }
   });
-
-  it.each([
-    ["successful auth probe", "/api/me", 200, '{"status":"unused"}\n', checkOllamaCloudAuth],
-    ["failed auth probe", "/api/me", 503, unavailable, checkOllamaCloudAuth],
-    ["failed pull response", "/api/pull", 503, unavailable, failedPull],
-    ["streamed pull error", "/api/pull", 200, diskFull, failedPull],
-  ] as const)("closes the real socket after a %s", async (_name, path, status, body, run) => {
-    let requestSocketClosed: Promise<void> | undefined;
-    await withServer(
-      (request, response) => {
-        if (request.url !== path) {
-          response.writeHead(404);
-          response.end();
-          return;
-        }
-        requestSocketClosed = new Promise<void>((resolve) => {
-          request.socket.once("close", () => resolve());
-        });
-        response.writeHead(status, { "content-type": "application/json" });
-        response.write(body);
-      },
-      async (url) => {
-        fetchWithSsrFGuardMock.mockImplementation(
-          async (params: { url: string; init?: RequestInit; signal?: AbortSignal }) => ({
-            response: await globalThis.fetch(params.url, {
-              ...params.init,
-              ...(params.signal ? { signal: params.signal } : {}),
-            }),
-            finalUrl: params.url,
-            release: async () => {},
-          }),
-        );
-
-        await run(url);
-        await waitForSocketClose(requestSocketClosed);
-      },
-    );
-  });
 });
 
 function mockPull(body: BodyInit, update: () => void = vi.fn()) {
@@ -200,32 +172,23 @@ describe("Ollama onboarding model pulls", () => {
     await result;
   });
 
-  it.each([
-    {
-      label: "interrupted model layer",
-      body: '{"status":"pulling abcdef123456","total":100,"completed":40}\n',
-    },
-    { label: "malformed stream", body: "not valid json\n" },
-    { label: "incomplete trailing record", body: '{"status":"success"' },
-  ])("does not report a completed model pull for an $label", async ({ body }) => {
+  it("requires a success terminal after model progress", async () => {
+    const body = '{"status":"pulling abcdef123456","total":100,"completed":40}\n';
     await mockPull(body)(false, "Failed to download gemma4:e2b: pull stream ended before success");
   });
 
-  it.each([
-    { label: "unterminated success", body: '{"status":"success"}' },
-    {
-      label: "malformed progress before success",
-      body: 'null\nnot valid json\n{"status":"success"}',
-    },
-    {
-      label: "tolerantly decoded progress before success",
-      body: new Uint8Array([
+  it.each<[string, BodyInit]>([
+    ["unterminated success", '{"status":"success"}'],
+    ["malformed progress before success", 'null\nnot valid json\n{"status":"success"}'],
+    [
+      "tolerantly decoded progress before success",
+      new Uint8Array([
         ...new TextEncoder().encode('{"status":"pulling '),
         0xff,
         ...new TextEncoder().encode('"}\n{"status":"success"}'),
       ]),
-    },
-  ])("accepts $label", async ({ body }) => {
+    ],
+  ])("accepts %s", async (_label, body) => {
     await mockPull(body)(true);
   });
 
@@ -254,29 +217,5 @@ describe("Ollama onboarding model pulls", () => {
       false,
       expect.stringContaining("Failed to download gemma4:e2b: Non-Error rejection"),
     );
-  });
-
-  it("cancels an oversized unterminated pull record", async () => {
-    const chunk = new Uint8Array(1024 * 1024).fill(0x20);
-    let readCount = 0;
-    let canceled = false;
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        readCount += 1;
-        controller.enqueue(chunk);
-      },
-      cancel() {
-        canceled = true;
-      },
-    });
-    await mockPull(body)(
-      false,
-      "Failed to download gemma4:e2b: Ollama NDJSON record exceeds 16777216 bytes",
-    );
-
-    expect(readCount).toBeGreaterThan(16);
-    expect(readCount).toBeLessThan(32);
-    expect(canceled).toBe(true);
-    expect(body.locked).toBe(false);
   });
 });

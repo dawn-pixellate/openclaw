@@ -1,6 +1,5 @@
-// Real SSRF guard and loopback transport, including reflected-credential redaction.
 import "openclaw/plugin-sdk/compiled-subprocess-testing";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { buffer as consumeBuffer } from "node:stream/consumers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { listenOnLoopback } from "../../test-support/hanging-loopback-server.js";
@@ -15,7 +14,7 @@ type OllamaRequest = {
   body: string;
 };
 
-const servers: Array<{ close: () => Promise<void> }> = [];
+const servers: Server[] = [];
 
 function mixPercentEscapeCase(value: string): string {
   return value.replace(/%[0-9A-F]{2}/gu, (escape, offset: number) =>
@@ -28,32 +27,24 @@ async function startOllamaServer(
   respond: string | ((request: OllamaRequest) => Record<string, unknown>),
 ) {
   const requests: OllamaRequest[] = [];
-  const server = createServer((req, res) => {
-    void (async () => {
-      const bodyBuffer = await consumeBuffer(req);
-      const request: OllamaRequest = {
-        method: req.method,
-        url: req.url,
-        authorization: req.headers.authorization,
-        proxyAuthorization: req.headers["proxy-authorization"],
-        proxyAuth:
-          typeof req.headers["x-proxy-auth"] === "string" ? req.headers["x-proxy-auth"] : undefined,
-        body: bodyBuffer.toString("utf8"),
-      };
-      requests.push(request);
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(typeof respond === "string" ? respond : JSON.stringify(respond(request)));
-    })();
+  const server = createServer(async (req, res) => {
+    const bodyBuffer = await consumeBuffer(req);
+    const request: OllamaRequest = {
+      method: req.method,
+      url: req.url,
+      authorization: req.headers.authorization,
+      proxyAuthorization: req.headers["proxy-authorization"],
+      proxyAuth:
+        typeof req.headers["x-proxy-auth"] === "string" ? req.headers["x-proxy-auth"] : undefined,
+      body: bodyBuffer.toString("utf8"),
+    };
+    requests.push(request);
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(typeof respond === "string" ? respond : JSON.stringify(respond(request)));
   });
-
   const port = await listenOnLoopback(server);
 
-  servers.push({
-    close: () =>
-      new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      }),
-  });
+  servers.push(server);
 
   return { baseUrl: `http://127.0.0.1:${port}`, requests };
 }
@@ -110,7 +101,7 @@ function formEncode(value: string) {
 describe("Ollama embedding provider real transport", () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
-    await Promise.all(servers.splice(0).map((server) => server.close()));
+    await Promise.all(servers.splice(0).map((server) => server[Symbol.asyncDispose]()));
   });
 
   it("redacts bare authorization credentials reflected under unknown fields", async () => {
@@ -121,7 +112,6 @@ describe("Ollama embedding provider real transport", () => {
       upstreamEcho: request.authorization?.replace(/^\S+\s+/u, ""),
       proxyUpstreamEcho: request.proxyAuthorization?.replace(/^\S+\s+/u, ""),
     }));
-
     const error = await captureEmbeddingError(
       createOptions(server.baseUrl, {
         headers: {
@@ -154,7 +144,6 @@ describe("Ollama embedding provider real transport", () => {
         ? mixPercentEscapeCase(formEncode(request.proxyAuth))
         : undefined,
     }));
-
     const ollama = {
       baseUrl: server.baseUrl,
       models: [],
@@ -186,7 +175,6 @@ describe("Ollama embedding provider real transport", () => {
     const safeMarker = "bounded embedding diagnostic: ";
     const body = `${safeMarker}${"x".repeat(8 * 1024 - safeMarker.length - retainedPrefix.length)}${proxyAuth} trailing text`;
     const server = await startOllamaServer(429, body);
-
     const error = await captureEmbeddingError(
       createOptions(server.baseUrl, { headers: { "X-Proxy-Auth": proxyAuth } }),
     );
@@ -204,7 +192,6 @@ describe("Ollama embedding provider real transport", () => {
       ...createOptions(server.baseUrl, { apiKey, headers: { "X-Proxy-Auth": proxyAuth } }),
       dimensions,
     });
-
     const vector = await provider.embed("hello", { inputType: "query" });
 
     expectRequest(server, { authorization: `Bearer ${apiKey}`, proxyAuth });

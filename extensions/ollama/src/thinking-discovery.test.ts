@@ -29,31 +29,28 @@ function mockOllama(modelId: string, thinking: unknown) {
   };
   let showCount = 0;
   const chatBodies: Record<string, unknown>[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const pathname = new URL(requestUrl(input)).pathname;
-      if (pathname === "/api/tags") {
-        return jsonResponse({ models: [{ name: modelId, digest: metadata.digest }] });
-      }
-      if (pathname === "/api/show") {
-        showCount++;
-        return jsonResponse({
-          model_info: {
-            "test.context_length": 32768,
-            "general.parameter_count": metadata.parameterCount,
-          },
-          capabilities: ["completion", "thinking"],
-          ...(metadata.thinking === undefined ? {} : { thinking: metadata.thinking }),
-        });
-      }
-      if (pathname !== "/api/chat" || typeof init?.body !== "string") {
-        throw new Error(`Unexpected Ollama request: ${pathname}`);
-      }
-      chatBodies.push(requireRecord(JSON.parse(init.body), "Ollama chat request"));
-      return jsonResponse({ message: { role: "assistant", content: "ok" }, done: true });
-    }),
-  );
+  vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const pathname = new URL(requestUrl(input)).pathname;
+    if (pathname === "/api/tags") {
+      return jsonResponse({ models: [{ name: modelId, digest: metadata.digest }] });
+    }
+    if (pathname === "/api/show") {
+      showCount++;
+      return jsonResponse({
+        model_info: {
+          "test.context_length": 32768,
+          "general.parameter_count": metadata.parameterCount,
+        },
+        capabilities: ["completion", "thinking"],
+        ...(metadata.thinking === undefined ? {} : { thinking: metadata.thinking }),
+      });
+    }
+    if (pathname !== "/api/chat" || typeof init?.body !== "string") {
+      throw new Error(`Unexpected Ollama request: ${pathname}`);
+    }
+    chatBodies.push(requireRecord(JSON.parse(init.body), "Ollama chat request"));
+    return jsonResponse({ message: { role: "assistant", content: "ok" }, done: true });
+  });
   return {
     metadata,
     showCount: () => showCount,

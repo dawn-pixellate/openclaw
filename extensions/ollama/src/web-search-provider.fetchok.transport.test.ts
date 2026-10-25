@@ -1,4 +1,5 @@
 import "openclaw/plugin-sdk/compiled-subprocess-testing";
+import { expectDefined } from "@openclaw/normalization-core";
 import { withServer } from "openclaw/plugin-sdk/test-env";
 import { raceWithTimeout } from "openclaw/plugin-sdk/time-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,14 +11,11 @@ const loopback = vi.hoisted(() => ({
   boundaryCredentialAtCap: false,
   authorization: undefined as string | undefined,
   socketClosed: undefined as Promise<void> | undefined,
-  releases: [] as boolean[],
+  releases: 0,
 }));
 
 async function waitForSocketClose(closed: Promise<void> | undefined): Promise<void> {
-  if (!closed) {
-    throw new Error("Ollama web search test server did not receive a request");
-  }
-  await raceWithTimeout(closed, 2_000, () => {
+  await raceWithTimeout(expectDefined(closed, "Ollama request socket"), 2_000, () => {
     throw new Error("Ollama auth-failure response was not canceled before guarded release");
   });
 }
@@ -41,7 +39,7 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
               await waitForSocketClose(loopback.socketClosed);
             }
           } finally {
-            loopback.releases.push(guarded.response.bodyUsed);
+            loopback.releases++;
             await guarded.release();
           }
         },
@@ -53,17 +51,16 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
 const { createOllamaWebSearchProvider } = await import("../web-search-provider.js");
 
 function createSearchTool(apiKey?: string) {
-  const tool = createOllamaWebSearchProvider().createTool({
-    config: apiKey
-      ? createModelProviderConfig({
-          ollama: { baseUrl: "https://ollama.com", api: "ollama", models: [], apiKey },
-        })
-      : {},
-  });
-  if (!tool) {
-    throw new Error("Expected Ollama web search tool");
-  }
-  return tool;
+  return expectDefined(
+    createOllamaWebSearchProvider().createTool({
+      config: apiKey
+        ? createModelProviderConfig({
+            ollama: { baseUrl: "https://ollama.com", api: "ollama", models: [], apiKey },
+          })
+        : {},
+    }),
+    "Ollama web search tool",
+  );
 }
 
 async function captureSearchError(tool: ReturnType<typeof createSearchTool>): Promise<Error> {
@@ -76,8 +73,6 @@ async function captureSearchError(tool: ReturnType<typeof createSearchTool>): Pr
   return error;
 }
 
-const RESPONSE_BODY = '{"error":"unauthorized"}';
-
 function withSearchServer(run: () => Promise<void>) {
   return withServer(
     (request, response) => {
@@ -86,26 +81,19 @@ function withSearchServer(run: () => Promise<void>) {
         request.socket.once("close", resolve);
       });
       const bearerCredential = loopback.authorization?.replace(/^\S+\s+/u, "") ?? "";
-      const responseBody = (() => {
-        if (loopback.status === 429) {
-          if (loopback.boundaryCredentialAtCap) {
-            const retainedPrefix = bearerCredential.slice(0, -5);
-            const safeMarker = "bounded web-search diagnostic: ";
-            return `${safeMarker}${"x".repeat(64_000 - safeMarker.length - retainedPrefix.length)}${bearerCredential} trailing text`;
-          }
-          return JSON.stringify({
-            error: "rate limit exceeded",
-            authorizationEcho: loopback.authorization,
-            bearerEcho: bearerCredential,
-          });
-        }
-        if (loopback.status === 200) {
-          return JSON.stringify({
-            results: [{ title: "Success", url: "https://example.com", content: "control" }],
-          });
-        }
-        return RESPONSE_BODY;
-      })();
+      const bodies: Record<number, unknown> = {
+        200: { results: [{ title: "Success", url: "https://example.com", content: "control" }] },
+        429: {
+          error: "rate limit exceeded",
+          authorizationEcho: loopback.authorization,
+          bearerEcho: bearerCredential,
+        },
+      };
+      let responseBody = JSON.stringify(bodies[loopback.status] ?? { error: "unauthorized" });
+      if (loopback.status === 429 && loopback.boundaryCredentialAtCap) {
+        const safeMarker = "bounded web-search diagnostic: ";
+        responseBody = `${safeMarker}${"x".repeat(64_000 - safeMarker.length - (bearerCredential.length - 5))}${bearerCredential} trailing text`;
+      }
       const completedResponse = loopback.status === 429 || loopback.status === 200;
       response.writeHead(loopback.status, {
         "content-length": String(
@@ -131,7 +119,7 @@ beforeEach(() => {
   loopback.boundaryCredentialAtCap = false;
   loopback.authorization = undefined;
   loopback.socketClosed = undefined;
-  loopback.releases = [];
+  loopback.releases = 0;
 });
 
 describe("ollama web search guarded fetch", () => {
@@ -147,20 +135,17 @@ describe("ollama web search guarded fetch", () => {
         statusCode: status,
         message: expect.stringContaining(message),
       });
-      expect(loopback.releases.length).toBeGreaterThan(0);
-      for (const release of loopback.releases) {
-        expect(release).toBe(true);
-      }
+      expect(loopback.releases).toBeGreaterThan(0);
     }),
   );
 
-  it("redacts a reflected bearer credential from a real completed 429 response", () =>
+  it.each([false, true])("redacts a real 429 bearer echo, split at the cap=%s", (boundary) =>
     withSearchServer(async () => {
       loopback.status = 429;
-      const bearerCredential = "web-search-transport-bearer-secret";
+      loopback.boundaryCredentialAtCap = boundary;
+      const bearerCredential = "web-search-boundary-credential-secret";
       const authorization = `Bearer ${bearerCredential}`;
       const tool = createSearchTool(bearerCredential);
-
       const error = await captureSearchError(tool);
 
       expect(loopback.authorization).toBe(authorization);
@@ -169,28 +154,18 @@ describe("ollama web search guarded fetch", () => {
         statusCode: 429,
         message: expect.stringContaining("Ollama web search failed (429)"),
       });
-      expect(error.message).toContain("rate limit exceeded");
+      expect(error.message).toContain(
+        boundary ? "bounded web-search diagnostic" : "rate limit exceeded",
+      );
       expect(error.message).not.toContain(authorization);
       expect(error.message).not.toContain(bearerCredential);
-      expect(loopback.releases).toEqual([true]);
-
-      loopback.status = 200;
-      const result = await tool.execute({ query: "latest openclaw release" });
-      expect(result).toMatchObject({ provider: "ollama", count: 1 });
-    }));
-
-  it("redacts a bearer prefix split by the 64,000-byte error cap", () =>
-    withSearchServer(async () => {
-      loopback.status = 429;
-      loopback.boundaryCredentialAtCap = true;
-      const bearerCredential = "web-search-boundary-credential-secret";
-      const retainedPrefix = bearerCredential.slice(0, -5);
-      const tool = createSearchTool(bearerCredential);
-
-      const error = await captureSearchError(tool);
-
-      expect(error.message).toContain("bounded web-search diagnostic");
-      expect(error.message).not.toContain(retainedPrefix);
-      expect(error.message).not.toContain(bearerCredential);
-    }));
+      expect(error.message).not.toContain(bearerCredential.slice(0, -5));
+      expect(loopback.releases).toBe(1);
+      if (!boundary) {
+        loopback.status = 200;
+        const result = await tool.execute({ query: "latest openclaw release" });
+        expect(result).toMatchObject({ provider: "ollama", count: 1 });
+      }
+    }),
+  );
 });

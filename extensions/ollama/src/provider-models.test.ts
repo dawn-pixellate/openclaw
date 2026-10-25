@@ -1,4 +1,3 @@
-import { withTimeout } from "@openclaw/fs-safe/advanced";
 import { expectDefined } from "@openclaw/normalization-core";
 import { jsonResponse, requestUrl, withServer } from "openclaw/plugin-sdk/test-env";
 import { oversizedJsonResponse } from "openclaw/plugin-sdk/test-fixtures";
@@ -7,7 +6,6 @@ import {
   buildOllamaProvider,
   buildOllamaBaseUrlSsrFPolicy,
   enrichOllamaCompletionModels,
-  enrichOllamaModelsWithContext,
   fetchLoadedOllamaModelNames,
   fetchOllamaModels,
   queryOllamaModelShowInfo,
@@ -46,15 +44,17 @@ describe("ollama provider models", () => {
     { showSize: "32.8B", expected: 32_800_000_000 },
     { tagSize: "unknown", expected: undefined },
   ])(
-    "keeps total parameter metadata through discovery: %j",
+    "keeps parameter and expanded Modelfile context metadata through discovery: %j",
     async ({ tagSize, showCount, showSize, expected }) => {
       stubDiscovery([{ name: "custom-model", details: { parameter_size: tagSize } }], {
         capabilities: completion,
-        model_info: { "general.parameter_count": showCount },
+        model_info: { "general.parameter_count": showCount, "test.context_length": 8192 },
+        parameters: 'stop "<|eot_id|>"\nnum_ctx 32768\nnum_keep 5',
         details: { parameter_size: showSize },
       });
       const { model, runtime } = await discoverModel();
       expect([model.parameterCount, runtime.parameterCount]).toEqual([expected, expected]);
+      expect([model.contextWindow, runtime.contextWindow]).toEqual([32768, 32768]);
     },
   );
 
@@ -75,7 +75,6 @@ describe("ollama provider models", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-
     await expect(
       fetchLoadedOllamaModelNames("https://ollama.example.com/v1", {
         apiKey: "private-key",
@@ -100,7 +99,6 @@ describe("ollama provider models", () => {
       });
     });
     vi.stubGlobal("fetch", fetchMock);
-
     const [first, second, third] = await Promise.all(
       ["account-a", "account-b", "account-a"].map(
         async (apiKey) => await buildOllamaProvider("https://ollama.example.com", { apiKey }),
@@ -135,45 +133,6 @@ describe("ollama provider models", () => {
       maxTokens,
       ...(name.endsWith("-cloud") ? { contextWindow: 524_288 } : {}),
     });
-  });
-
-  it("uses Modelfile num_ctx when it expands the discovered context window", async () => {
-    const models = [{ name: "llama3-32k:latest" }];
-    stubDiscovery(models, {
-      model_info: { "llama.context_length": 8192 },
-      parameters: 'stop "<|eot_id|>"\nnum_ctx 32768\nnum_keep 5',
-      capabilities: completion,
-    });
-    expect(await enrichOllamaModelsWithContext(localUrl, models)).toEqual([
-      { name: "llama3-32k:latest", contextWindow: 32768, capabilities: completion },
-    ]);
-  });
-
-  it.each(["tags", "show"])("closes a real failed %s discovery socket", async (endpoint) => {
-    let closed: Promise<void> | undefined;
-    await withServer(
-      (request, response) => {
-        expect(request.url).toBe(`/api/${endpoint}`);
-        closed = new Promise<void>((resolve) => {
-          request.socket.once("close", resolve);
-        });
-        response.writeHead(503, { "content-type": "text/plain" });
-        // Only client cancellation can close this unfinished response.
-        response.write("ollama unavailable");
-      },
-      async (baseUrl) => {
-        const result =
-          endpoint === "tags"
-            ? await fetchOllamaModels(baseUrl)
-            : await queryOllamaModelShowInfo(baseUrl, "llama3:8b");
-        expect(result).toEqual(
-          endpoint === "tags" ? { reachable: true, models: [] } : { showInspectionFailed: true },
-        );
-        await withTimeout(expectDefined(closed, "failed discovery socket"), 2_000, {
-          message: "Failed discovery socket was not closed",
-        });
-      },
-    );
   });
 
   it.each([
@@ -249,7 +208,6 @@ describe("Ollama model discovery failures", () => {
           });
         }),
       );
-
       await expect(buildOllamaProvider(localUrl, { quiet: true })).resolves.toMatchObject({
         models: [],
       });
