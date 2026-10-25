@@ -22,6 +22,8 @@
   --card-highlight: rgba(255, 255, 255, 0.04);
   --popover: #191c24;
   --popover-foreground: #f0f0f2;
+  --chat-composer-surface: var(--popover);
+  --chat-user-surface: var(--accent-subtle);
   --session-hovercard-surface: color-mix(in srgb, var(--card) 94%, black 6%);
 
   --panel: #0e1015;
@@ -531,6 +533,7 @@
   --bg-hover: #efebe4;
   --bg-muted: #efebe4;
   --bg-content: #f4f1ec;
+  --chat-user-surface: color-mix(in srgb, var(--accent) 15%, var(--bg));
 
   --session-header-control-surface: color-mix(in srgb, var(--text) 9%, var(--bg-content));
   --session-header-sharing-hover-bg: color-mix(in srgb, var(--text) 12%, var(--bg-content));
