@@ -96,13 +96,8 @@ describe("fenced block streaming", () => {
     ).toBe(expected);
   });
 
-  it.each([
-    {
-      name: "a long fence",
-      text: `\`\`\`txt\n${"code\n\n".repeat(600)}\`\`\`\n\nAfter`,
-      expectedContent: `${"code".repeat(600)}After`,
-    },
-  ])("preserves fenced code and final prose in $name", ({ text, expectedContent }) => {
+  it("preserves fenced code and final prose in a long fence", () => {
+    const text = `\`\`\`txt\n${"code\n\n".repeat(600)}\`\`\`\n\nAfter`;
     const harness = fenceHarness();
     harness.delta(text);
     expect(harness.chunks().length).toBeGreaterThan(1);
@@ -118,7 +113,7 @@ describe("fenced block streaming", () => {
       .flatMap((chunk) => chunk.split("\n").filter((line) => !line.startsWith("```")))
       .join("")
       .replace(/\s/g, "");
-    expect(rendered).toBe(expectedContent);
+    expect(rendered).toBe(`${"code".repeat(600)}After`);
   });
 
   it("delivers identical fenced chunks as distinct source occurrences with coalescing", async () => {
@@ -171,20 +166,47 @@ function subscribe(options: Omit<Parameters<typeof createSubscribedSessionHarnes
   return emit;
 }
 
+function privateReasoningHarness(blockReplies = true) {
+  const onPartialReply = vi.fn();
+  const onBlockReply = vi.fn();
+  const { emit, subscription } = createSubscribedSessionHarness({
+    runId: "reasoning-tags",
+    reasoningMode: "off",
+    onPartialReply,
+    ...(blockReplies ? { onBlockReply, blockReplyBreak: "text_end" } : {}),
+  });
+  onTestFinished(() => subscription.unsubscribe());
+  return {
+    partials: () => extractTextPayloads(onPartialReply.mock.calls),
+    async stream(deltas: string[], rejectTags = true) {
+      for (const delta of deltas) {
+        emitAssistantTextDelta({ emit, delta });
+        await subscription.waitForPendingEvents();
+        const partials = extractTextPayloads(onPartialReply.mock.calls);
+        for (const text of rejectTags ? partials : [partials.join("")]) {
+          expect(text).not.toContain("PRIVATE_MARKER");
+          if (rejectTags) {
+            expect(text).not.toContain("<");
+          }
+        }
+      }
+    },
+    async end(deltas: string[]) {
+      const content = deltas.join("");
+      emitAssistantTextEnd({ emit, content });
+      emit({ type: "message_end", message: textAssistant(content) });
+      await subscription.waitForPendingEvents();
+      expect(extractTextPayloads(onPartialReply.mock.calls).at(-1)).toBe("Before  After");
+      expect(extractTextPayloads(onBlockReply.mock.calls).join("")).toBe("Before  After");
+    },
+  };
+}
+
 describe("streamed reasoning tag privacy", () => {
   it.each(["reasoning", "internal", "antml:reasoning", "mm:reasoning"])(
     "withholds split <%s> blocks before partial or block delivery",
     async (tag) => {
-      const onPartialReply = vi.fn();
-      const onBlockReply = vi.fn();
-      const { emit, subscription } = createSubscribedSessionHarness({
-        runId: "reasoning-tags",
-        reasoningMode: "off",
-        onPartialReply,
-        onBlockReply,
-        blockReplyBreak: "text_end",
-      });
-      onTestFinished(() => subscription.unsubscribe());
+      const h = privateReasoningHarness();
       const deltas = [
         "Before ",
         "<",
@@ -194,19 +216,8 @@ describe("streamed reasoning tag privacy", () => {
         `</${tag}>`,
         " After",
       ];
-      for (const delta of deltas) {
-        emitAssistantTextDelta({ emit, delta });
-        await subscription.waitForPendingEvents();
-        for (const text of extractTextPayloads(onPartialReply.mock.calls)) {
-          expect(text).not.toContain("PRIVATE_MARKER");
-          expect(text).not.toContain("<");
-        }
-      }
-      emitAssistantTextEnd({ emit, content: deltas.join("") });
-      emit({ type: "message_end", message: textAssistant(deltas.join("")) });
-      await subscription.waitForPendingEvents();
-      expect(extractTextPayloads(onPartialReply.mock.calls).at(-1)).toBe("Before  After");
-      expect(extractTextPayloads(onBlockReply.mock.calls).join("")).toBe("Before  After");
+      await h.stream(deltas);
+      await h.end(deltas);
     },
   );
 
@@ -214,53 +225,21 @@ describe("streamed reasoning tag privacy", () => {
     ["think", "internal"],
     ["internal", "reasoning"],
   ])("withholds nested <%s> and <%s> blocks through the outer close", async (outer, inner) => {
-    const onPartialReply = vi.fn();
-    const onBlockReply = vi.fn();
-    const { emit, subscription } = createSubscribedSessionHarness({
-      runId: "nested-reasoning-tags",
-      reasoningMode: "off",
-      onPartialReply,
-      onBlockReply,
-      blockReplyBreak: "text_end",
-    });
-    onTestFinished(() => subscription.unsubscribe());
+    const h = privateReasoningHarness();
     const deltas = [
       `Before <${outer}>outer<${inner}>inner</${inner}>`,
       "PRIVATE_MARKER",
       `</${outer}> After`,
     ];
-    for (const delta of deltas) {
-      emitAssistantTextDelta({ emit, delta });
-      await subscription.waitForPendingEvents();
-      expect(extractTextPayloads(onPartialReply.mock.calls).join("")).not.toContain(
-        "PRIVATE_MARKER",
-      );
-    }
-    emitAssistantTextEnd({ emit, content: deltas.join("") });
-    emit({ type: "message_end", message: textAssistant(deltas.join("")) });
-    await subscription.waitForPendingEvents();
-    expect(extractTextPayloads(onPartialReply.mock.calls).at(-1)).toBe("Before  After");
-    expect(extractTextPayloads(onBlockReply.mock.calls).join("")).toBe("Before  After");
+    await h.stream(deltas, false);
+    await h.end(deltas);
   });
 
   it("holds a reasoning tag whose quoted attribute contains a split closing bracket", async () => {
-    const onPartialReply = vi.fn();
-    const { emit, subscription } = createSubscribedSessionHarness({
-      runId: "quoted-reasoning-tag",
-      reasoningMode: "off",
-      onPartialReply,
-    });
-    onTestFinished(() => subscription.unsubscribe());
+    const h = privateReasoningHarness(false);
     const deltas = ["Before <reasoning note='a>", "b'>PRIVATE_MARKER", "</reasoning> After"];
-    for (const delta of deltas) {
-      emitAssistantTextDelta({ emit, delta });
-      await subscription.waitForPendingEvents();
-      for (const text of extractTextPayloads(onPartialReply.mock.calls)) {
-        expect(text).not.toContain("<");
-        expect(text).not.toContain("PRIVATE_MARKER");
-      }
-    }
-    expect(extractTextPayloads(onPartialReply.mock.calls).at(-1)).toBe("Before  After");
+    await h.stream(deltas);
+    expect(h.partials().at(-1)).toBe("Before  After");
   });
 
   it("keeps internal blocks private when reasoning visibility is enabled", () => {
@@ -292,28 +271,17 @@ describe("streamed reasoning tag privacy", () => {
 });
 
 describe("streamed final tags", () => {
-  it.each([
-    {
-      name: "closes hidden reasoning fences split across deltas",
-      deltas: ["<think>\n```ts\nconst hidden = true;\n``", "`\n</think><final>Answer</final>"],
-      expected: "Answer",
-      partial: true,
-    },
-  ])("$name", ({ deltas, expected, partial }) => {
+  it("closes hidden reasoning fences split across deltas", () => {
     const reply = vi.fn();
-    const emit = subscribe({
-      enforceFinalTag: true,
-      ...(partial ? { onPartialReply: reply } : { onAgentEvent: reply }),
-    });
+    const emit = subscribe({ enforceFinalTag: true, onPartialReply: reply });
     emit({ type: "message_start", message: { role: "assistant" } });
-    for (const delta of deltas) {
+    for (const delta of [
+      "<think>\n```ts\nconst hidden = true;\n``",
+      "`\n</think><final>Answer</final>",
+    ]) {
       emitAssistantTextDelta({ emit, delta });
     }
-    const payloads = partial
-      ? reply.mock.calls.map(([p]) => p)
-      : extractAgentEventPayloads(reply.mock.calls);
-    expect(payloads).toHaveLength(1);
-    expect(payloads[0]?.text).toBe(expected);
+    expect(reply.mock.calls.map(([payload]) => payload.text)).toEqual(["Answer"]);
   });
 
   it.each([
@@ -350,8 +318,6 @@ describe("streamed final tags", () => {
     const payloads = extractAgentEventPayloads(onAgentEvent.mock.calls);
     const text = payloads.map((payload) => payload.delta).join("");
     expect(text).toBe("Title\nLine one\nLine two");
-    expect(text).not.toContain("<");
-    expect(text).not.toContain("final>");
     expect(payloads.some((payload) => payload.replace)).toBe(false);
   });
 
@@ -387,11 +353,11 @@ afterEach(async () => {
     await subscription.waitForPendingEvents();
   }
 });
-function replies(partial = false) {
+function replies() {
   const onReply = vi.fn<(payload: Reply) => void>();
   const harness = createSubscribedSessionHarness({
     runId: "reply-tags",
-    ...(partial ? { onPartialReply: onReply } : { onBlockReply: onReply }),
+    onBlockReply: onReply,
     blockReplyBreak: "text_end",
     blockReplyChunking: { minChars: 1, maxChars: 50, breakPreference: "newline" },
   });
@@ -413,19 +379,11 @@ function replies(partial = false) {
 }
 
 describe("subscribeEmbeddedAgentSession reply tags", () => {
-  it.each([
-    {
-      name: "voice intent",
-      chunks: [
-        "[[audio_as_voice]]Hello.\n\n",
-        "An ordinary paragraph is long enough to drain the earlier voice block.\n\n",
-      ],
-      voice: true,
-    },
-  ])("delivers $name before text_end without leaking metadata", async ({ chunks, voice }) => {
+  it("delivers voice intent before text_end without leaking metadata", async () => {
     const h = replies();
     for (const delta of [
-      ...chunks,
+      "[[audio_as_voice]]Hello.\n\n",
+      "An ordinary paragraph is long enough to drain the earlier voice block.\n\n",
       "A second paragraph gives the first completed block enough text to drain.",
     ]) {
       h.emit({
@@ -436,12 +394,8 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
     }
     await h.subscription.waitForPendingEvents();
     const payloads = h.payloads();
-    if (voice) {
-      expect(payloads[0]?.text).toBe("Hello.");
-    } else {
-      expect(payloads.map((payload) => payload.text).join("")).toContain("[[reply_to:example-id]]");
-    }
-    expect(Boolean(payloads[0]?.audioAsVoice)).toBe(voice);
+    expect(payloads[0]?.text).toBe("Hello.");
+    expect(Boolean(payloads[0]?.audioAsVoice)).toBe(true);
     for (const [index, payload] of payloads.entries()) {
       expect(payload.replyToId).toBeUndefined();
       expect(payload.replyToTag).toBeFalsy();
@@ -466,7 +420,6 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
     {
       name: "valid media",
       text: "Hello\nMEDIA:https://example.com/a.png",
-      final: "Hello\nMEDIA:https://example.com/a.png",
       texts: ["Hello", ""],
       media: ["https://example.com/a.png"],
       early: false,
@@ -475,19 +428,18 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
     {
       name: "unclosed fence",
       text: "```text\nMEDIA:https://example.com/a.png",
-      final: "```text\nMEDIA:https://example.com/a.png",
       texts: ["```text\nMEDIA:https://example.com/a.png\n```"],
       media: [],
       early: true,
     },
-  ])("flushes trailing directive tails: $name", ({ text, final, texts, media, early }) => {
+  ])("flushes trailing directive tails: $name", ({ text, texts, media, early }) => {
     const h = replies();
     h.delta(text);
     emitAssistantTextEnd(h);
     if (early) {
       expect(h.payloads().map((payload) => payload.text)).toEqual(texts);
     }
-    h.end(final);
+    h.end(text);
     expect(h.payloads().map((payload) => payload.text)).toEqual(texts);
     expect(h.payloads().flatMap((payload) => payload.mediaUrls ?? [])).toEqual(media);
   });
