@@ -71,28 +71,24 @@ const legacyDispatcher: AgentQuestionDispatcher = {
     }),
 };
 
-it.each(
-  [
-    "delayed-receipt",
-    "failed-waiter",
-    "legacy-receipt",
-    "closed-adoption",
-    "confirmed-closed-adoption",
-    "late-receipt",
-  ].flatMap((mode) =>
-    (["steer", "reply"] as const)
-      .filter((entrypoint) => mode !== "late-receipt" || entrypoint === "steer")
-      .flatMap((entrypoint) =>
-        (entrypoint === "steer" &&
-        ["failed-waiter", "legacy-receipt", "confirmed-closed-adoption"].includes(mode)
-          ? [false, true]
-          : [false]
-        ).map((hidden) => ({ entrypoint, mode, hidden })),
-      ),
-  ),
-)(
-  "does not replay or abort independent work after $entrypoint/$mode (hidden=$hidden)",
-  async ({ entrypoint, mode, hidden }) => {
+it.each([
+  ["delayed-receipt", "steer", false],
+  ["delayed-receipt", "reply", false],
+  ["failed-waiter", "steer", false],
+  ["failed-waiter", "steer", true],
+  ["failed-waiter", "reply", false],
+  ["legacy-receipt", "steer", false],
+  ["legacy-receipt", "steer", true],
+  ["legacy-receipt", "reply", false],
+  ["closed-adoption", "steer", false],
+  ["closed-adoption", "reply", false],
+  ["confirmed-closed-adoption", "steer", false],
+  ["confirmed-closed-adoption", "steer", true],
+  ["confirmed-closed-adoption", "reply", false],
+  ["late-receipt", "steer", false],
+] as const)(
+  "does not replay or abort independent work after %s/%s (hidden=%s)",
+  async (mode, entrypoint, hidden) => {
     const key = `agent:main:question-recovery-${entrypoint}-${mode}-${hidden}`;
     const id = `ask_recovery_${entrypoint}_${mode}_${hidden}`;
     const run = createQueueTestRun({

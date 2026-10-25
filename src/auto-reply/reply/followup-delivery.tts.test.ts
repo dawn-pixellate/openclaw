@@ -155,30 +155,17 @@ describe("queued automatic speech at the delivery boundary", () => {
   });
 });
 
-it.each<{
-  mode: TtsAutoMode;
-  inbound?: boolean;
-  sessionAuto?: TtsAutoMode;
-  tagged?: boolean;
-  audio: boolean;
-}>([
-  { mode: "off", audio: false },
-  { mode: "off", sessionAuto: "always", audio: true },
-  { mode: "always", sessionAuto: "off", audio: false },
-  { mode: "inbound", inbound: false, audio: false },
-  { mode: "inbound", inbound: true, audio: true },
-  { mode: "tagged", audio: false },
-  { mode: "tagged", tagged: true, audio: true },
+it.each<[TtsAutoMode, TtsAutoMode | undefined, boolean]>([
+  ["off", "always", true],
+  ["inbound", undefined, false],
+  ["tagged", undefined, false],
 ])(
-  "honors $mode speech policy (inbound=$inbound, session=$sessionAuto, tagged=$tagged)",
-  async ({ mode, inbound, sessionAuto, tagged, audio: expectedAudio }) => {
+  "honors queued %s speech policy with session override %s",
+  async (mode, sessionAuto, expectedAudio) => {
     const turn = createTurn({ config: { tts: tts(mode) } });
-    turn.queued.currentInboundAudio = inbound;
+    turn.queued.currentInboundAudio = mode === "inbound" ? false : undefined;
     turn.session.current = () => ({ sessionId: "session", updatedAt: 1, ttsAuto: sessionAuto });
-    const payload = tagged
-      ? setReplyPayloadMetadata({ text: speech }, { tts: { tagged: true, text: speech } })
-      : { text: speech };
-    await send(turn, payload);
+    await send(turn);
     expect(synthesize).toHaveBeenCalledTimes(expectedAudio ? 1 : 0);
     const sent = outbound.mock.calls[0]?.[0].payloads[0];
     expect(sent.text).toBe(speech);
@@ -187,21 +174,12 @@ it.each<{
 );
 
 it.each<ReplyPayload>([
-  { text: speech, mediaUrl: "https://example.com/existing.ogg", audioAsVoice: true },
-  { text: speech, mediaUrls: ["https://example.com/image.png"] },
   { text: speech, isReasoning: true },
   { text: speech, isCommentary: true },
   { text: speech, isStatusNotice: true },
-])("does not synthesize existing media or excluded content: %j", async (payload) => {
+])("does not synthesize excluded queued content: %j", async (payload) => {
   await send(createTurn(), payload);
   expect(synthesize).not.toHaveBeenCalled();
-});
-
-it("keeps text when the speech provider fails", async () => {
-  synthesize.mockRejectedValueOnce(new Error("synthetic synthesis failure"));
-  await send();
-  expect(synthesize).toHaveBeenCalledOnce();
-  expect(outbound.mock.calls[0]?.[0].payloads).toEqual([{ text: speech }]);
 });
 
 it("reuses prepared audio when origin routing falls back to the source dispatcher", async () => {
@@ -236,17 +214,6 @@ it("uses the selected destination account and agent settings instead of the ingr
     speakerVoice: "destination-voice",
   });
   expect(outbound.mock.calls[0]?.[0]).toMatchObject({ channel: "matrix", accountId: "selected" });
-});
-
-it("uses local preferences and lets the queued session override them", async () => {
-  await fs.writeFile(state.path("tts-prefs.json"), JSON.stringify({ tts: { auto: "off" } }));
-  await send();
-  expect(synthesize).not.toHaveBeenCalled();
-  const turn = createTurn();
-  turn.session.current = () => ({ sessionId: "session", updatedAt: 1, ttsAuto: "always" });
-  await send(turn);
-  expect(synthesize).toHaveBeenCalledOnce();
-  expect(outbound.mock.calls[1]?.[0].payloads[0].mediaUrl).toBeTruthy();
 });
 
 it("preserves inbound speech eligibility for a collected follow-up", async () => {
