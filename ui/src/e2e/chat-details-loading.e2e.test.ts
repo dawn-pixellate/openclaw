@@ -30,7 +30,10 @@ suite.define(() => {
         const childQuery = { spawnedBy: sessionKey };
         const gateway = await installMockGateway(page, {
           featureMethods: [...defaultControlUiFeatureMethods, "progressCard.get"],
-          deferredRequests: [{ method: "sessions.list", match: childQuery }],
+          deferredRequests: [
+            { method: "sessions.list", match: childQuery },
+            { method: "chat.startup" },
+          ],
           sessions: [
             {
               key: sessionKey,
@@ -60,6 +63,8 @@ suite.define(() => {
           ],
         });
         await page.goto(controlUiSessionUrl(suite.server.baseUrl, sessionKey));
+        await gateway.waitForRequest("chat.startup");
+        await gateway.resolveDeferred("chat.startup");
         await gateway.waitForRequest("sessions.list", { match: childQuery });
         await gateway.resolveDeferred("sessions.list", undefined, { match: childQuery });
         const subagents = page.locator('.chat-details [data-details-group="subagents"]');
@@ -84,7 +89,47 @@ suite.define(() => {
           controlUiE2eBuiltModuleRequest("ui/src/pages/chat/components/chat-details-session.tsx"),
         );
         onTestFinished(module.release);
-        await gateway.setOnline(false);
+        await page.addInitScript(() => {
+          const get = IDBObjectStore.prototype.get;
+          const held: Array<() => void> = [];
+          let released = false;
+          Reflect.set(window, "releaseDetailsSnapshot", () => {
+            released = true;
+            held.splice(0).forEach((release) => release());
+          });
+          IDBObjectStore.prototype.get = function (query: IDBValidKey | IDBKeyRange) {
+            const request = get.call(this, query);
+            if (this.name !== "snapshots") {
+              return request;
+            }
+            const add = request.addEventListener.bind(request);
+            request.addEventListener = (
+              type: string,
+              listener: EventListenerOrEventListenerObject | null,
+              options?: boolean | AddEventListenerOptions,
+            ) => {
+              if (type !== "success" || !listener) {
+                return add(type, listener, options);
+              }
+              add(
+                type,
+                (event) => {
+                  const deliver = () =>
+                    typeof listener === "function"
+                      ? listener.call(request, event)
+                      : listener.handleEvent(event);
+                  if (released) {
+                    deliver();
+                  } else {
+                    held.push(deliver);
+                  }
+                },
+                options,
+              );
+            };
+            return request;
+          };
+        });
         await page.reload();
         const moduleUrl = await module.request;
         const details = page.locator(".chat-details[data-open]");
@@ -95,9 +140,10 @@ suite.define(() => {
         expect(await page.locator(".chat-thread .chat-virtual-row").count()).toBe(0);
         const width = await details.evaluate((panel) => panel.getBoundingClientRect().width);
         expect(width).toBe(300);
-        await gateway.setOnline(true);
-        await gateway.waitForRequest("sessions.list", { match: childQuery });
+        await page.evaluate("window.releaseDetailsSnapshot()");
         await page.locator(".chat-thread").getByText(text, { exact: true }).waitFor();
+        await gateway.resolveDeferred("chat.startup");
+        await gateway.waitForRequest("sessions.list", { match: childQuery });
         expect(await details.locator(".chat-details-session").count()).toBe(0);
         expect(await details.locator("openclaw-panel-loading-skeleton").count()).toBe(0);
 
