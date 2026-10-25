@@ -575,7 +575,6 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
     }
   } catch (error) {
     const refusedBeforeAgentOpen = error instanceof SqliteWorkerOpenRefusedError;
-    retire ||= Boolean(postgresPoolWorkerFailure());
     if (openNotEntered || (request.type === "open" && refusedBeforeAgentOpen)) {
       stateContexts.delete(request.actor);
     }
@@ -597,6 +596,7 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
     const sharedState = !executed
       ? encodeOpenClawStateWorkerError(failure, { includeOrdinary: Boolean(errorContext) })
       : undefined;
+    retire ||= Boolean(postgresPoolWorkerFailure());
     reply = {
       id: request.id,
       ok: false,
