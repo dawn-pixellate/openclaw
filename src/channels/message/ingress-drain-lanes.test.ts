@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
 import { SqliteWorkerError } from "../../infra/sqlite-worker-contract.js";
 import { createDeferredCore } from "../../shared/deferred.js";
@@ -220,47 +221,30 @@ describe("channel ingress drain lanes", () => {
     });
   });
 
-  // LINE-shaped lanes: one user/group id owns a lane, so a lane head parked behind
-  // a newer failing sibling reads to the sender as an ignored message.
-  it("starts an eligible lane head while a newer same-lane event waits out its retry backoff", async () => {
-    await withTempState(async (stateDir) => {
-      const queue = createTestIngressQueue(stateDir);
-      const currentNow = 10_000_000;
-      await queue.enqueue("head", { text: "head" }, { laneKey: "user:U1", receivedAt: 1_000 });
-      await queue.enqueue("tail", { text: "tail" }, { laneKey: "user:U1", receivedAt: 2_000 });
-      const tailClaim = await queue.claim("tail");
-      expect(tailClaim).not.toBeNull();
-      await queue.release(tailClaim!, { lastError: "boom", releasedAt: currentNow });
-
-      const { drain, dispatches } = createAdoptingDrain(queue, currentNow);
-
-      await expect(drain.drainOnce()).resolves.toEqual({ started: 1 });
-      await vi.waitFor(() => expect(dispatches).toEqual(["head"]));
-
-      await drain.waitForIdle();
-      drain.dispose();
-    });
-  });
-
-  it("keeps the lane blocked while its oldest pending event is retry-delayed", async () => {
-    await withTempState(async (stateDir) => {
-      const queue = createTestIngressQueue(stateDir);
-      const currentNow = 10_000_000;
-      await queue.enqueue("head", { text: "head" }, { laneKey: "user:U1", receivedAt: 1_000 });
-      await queue.enqueue("tail", { text: "tail" }, { laneKey: "user:U1", receivedAt: 2_000 });
-      const headClaim = await queue.claim("head");
-      expect(headClaim).not.toBeNull();
-      await queue.release(headClaim!, { lastError: "boom", releasedAt: currentNow });
-
-      const { drain, dispatches } = createAdoptingDrain(queue, currentNow);
-
-      await expect(drain.drainOnce()).resolves.toEqual({ started: 0 });
-      expect(dispatches).toEqual([]);
-
-      await drain.waitForIdle();
-      drain.dispose();
-    });
-  });
+  it.each([
+    { delayed: "tail", expected: ["head"] },
+    { delayed: "head", expected: [] },
+  ])(
+    "blocks only when the retry-delayed $delayed is the lane head",
+    async ({ delayed, expected }) => {
+      await withTempState(async (stateDir) => {
+        const queue = createTestIngressQueue(stateDir);
+        const currentNow = 10_000_000;
+        await queue.enqueue("head", { text: "head" }, { laneKey: "user:U1", receivedAt: 1_000 });
+        await queue.enqueue("tail", { text: "tail" }, { laneKey: "user:U1", receivedAt: 2_000 });
+        const claim = expectDefined(await queue.claim(delayed), "delayed claim");
+        await queue.release(claim, { lastError: "boom", releasedAt: currentNow });
+        const { drain, dispatches } = createAdoptingDrain(queue, currentNow);
+        try {
+          await expect(drain.drainOnce()).resolves.toEqual({ started: expected.length });
+          await drain.waitForIdle();
+          expect(dispatches).toEqual(expected);
+        } finally {
+          drain.dispose();
+        }
+      });
+    },
+  );
 
   it("keeps a released lane head ahead of its tail when settlement crosses the drain snapshot", async () => {
     await withTempState(async (stateDir) => {

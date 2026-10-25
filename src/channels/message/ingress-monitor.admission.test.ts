@@ -11,6 +11,37 @@ import {
 import { createChannelIngressQueue, type ChannelIngressQueue } from "./ingress-queue.js";
 
 type StoredEvent = { version: 1; rawEvent: string };
+type RawEvent = { id: string; text?: string; lane?: string };
+type MonitorOptions = CreateChannelIngressMonitorOptions<RawEvent, string, StoredEvent, unknown>;
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+afterEach(() => {
+  closeOpenClawStateDatabaseForTest();
+  vi.restoreAllMocks();
+});
+
+function createQueue() {
+  return createChannelIngressQueue<StoredEvent>({
+    channelId: "test",
+    accountId: "a",
+    stateDir: tempDirs.make("openclaw-ingress-admission-"),
+  });
+}
+
+function createMonitor(
+  queue: ChannelIngressQueue<StoredEvent>,
+  options: Partial<Omit<MonitorOptions, "queue" | "payload">>,
+) {
+  return createChannelIngressMonitor<RawEvent, string, StoredEvent>({
+    queue,
+    inspect: (raw) => ({ eventId: raw.id, laneKey: raw.lane ?? "lane:a" }),
+    payload: createRawEventPayload<RawEvent>(),
+    deliver: vi.fn(),
+    pollIntervalMs: 60_000,
+    retention: { pruneIntervalMs: 60_000 },
+    ...options,
+  });
+}
 
 function createRawEventPayload<TRaw>(): ChannelIngressMonitorPayloadCodec<
   TRaw,
@@ -27,32 +58,20 @@ function createRawEventPayload<TRaw>(): ChannelIngressMonitorPayloadCodec<
   };
 }
 
+function holdClaimInspection() {
+  const entered = createDeferred();
+  const release = createDeferred();
+  const inspectAsync: MonitorOptions["inspectAsync"] = async (raw, context) => {
+    if (context.phase === "claim") {
+      entered.resolve();
+      await release.promise;
+    }
+    return { eventId: raw.id, laneKey: raw.lane };
+  };
+  return { entered, release, inspectAsync };
+}
+
 describe("channel ingress monitor admission", () => {
-  type RawEvent = { id: string; text: string };
-  type MonitorOptions = CreateChannelIngressMonitorOptions<RawEvent, string, StoredEvent, unknown>;
-
-  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
-
-  function createMonitor(
-    queue: ChannelIngressQueue<StoredEvent>,
-    options: Partial<Omit<MonitorOptions, "queue" | "payload">>,
-  ) {
-    return createChannelIngressMonitor<RawEvent, string, StoredEvent>({
-      queue,
-      inspect: (raw) => ({ eventId: raw.id, laneKey: "lane:a" }),
-      payload: createRawEventPayload<RawEvent>(),
-      deliver: vi.fn(),
-      pollIntervalMs: 60_000,
-      retention: { pruneIntervalMs: 60_000 },
-      ...options,
-    });
-  }
-
-  afterEach(() => {
-    closeOpenClawStateDatabaseForTest();
-    vi.restoreAllMocks();
-  });
-
   it.each([
     [false, false],
     [false, true],
@@ -131,11 +150,7 @@ describe("channel ingress monitor admission", () => {
   });
 
   it("keeps delayed inspection in FIFO admission and joins it on stop", async () => {
-    const queue = createChannelIngressQueue<StoredEvent>({
-      channelId: "test",
-      accountId: "a",
-      stateDir: tempDirs.make("openclaw-ingress-monitor-inspection-"),
-    });
+    const queue = createQueue();
     const inspection = createDeferred();
     const entered = createDeferred();
     const inspections: string[] = [];
@@ -179,11 +194,7 @@ describe("channel ingress monitor admission", () => {
   });
 
   it("retries a known append failure and reports whether each admission inserted a new row", async () => {
-    const queue = createChannelIngressQueue<StoredEvent>({
-      channelId: "test",
-      accountId: "a",
-      stateDir: tempDirs.make("openclaw-ingress-monitor-admission-"),
-    });
+    const queue = createQueue();
     const append = queue.enqueue.bind(queue);
     const enqueue = vi
       .spyOn(queue, "enqueue")
@@ -210,45 +221,6 @@ describe("channel ingress monitor admission", () => {
 });
 
 describe("channel ingress monitor asynchronous inspection", () => {
-  type RawEvent = { id: string; lane: string };
-  type MonitorOptions = CreateChannelIngressMonitorOptions<RawEvent, string, StoredEvent, unknown>;
-
-  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
-
-  afterEach(() => {
-    closeOpenClawStateDatabaseForTest();
-  });
-
-  function createQueue() {
-    return createChannelIngressQueue<StoredEvent>({
-      channelId: "test",
-      accountId: "a",
-      stateDir: tempDirs.make("openclaw-ingress-inspection-"),
-    });
-  }
-
-  function createMonitor(
-    queue: ChannelIngressQueue<StoredEvent>,
-    options: Pick<
-      MonitorOptions,
-      | "inspectAsync"
-      | "deliver"
-      | "abortSignal"
-      | "waitForDeliveryIdleOnStop"
-      | "drain"
-      | "onActivityChange"
-    >,
-  ) {
-    return createChannelIngressMonitor<RawEvent, string, StoredEvent>({
-      queue,
-      inspect: (raw) => ({ eventId: raw.id, laneKey: raw.lane }),
-      payload: createRawEventPayload<RawEvent>(),
-      pollIntervalMs: 60_000,
-      retention: { pruneIntervalMs: 60_000 },
-      ...options,
-    });
-  }
-
   it.each([
     { cancel: "stop", waitForDeliveryIdleOnStop: false },
     { cancel: "abort", waitForDeliveryIdleOnStop: true },
@@ -256,18 +228,11 @@ describe("channel ingress monitor asynchronous inspection", () => {
     "joins claim inspection after $cancel with delivery join=$waitForDeliveryIdleOnStop",
     async ({ cancel, waitForDeliveryIdleOnStop }) => {
       const queue = createQueue();
-      const inspection = createDeferred();
-      const entered = createDeferred();
+      const { release, entered, inspectAsync } = holdClaimInspection();
       const controller = new AbortController();
       const deliver = vi.fn();
       const monitor = createMonitor(queue, {
-        inspectAsync: async (raw, context) => {
-          if (context.phase === "claim") {
-            entered.resolve();
-            await inspection.promise;
-          }
-          return { eventId: raw.id, laneKey: raw.lane };
-        },
+        inspectAsync,
         deliver,
         abortSignal: controller.signal,
         waitForDeliveryIdleOnStop,
@@ -290,7 +255,7 @@ describe("channel ingress monitor asynchronous inspection", () => {
         expect(stopped).toBe(false);
         expect(deliver).not.toHaveBeenCalled();
       } finally {
-        inspection.resolve();
+        release.resolve();
         await stopping;
         await monitor.waitForIdle();
       }
@@ -301,17 +266,10 @@ describe("channel ingress monitor asynchronous inspection", () => {
 
   it("joins pending inspection after the watchdog retires its claim", async () => {
     const queue = createQueue();
-    const release = createDeferred();
-    const entered = createDeferred();
+    const { release, entered, inspectAsync } = holdClaimInspection();
     const deliver = vi.fn();
     const monitor = createMonitor(queue, {
-      inspectAsync: async (raw, context) => {
-        if (context.phase === "claim") {
-          entered.resolve();
-          await release.promise;
-        }
-        return { eventId: raw.id, laneKey: raw.lane };
-      },
+      inspectAsync,
       deliver,
       drain: { startLimit: 1, adoptionStallTimeoutMs: 10 },
     });
@@ -343,20 +301,13 @@ describe("channel ingress monitor asynchronous inspection", () => {
 
   it("reports busy through inspection until delivery", async () => {
     const queue = createQueue();
-    const release = createDeferred();
-    const entered = createDeferred();
+    const { release, entered, inspectAsync } = holdClaimInspection();
     const activity: boolean[] = [];
     const deliver = vi.fn(() => {
       expect(activity).not.toContain(false);
     });
     const monitor = createMonitor(queue, {
-      inspectAsync: async (raw, context) => {
-        if (context.phase === "claim") {
-          entered.resolve();
-          await release.promise;
-        }
-        return { eventId: raw.id, laneKey: raw.lane };
-      },
+      inspectAsync,
       deliver,
       onActivityChange: (active) => {
         activity.push(active);
@@ -434,27 +385,13 @@ describe("channel ingress monitor asynchronous inspection", () => {
 });
 
 describe("channel ingress monitor start capacity", () => {
-  type RawEvent = { id: string; lane: string; text: string };
-  type MonitorOptions = CreateChannelIngressMonitorOptions<RawEvent, string, StoredEvent, unknown>;
-
-  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
-
-  afterEach(() => {
-    closeOpenClawStateDatabaseForTest();
-  });
-
-  function createMonitor(deliver: MonitorOptions["deliver"], drain: MonitorOptions["drain"]) {
-    return createChannelIngressMonitor<RawEvent, string, StoredEvent>({
-      queue: createChannelIngressQueue<StoredEvent>({
-        channelId: "test",
-        accountId: "a",
-        stateDir: tempDirs.make("openclaw-ingress-monitor-capacity-"),
-      }),
+  function createCapacityMonitor(
+    deliver: MonitorOptions["deliver"],
+    drain: MonitorOptions["drain"],
+  ) {
+    return createMonitor(createQueue(), {
       inspect: (raw) => ({ eventId: raw.id, laneKey: `lane:${raw.lane}` }),
-      payload: createRawEventPayload<RawEvent>(),
       deliver,
-      pollIntervalMs: 60_000,
-      retention: { pruneIntervalMs: 60_000 },
       drain: {
         adoptionStallTimeoutMs: 5_000,
         retryPolicy: { baseMs: 1_000, maxMs: 1_000 },
@@ -463,124 +400,72 @@ describe("channel ingress monitor start capacity", () => {
     });
   }
 
-  it("stops starting work once the deferred budget is spent, and recovers", async () => {
-    const started: string[] = [];
-    const parked = createDeferred();
-    const monitor = createMonitor(
-      async (raw, lifecycle) => {
-        started.push(raw.id);
-        if (raw.id === "event-after-budget") {
-          return { kind: "completed" };
-        }
-        lifecycle.onDeferred();
-        await parked.promise;
-        return { kind: "completed" };
-      },
-      { deferredLaneOccupancy: "release", startLimit: 2 },
-    );
-
-    monitor.start();
-    try {
-      // Two start slots plus a two-deferral budget allow four parked deliveries.
-      for (const lane of ["a", "b", "c", "d"]) {
-        await monitor.admit({ id: `event-parked-${lane}`, lane, text: lane });
-      }
-      await monitor.waitForPumpIdle();
-      expect(started).toHaveLength(4);
-
-      await monitor.admit({ id: "event-after-budget", lane: "e", text: "e" });
-      monitor.requestDrain();
-      await monitor.waitForPumpIdle();
-      expect(started).not.toContain("event-after-budget");
-
-      parked.resolve();
-      await monitor.waitForIdle();
-      expect(started).toContain("event-after-budget");
-    } finally {
-      parked.resolve();
-      await monitor.stop();
-    }
-  });
-
-  it("returns a settled deferral's slot, so the ceiling still holds afterwards", async () => {
-    const started: string[] = [];
-    const holding = createDeferred();
-    const monitor = createMonitor(
-      async (raw, lifecycle) => {
-        started.push(raw.id);
-        if (raw.id.startsWith("event-deferred-")) {
-          lifecycle.onDeferred();
-          return { kind: "completed" };
-        }
-        await holding.promise;
-        return { kind: "completed" };
-      },
-      { deferredLaneOccupancy: "release", startLimit: 2 },
-    );
-
-    monitor.start();
-    try {
-      for (const lane of ["a", "b"]) {
-        await monitor.admit({ id: `event-deferred-${lane}`, lane, text: lane });
-      }
-      // Join delivery settlement, which owns returning the borrowed capacity.
-      await monitor.waitForIdle();
-      expect(started).toHaveLength(2);
-
-      for (const lane of ["c", "d"]) {
-        await monitor.admit({ id: `event-holding-${lane}`, lane, text: lane });
-      }
-      await monitor.waitForPumpIdle();
-      expect(started).toHaveLength(4);
-
-      await monitor.admit({ id: "event-over-ceiling", lane: "e", text: "e" });
-      monitor.requestDrain();
-      await monitor.waitForPumpIdle();
-      expect(started).not.toContain("event-over-ceiling");
-
-      holding.resolve();
-      await monitor.waitForIdle();
-      expect(started).toContain("event-over-ceiling");
-    } finally {
-      holding.resolve();
-      await monitor.stop();
-    }
-  });
-
   it.each([
-    { startLimit: 1, capacity: 1 },
-    { startLimit: undefined, capacity: 32 },
+    {
+      name: "released deferral budget",
+      startLimit: 2,
+      releaseLane: true,
+      settled: false,
+      capacity: 4,
+    },
+    {
+      name: "returned deferral slots",
+      startLimit: 2,
+      releaseLane: true,
+      settled: true,
+      capacity: 2,
+    },
+    { name: "held lane", startLimit: 1, releaseLane: false, settled: false, capacity: 1 },
+    {
+      name: "default held limit",
+      startLimit: undefined,
+      releaseLane: false,
+      settled: false,
+      capacity: 32,
+    },
   ])(
-    "bounds held deliveries across pumps at $capacity while admitting durable input",
-    async ({ startLimit, capacity }) => {
+    "bounds deliveries across pumps at $name and recovers",
+    async ({ startLimit, releaseLane, settled, capacity }) => {
       const started: string[] = [];
       const parked = createDeferred();
-      const monitor = createMonitor(
+      const monitor = createCapacityMonitor(
         async (raw, lifecycle) => {
           started.push(raw.id);
-          lifecycle.onDeferred();
-          await parked.promise;
+          if (raw.id === "next" && releaseLane && !settled) {
+            return { kind: "completed" };
+          }
+          if (raw.id.startsWith("deferred-") || !settled) {
+            lifecycle.onDeferred();
+          }
+          if (!raw.id.startsWith("deferred-")) {
+            await parked.promise;
+          }
           return { kind: "completed" };
         },
-        { startLimit },
+        { startLimit, deferredLaneOccupancy: releaseLane ? "release" : "hold" },
       );
-
+      const admit = async (prefix: string, count: number) => {
+        for (let index = 0; index < count; index++) {
+          await monitor.admit({ id: prefix + index, lane: prefix + index, text: "a" });
+        }
+      };
       monitor.start();
       try {
-        for (let index = 0; index < capacity; index++) {
-          await monitor.admit({ id: `event-parked-${index}`, lane: `${index}`, text: "a" });
+        if (settled) {
+          await admit("deferred-", 2);
+          await monitor.waitForIdle();
+          expect(started).toHaveLength(2);
         }
+        await admit("parked-", capacity);
         await monitor.waitForPumpIdle();
-        expect(started).toHaveLength(capacity);
-
-        await monitor.admit({ id: "event-second-lane", lane: "b", text: "b" });
+        expect(started).toHaveLength(capacity + (settled ? 2 : 0));
+        await monitor.admit({ id: "next", lane: "next", text: "b" });
         monitor.requestDrain();
         await monitor.waitForPumpIdle();
-        expect(started).not.toContain("event-second-lane");
-
+        expect(started).not.toContain("next");
         parked.resolve();
         await monitor.waitForIdle();
-        expect(started).toContain("event-second-lane");
+        expect(started).toContain("next");
       } finally {
         parked.resolve();
         await monitor.stop();
