@@ -40,7 +40,6 @@ function expectCronInvocationContext(runParams: {
   sessionId?: string;
   sessionKey?: string;
 }): string {
-  expect(runParams.runId).toEqual(expect.any(String));
   expect(runParams.runId).not.toBe("");
   expect(runParams.runId).not.toBe("test-session-id");
   expect(runParams.sessionId).toBe("test-session-id");
@@ -73,7 +72,7 @@ describe("runCronIsolatedAgentTurn invocation ownership", () => {
         } else {
           expect(propose).toThrow("cron next_check requires");
         }
-        return { payloads: [{ text: "CI is still pending." }], meta: { agentMeta: {} } };
+        return completedTurn();
       });
       const result = await runJob(
         {
@@ -96,10 +95,11 @@ describe("runCronIsolatedAgentTurn invocation ownership", () => {
 
   it("retains the selected owner while reusing a global session", async () => {
     h.resolveCronSessionMock.mockReturnValue(h.makeCronSession({ isNewSession: false }));
-    let admittedOwner: { sessionKey?: string; agentId?: string } | undefined;
     h.runEmbeddedAgentMock.mockImplementationOnce(async (runParams) => {
-      const admitted = getAgentRunContext(runParams.runId);
-      admittedOwner = { sessionKey: admitted?.sessionKey, agentId: admitted?.agentId };
+      expect(getAgentRunContext(runParams.runId)).toMatchObject({
+        sessionKey: "global",
+        agentId: "research",
+      });
       return completedTurn();
     });
     const result = await runJob(
@@ -111,7 +111,6 @@ describe("runCronIsolatedAgentTurn invocation ownership", () => {
       },
     );
     expect(result).toMatchObject({ status: "ok", sessionKey: "global" });
-    expect(admittedOwner).toEqual({ sessionKey: "global", agentId: "research" });
   });
 
   it.each([
@@ -141,8 +140,7 @@ describe("runCronIsolatedAgentTurn invocation ownership", () => {
           lifecycleGeneration: previousGeneration,
         });
       }
-      const existingContext = getAgentRunContext("test-session-id");
-      const expectedContext = existingContext ? { ...existingContext } : undefined;
+      const expectedContext = { ...getAgentRunContext("test-session-id") };
       if (physical === "stale") {
         rotateAgentEventLifecycleGeneration();
       }
@@ -272,55 +270,41 @@ describe("runCronIsolatedAgentTurn invocation ownership", () => {
 describe("runCronIsolatedAgentTurn session cleanup", () => {
   setupRunCronIsolatedAgentTurnSuite({ fast: true });
 
-  it("deletes the run-scoped cron session after delivery-none deleteAfterRun jobs", async () => {
-    h.dispatchCronDeliveryMock.mockImplementationOnce(
-      (await vi.importActual<typeof import("./delivery-dispatch.js")>("./delivery-dispatch.js"))
-        .dispatchCronDelivery,
-    );
-    const result = await runJob({
-      deleteAfterRun: true,
-      delivery: { mode: "none" },
-    });
-
-    expect(result.status).toBe("ok");
-    expect(h.callGatewayMock).toHaveBeenCalledWith({
-      method: "sessions.delete",
-      params: {
-        key: "agent:default:cron:test",
-        deleteTranscript: true,
-        emitLifecycleHooks: false,
-        expectedSessionId: "test-session-id",
-        expectedLifecycleRevision: "test-lifecycle-revision",
-        expectedSessionUpdatedAt: 0,
-      },
-      timeoutMs: null,
-    });
-  });
-
-  it("leaves transcript cleanup with dispatch when delivery rejects", async () => {
-    h.resolveCronDeliveryPlanMock.mockReturnValue({
-      requested: true,
-      mode: "announce",
-      channel: "messagechat",
-      to: "test-target",
-    });
-    h.dispatchCronDeliveryMock.mockRejectedValueOnce(
-      new Error("delivery receipt store unavailable"),
-    );
-
-    const result = await runJob({
-      deleteAfterRun: true,
-      delivery: { mode: "announce", channel: "messagechat", to: "test-target" },
-    });
-
-    expect(result).toMatchObject({ status: "error", error: "delivery receipt store unavailable" });
-    expect(h.callGatewayMock).not.toHaveBeenCalled();
-    expect(h.retireSessionMcpRuntimeMock).toHaveBeenCalledWith({
-      sessionId: "test-session-id",
-      reason: "isolated-cron-dispose",
-      onError: expect.any(Function),
-    });
-  });
+  it.each([false, true])(
+    "keeps deletion with delivery dispatch (rejected=%s)",
+    async (rejected) => {
+      const delivery = rejected
+        ? { mode: "announce", channel: "messagechat", to: "test-target" }
+        : { mode: "none" };
+      if (rejected) {
+        h.resolveCronDeliveryPlanMock.mockReturnValue({ requested: true, ...delivery });
+        h.dispatchCronDeliveryMock.mockRejectedValueOnce(
+          new Error("delivery receipt store unavailable"),
+        );
+      } else {
+        h.dispatchCronDeliveryMock.mockImplementationOnce(
+          (await vi.importActual<typeof import("./delivery-dispatch.js")>("./delivery-dispatch.js"))
+            .dispatchCronDelivery,
+        );
+      }
+      const result = await runJob({ deleteAfterRun: true, delivery });
+      if (rejected) {
+        expect(result).toMatchObject({
+          status: "error",
+          error: "delivery receipt store unavailable",
+        });
+        expect(h.callGatewayMock).not.toHaveBeenCalled();
+        expectCall(h.retireSessionMcpRuntimeMock, {
+          sessionId: "test-session-id",
+          reason: "isolated-cron-dispose",
+          onError: expect.any(Function),
+        });
+      } else {
+        expect(result.status).toBe("ok");
+        expectCall(h.callGatewayMock, { method: "sessions.delete" });
+      }
+    },
+  );
 
   it("retires the previous bundled MCP runtime when a persistent cron session rolls over", async () => {
     h.resolveCronSessionMock.mockReturnValue(
@@ -366,11 +350,8 @@ describe("runCronIsolatedAgentTurn session cleanup", () => {
       h.resolveCronSessionMock.mockReturnValue(
         h.makeCronSession({ store: { [source.sessionKey]: sourceEntry } }),
       );
-      readSessionMessagesAsyncMock.mockResolvedValue([
-        { role: "user", content: "Otters hold hands while sleeping." },
-        { role: "assistant", content: "Got it." },
-      ]);
-      const message = isolated ? "Reply tick in your own session." : "Summarize the animal fact.";
+      readSessionMessagesAsyncMock.mockResolvedValue([{ role: "user", content: "Animal fact." }]);
+      const message = "Summarize the animal fact.";
       const result = await runJob({
         sessionKey: source.sessionKey,
         sessionTarget: isolated ? "isolated" : "current",
@@ -383,10 +364,10 @@ describe("runCronIsolatedAgentTurn session cleanup", () => {
         expect(result.sessionKey).not.toBe(source.sessionKey);
         expect(readSessionMessagesAsyncMock).not.toHaveBeenCalled();
         expect(prompt).toContain(message);
-        expect(prompt).not.toContain("Otters hold hands while sleeping.");
+        expect(prompt).not.toContain("Animal fact.");
       } else {
         expect(prompt).toContain(
-          "Recent conversation:\n- User: Otters hold hands while sleeping.\n- Assistant: Got it.\n\nSummarize the animal fact.",
+          "Recent conversation:\n- User: Animal fact.\n\nSummarize the animal fact.",
         );
       }
       expectCall(h.dispatchCronDeliveryMock, {

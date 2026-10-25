@@ -59,17 +59,6 @@ function resolveWithStoredEntry(params?: {
   });
 }
 
-it.each([true, false])(
-  "initializes recency only for a new scheduled session (existing=%s)",
-  (existing) => {
-    const result = resolveWithStoredEntry({
-      sessionKey: "agent:main:dashboard:scheduled-check",
-      ...(existing ? { entry: { updatedAt: NOW_MS - 1_000 } } : {}),
-    });
-    expect(result.sessionEntry.updatedAt).toBe(existing ? NOW_MS - 1_000 : NOW_MS);
-  },
-);
-
 const boundContext = {
   spawnedBy: "agent:main:parent",
   spawnedCwd: "/repo/task",
@@ -88,26 +77,27 @@ const boundContext = {
 } satisfies Partial<SessionEntry>;
 
 it.each([
-  { name: "fresh in-place reuse", keeps: true },
-  { name: "exact-run reuse", exactRunSession: true, keeps: false },
-])("mints a lifecycle revision only for a new run generation ($name)", ({ keeps, ...params }) => {
-  const result = resolveWithStoredEntry({
-    sessionKey: "agent:main:dashboard:chat",
-    ...params,
-    entry: {
-      sessionId: "existing-session",
-      lifecycleRevision: "existing-revision",
-      systemSent: true,
-    },
-  });
-  expect(result.sessionEntry.lifecycleRevision).toBe(result.lifecycleRevision);
-  if (keeps) {
-    expect(result.lifecycleRevision).toBe("existing-revision");
-  } else {
-    expect(result.lifecycleRevision).not.toBe("existing-revision");
-    expect(result.lifecycleRevision).toEqual(expect.any(String));
-  }
-});
+  { name: "new session", existing: false, keeps: false },
+  { name: "in-place reuse", existing: true, keeps: true },
+  { name: "exact-run reuse", existing: true, exactRunSession: true, keeps: false },
+])(
+  "preserves recency and mints only new run revisions ($name)",
+  ({ keeps, existing, ...params }) => {
+    const result = resolveWithStoredEntry({
+      sessionKey: "agent:main:dashboard:chat",
+      ...params,
+      entry: existing ? { lifecycleRevision: "existing-revision", systemSent: true } : undefined,
+    });
+    expect(result.sessionEntry.updatedAt).toBe(existing ? NOW_MS - 1_000 : NOW_MS);
+    expect(result.sessionEntry.lifecycleRevision).toBe(result.lifecycleRevision);
+    if (keeps) {
+      expect(result.lifecycleRevision).toBe("existing-revision");
+    } else {
+      expect(result.lifecycleRevision).not.toBe("existing-revision");
+      expect(result.lifecycleRevision).toEqual(expect.any(String));
+    }
+  },
+);
 
 it.each([false, true])(
   "guards archived sessions before forced rollover (initializing=%s)",

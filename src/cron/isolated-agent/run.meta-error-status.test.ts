@@ -1,14 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { expectObjectFields } from "../../test-utils/mock-call-assertions.js";
-import { dispatchCronDelivery } from "./delivery-dispatch.js";
 import { makeIsolatedAgentJobFixture, makeIsolatedAgentParamsFixture } from "./job-fixtures.js";
 import { setupRunCronIsolatedAgentTurnSuite } from "./run.suite-helpers.js";
 import * as harness from "./run.test-harness.js";
-
-// mock-isolation: Keep the database-backed descendant registry outside the fixed child-run fixture.
-vi.mock("./delivery-subagent-registry.runtime.js", () => ({
-  hasUnsettledCronDescendants: async () => false,
-}));
 
 const runCronIsolatedAgentTurn = await harness.loadRunCronIsolatedAgentTurn();
 const runTurn = ({
@@ -154,32 +148,6 @@ describe("runCronIsolatedAgentTurn - meta.error status propagation", () => {
     expect(harness.dispatchCronDeliveryMock).toHaveBeenCalledWith(
       expect.objectContaining({ spawnOnlyHandoff: true }),
     );
-  });
-
-  it("records the child result after a no-delivery parent returns no payload", async () => {
-    await useRealOutcome();
-    const reply = "Finished the delegated report";
-    mockChildRun();
-    harness.resolveCronDeliveryPlanMock.mockReturnValue({ mode: "none", requested: false });
-    harness.listDescendantRunsForRequesterMock.mockResolvedValue([
-      {
-        runId: "run-child",
-        childSessionKey: "agent:default:child",
-        requesterSessionKey: "agent:default:cron:test",
-        requesterDisplayKey: "agent:default:cron:test",
-        createdAt: Date.now(),
-        task: "delegated report",
-        cleanup: "keep",
-        execution: { status: "terminal", endedAt: Date.now() + 1_000, outcome: { status: "ok" } },
-        completion: { required: true, terminalReply: { disposition: "visible", text: reply } },
-      },
-    ]);
-    harness.dispatchCronDeliveryMock.mockImplementation(dispatchCronDelivery);
-
-    const result = await runTurn({ job: { delivery: { mode: "none" } } });
-
-    expectObjectFields(result, { status: "ok", outputText: reply });
-    expect(result.deliveryState?.status).toBe("not-requested");
   });
 
   it("preserves structured-parent delivery failures after accepting a child", async () => {

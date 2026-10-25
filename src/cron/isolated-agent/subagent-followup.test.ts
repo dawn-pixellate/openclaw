@@ -19,15 +19,10 @@ vi.mock("./delivery-subagent-registry.runtime.js", () => ({
   hasUnsettledCronDescendants: vi.fn().mockResolvedValue(false),
 }));
 
-vi.mock("../../agents/run-wait.js", async () => {
-  const actual = await vi.importActual<typeof import("../../agents/run-wait.js")>(
-    "../../agents/run-wait.js",
-  );
-  return {
-    ...actual,
-    readLatestAssistantReply: vi.fn().mockResolvedValue(undefined),
-  };
-});
+vi.mock("../../agents/run-wait.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../agents/run-wait.js")>()),
+  readLatestAssistantReply: vi.fn().mockResolvedValue(undefined),
+}));
 
 import * as gatewayCallRuntime from "../../gateway/call.js";
 const callGateway = vi.spyOn(gatewayCallRuntime, "callGateway").mockResolvedValue({ status: "ok" });
@@ -39,6 +34,8 @@ const { readLatestAssistantReply } = await import("../../agents/run-wait.js");
 const listRuns = vi.mocked(listDescendantRunsForRequester);
 const latestReply = vi.mocked(readLatestAssistantReply);
 const unsettled = vi.mocked(hasUnsettledCronDescendants);
+const waitedRunIds = () =>
+  callGateway.mock.calls.map(([request]) => (request.params as { runId: string }).runId);
 
 async function resolveAfterAdvancingTimers<T>(promise: Promise<T>, advanceMs = 100) {
   await vi.advanceTimersByTimeAsync(advanceMs);
@@ -47,7 +44,7 @@ async function resolveAfterAdvancingTimers<T>(promise: Promise<T>, advanceMs = 1
 
 function waitSummary(params: Partial<Parameters<typeof waitForDescendantSubagentSummary>[0]> = {}) {
   return waitForDescendantSubagentSummary({
-    sessionKey: "cron-session",
+    sessionKey: "test-session",
     initialReply: "on it",
     timeoutMs: 100,
     observedActiveDescendants: true,
@@ -148,16 +145,13 @@ describe("waitForDescendantSubagentSummary", () => {
 
     try {
       const result = await waitSummary({
-        sessionKey: "test-session",
         initialReply: parentReply,
         timeoutMs: 300,
         observedActiveDescendants: undefined,
       });
 
       expect(result).toBe("The successor completed the report.");
-      expect(
-        callGateway.mock.calls.map(([request]) => (request.params as { runId: string }).runId),
-      ).toEqual(["queued-run", "successor-run"]);
+      expect(waitedRunIds()).toEqual(["queued-run", "successor-run"]);
     } finally {
       clearTimeout(completion);
     }
@@ -245,10 +239,7 @@ describe("waitForDescendantSubagentSummary", () => {
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(100);
       expect(await resultPromise).toBe(finalSynthesis);
-      const waitedRunIds = callGateway.mock.calls.map(
-        ([request]) => (request.params as { runId: string }).runId,
-      );
-      expect(waitedRunIds).toEqual(
+      expect(waitedRunIds()).toEqual(
         childrenAlreadyEnded
           ? ["orchestrator-successor"]
           : ["worker-a", "worker-b", "orchestrator-successor"],
@@ -263,7 +254,7 @@ describe("waitForDescendantSubagentSummary", () => {
     unsettled.mockResolvedValue(true);
     latestReply.mockResolvedValue("Partial results are available.");
 
-    const resultPromise = waitSummary({ sessionKey: "test-session", timeoutMs: 60 });
+    const resultPromise = waitSummary({ timeoutMs: 60 });
     expect(await resolveAfterAdvancingTimers(resultPromise, 60)).toBeUndefined();
     expect(callGateway).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
@@ -291,7 +282,6 @@ describe("waitForDescendantSubagentSummary", () => {
     });
 
     const resultPromise = waitSummary({
-      sessionKey: "test-session",
       timeoutMs: 500,
       abortSignal: controller.signal,
       observedActiveDescendants: undefined,
