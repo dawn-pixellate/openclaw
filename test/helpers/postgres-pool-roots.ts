@@ -8,8 +8,14 @@ import {
 
 const declarationKey = "openclaw.test.postgresPoolRoots";
 const rootChannel = "openclaw.postgres.pool.self-root";
-const declarations: Int32Array<SharedArrayBuffer> =
-  getEnvironmentData(declarationKey) ?? new Int32Array(new SharedArrayBuffer(65_536 * 4));
+const inherited: unknown = getEnvironmentData(declarationKey);
+if (
+  inherited !== undefined &&
+  (!(inherited instanceof Int32Array) || !(inherited.buffer instanceof SharedArrayBuffer))
+) {
+  throw new Error("Invalid PostgreSQL test root declaration registry");
+}
+const declarations = inherited ?? new Int32Array(new SharedArrayBuffer(65_536 * 4));
 setEnvironmentData(declarationKey, declarations);
 
 // The config creates this shared registry before Vitest starts its native threads.
