@@ -27,6 +27,14 @@ import { runDoctorConfigPreflight } from "./doctor-config-preflight.js";
 import { withDoctorConfigPreflightHome } from "./doctor-config-preflight.test-support.js";
 import { runStartupConfigPreflight } from "./startup-config-preflight.js";
 
+const migrate = () =>
+  runDoctorConfigPreflight({
+    migrateLegacyConfig: false,
+    invalidConfigNote: false,
+    doctorOnlyStateMigrations: true,
+    repairPrefixedConfig: true,
+  });
+
 it("defers runtime evaluation until Doctor migrates a startup plugin's retained data", async () => {
   await withDoctorConfigPreflightHome((home) =>
     withEnvAsync({ OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1" }, async () => {
@@ -197,12 +205,7 @@ module.exports = { id: ${JSON.stringify(pluginId)}, register(api) {
         await expect(fs.stat(evaluatedPath)).rejects.toMatchObject({ code: "ENOENT" });
         expect(await fs.readFile(legacyPath, "utf8")).toBe(legacyBytes);
         expect(await fs.readFile(configPath, "utf8")).toBe(JSON.stringify(config));
-        await runDoctorConfigPreflight({
-          migrateLegacyConfig: false,
-          invalidConfigNote: false,
-          doctorOnlyStateMigrations: true,
-          repairPrefixedConfig: true,
-        });
+        await migrate();
         expect(await readDeferredPluginMigrationsAsync()).toEqual([]);
         const retried = await withPluginCache(held.cache, () =>
           loadOpenClawPluginsAsync({
@@ -375,12 +378,7 @@ module.exports = { stateMigrations: [{
         });
         expect(held.contextEngines.has(engineId)).toBe(false);
         await expect(fs.stat(evaluatedPath)).rejects.toMatchObject({ code: "ENOENT" });
-        await runDoctorConfigPreflight({
-          migrateLegacyConfig: false,
-          invalidConfigNote: false,
-          doctorOnlyStateMigrations: true,
-          repairPrefixedConfig: true,
-        });
+        await migrate();
         expect(await readDeferredPluginMigrationsAsync()).toEqual([]);
         const ready = await load();
         expect(ready.plugins.find((record) => record.id === pluginId)?.status).toBe("loaded");

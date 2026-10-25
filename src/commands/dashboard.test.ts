@@ -365,19 +365,11 @@ describe("verified custom-bind handoff", () => {
 
     await dashboardCommand(runtime, { noOpen: true, yes: true });
 
-    expect(gatherStatus).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ rpc: { url: "ws://10.0.0.5:18789" } }),
-    );
-    expect(gatherStatus).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ rpc: { url: "ws://10.0.0.5:18789" } }),
-    );
-    expect(gatherStatus).toHaveBeenNthCalledWith(
-      3,
-      expect.objectContaining({ rpc: { url: "ws://10.0.0.6:18789" } }),
-    );
-    expect(gatherStatus).toHaveBeenCalledTimes(3);
+    expect(gatherStatus.mock.calls.map(([options]) => options.rpc)).toEqual([
+      { url: "ws://10.0.0.5:18789" },
+      { url: "ws://10.0.0.5:18789" },
+      { url: "ws://10.0.0.6:18789" },
+    ]);
     expect(startGateway).toHaveBeenCalledExactlyOnceWith({ json: false });
     expectNoCredentials();
     expectNoCalls(inspectPortUsage, runtime.exit);

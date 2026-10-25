@@ -117,17 +117,18 @@ function agentConfig(
 
 describe("promptAuthConfig", () => {
   it("resolves fallback aliases before scoped allowlist pruning", async () => {
+    const models = {
+      "openai/gpt-5.5": { alias: "GPT" },
+      "openai/gpt-5.4-mini": { alias: "mini" },
+      "anthropic/claude-sonnet-4-6": { alias: "Sonnet" },
+    };
     mocks.authChoice.mockResolvedValue("token");
     mocks.applyAuth.mockResolvedValue({
       config: {
         agents: {
           defaults: {
             model: { primary: "openai/gpt-5.5", fallbacks: ["mini"] },
-            models: {
-              "openai/gpt-5.5": { alias: "GPT" },
-              "openai/gpt-5.4-mini": { alias: "mini" },
-              "anthropic/claude-sonnet-4-6": { alias: "Sonnet" },
-            },
+            models: structuredClone(models),
           },
         },
       },
@@ -155,11 +156,7 @@ describe("promptAuthConfig", () => {
       "openai/gpt-5.5",
     ]);
     expect(result.agents?.defaults?.model).toEqual({ primary: "openai/gpt-5.5" });
-    expect(result.agents?.defaults?.models).toEqual({
-      "openai/gpt-5.5": { alias: "GPT" },
-      "openai/gpt-5.4-mini": { alias: "mini" },
-      "anthropic/claude-sonnet-4-6": { alias: "Sonnet" },
-    });
+    expect(result.agents?.defaults?.models).toEqual(models);
   });
 
   it.each([false, true])("writes selected-agent policy (legacy primary: %s)", async (legacy) => {
@@ -301,12 +298,11 @@ describe("promptAuthConfig", () => {
     );
     const result = await promptAuthConfig(config, makeRuntime(), noopPrompter, target);
 
-    const initializesAgent = owner === "agent";
     expect(resolveAgentEffectiveModelPrimary(result, "ops")).toBe(
       override ? recommended : undefined,
     );
     expect(result.agents?.entries?.OPS?.model).toEqual(
-      initializesAgent ? { ...agentModel, primary: recommended } : agentModel,
+      owner === "agent" ? { ...agentModel, primary: recommended } : agentModel,
     );
     expect(result.agents?.defaults?.model).toEqual(
       owner === "shared" ? { ...defaultModel, primary: recommended } : defaultModel,
