@@ -4,18 +4,13 @@ import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "../../config/runtime-snapshot.js";
-import { discoverModelsAsync } from "../agent-model-discovery.js";
-import type { PreparedModelRuntimeSnapshot } from "../prepared-model-runtime.js";
+import { discoverAuthStorageFacts, discoverModelsAsync } from "../agent-model-discovery.js";
 import {
   catalogCost,
   configuredPricingCases,
   staleCost,
 } from "./model.configured-pricing.test-support.js";
-import { createEmptyPreparedModelRuntimeFixture } from "./model.fixture.test-support.js";
-import { expectResolvedForwardCompatFallbackResult } from "./model.forward-compat.test-support.js";
-import { buildInlineProviderModels } from "./model.inline-provider.js";
 import { createProviderRuntimeTestMock } from "./model.provider-runtime.test-support.js";
-import { normalizeConfiguredProviderModel } from "./model.registry-resolution.js";
 
 vi.mock("../../plugins/provider-runtime.js", () => ({
   applyProviderResolvedTransportWithPlugin: () => undefined,
@@ -32,25 +27,29 @@ vi.mock("../auth-profiles.js", () => ({
   resolveAuthProfileOrder: () => [],
 }));
 
+// mock-isolation: These resolver cases supply stores; do not initialize a runtime owner.
+vi.mock("../prepared-model-runtime.js", () => {
+  const unexpected = () => {
+    throw new Error("Resolver fixture already supplied discovery stores");
+  };
+  return {
+    getPreparedModelRuntimeSnapshot: unexpected,
+    loadPreparedModelRuntimeSnapshot: unexpected,
+  };
+});
+
 vi.mock("./model.static-catalog.js", () => ({
   resolveBundledProviderStaticCatalogModel: () => undefined,
   resolveBundledStaticCatalogModel: () => undefined,
   resolveManifestModelCatalogProviderAliasMetadata: ({
     provider,
-    modelId,
     cfg,
   }: {
     provider: string;
-    modelId?: string;
     cfg?: { models?: { providers?: Record<string, { baseUrl?: string }> } };
   }) => ({
-    provider:
-      provider === "azure-openai-responses" && modelId === "gpt-5.3-codex-spark"
-        ? "openai"
-        : provider,
-    ...(provider === "azure-openai-responses" &&
-    modelId !== "gpt-5.3-codex-spark" &&
-    cfg?.models?.providers?.[provider]?.baseUrl
+    provider,
+    ...(provider === "azure-openai-responses" && cfg?.models?.providers?.[provider]?.baseUrl
       ? { transport: { api: "azure-openai-responses" as const } }
       : {}),
   }),
@@ -89,47 +88,6 @@ vi.mock("../model-suppression.js", async (importOriginal) => {
   };
 });
 
-// mock-isolation: Synthetic discovery snapshots exclude process-wide auth publication and runtime owners.
-vi.mock("../prepared-model-runtime.js", async () => {
-  const discovery = await import("../agent-model-discovery.js");
-  const { createPluginMetadataSnapshot } =
-    await import("../../config/plugin-auto-enable.test-helpers.js");
-  const createSnapshot = async (input: {
-    agentDir: string;
-    config?: OpenClawConfig;
-    workspaceDir?: string;
-  }) => {
-    const config = input.config ?? {};
-    const { authStorage } = await discovery.discoverAuthStorageFacts(input.agentDir);
-    const modelRegistry = await discovery.discoverModelsAsync(authStorage, input.agentDir, {
-      ...(input.config ? { config: input.config } : {}),
-      ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
-    });
-    if (!("fork" in modelRegistry)) {
-      Object.assign(modelRegistry, { fork: () => modelRegistry });
-    }
-    return {
-      ...createEmptyPreparedModelRuntimeFixture({
-        agentDir: input.agentDir,
-        config,
-        createStores: () => ({ authStorage, modelRegistry }),
-        metadataSnapshot: createPluginMetadataSnapshot({
-          config,
-          manifestRegistry: { plugins: [], diagnostics: [] },
-          ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
-        }),
-      }),
-      ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
-      inlineProviderModels: buildInlineProviderModels(config.models?.providers ?? {}),
-    } satisfies PreparedModelRuntimeSnapshot;
-  };
-  return {
-    getPreparedModelRuntimeSnapshot: () => undefined,
-    loadPreparedModelRuntimeSnapshot: async (input: Parameters<typeof createSnapshot>[0]) =>
-      createSnapshot(input),
-  };
-});
-
 // mock-isolation: Fallback fixtures control discovery results without loading real credentials or model stores.
 vi.mock("../agent-model-discovery.js", () => ({
   discoverAuthStorageFacts: vi.fn(() => ({ authStorage: { mocked: true } })),
@@ -151,15 +109,16 @@ beforeEach(() => {
 });
 afterEach(clearRuntimeConfigSnapshot);
 
-function createRuntimeHooks() {
-  return createProviderRuntimeTestMock({
-    handledDynamicProviders: ["google-antigravity", "zai", "openai"],
-  });
-}
-
 async function resolveModelForTest(provider: string, modelId: string, cfg?: OpenClawConfig) {
-  return resolveModelAsync(provider, modelId, "/tmp/agent", cfg, {
-    runtimeHooks: createRuntimeHooks(),
+  const agentDir = "/tmp/agent";
+  const { authStorage } = await discoverAuthStorageFacts(agentDir);
+  const modelRegistry = await discoverModelsAsync(authStorage, agentDir, { config: cfg ?? {} });
+  return resolveModelAsync(provider, modelId, agentDir, cfg, {
+    authStorage,
+    modelRegistry,
+    runtimeHooks: createProviderRuntimeTestMock({
+      handledDynamicProviders: ["google-antigravity", "zai", "openai"],
+    }),
   });
 }
 
@@ -184,8 +143,7 @@ function mockSpark() {
     templateModel: { ...makeModel(spark), provider: "openai", ...directRoute },
   });
 }
-const resolveSpark = (cfg?: OpenClawConfig, provider = "openai") =>
-  resolveModelForTest(provider, spark, cfg);
+const resolveSpark = (cfg?: OpenClawConfig) => resolveModelForTest("openai", spark, cfg);
 
 describe("resolveModel forward-compat errors and overrides", () => {
   it.each(configuredPricingCases)(
@@ -226,15 +184,6 @@ describe("resolveModel forward-compat errors and overrides", () => {
 
       for (const cfg of [runtime, structuredClone(runtime)]) {
         const result = await resolveModelForTest(provider, modelId, cfg);
-        const fallback = normalizeConfiguredProviderModel({
-          provider,
-          modelId,
-          cfg,
-          manifestAlias: { provider },
-          getStaticCatalogModel: () => catalogModel,
-          runtimeHooks: createRuntimeHooks(),
-        });
-
         expect(result.error).toBeUndefined();
         expect(result.model).toMatchObject({
           provider,
@@ -245,7 +194,6 @@ describe("resolveModel forward-compat errors and overrides", () => {
           compat: { supportsTools: false },
         });
         expect(result.model?.cost).toEqual(expected);
-        expect(fallback?.cost).toEqual(expected);
       }
     },
   );
@@ -313,14 +261,12 @@ describe("resolveModel forward-compat errors and overrides", () => {
         models: [makeModel("gpt-5.4")],
       }),
     );
-    expectResolvedForwardCompatFallbackResult({
-      result,
-      expectedModel: {
-        api: "openai-chatgpt-responses",
-        baseUrl: "https://custom.example.com",
-        id: "gpt-5.4",
-        provider: "openai",
-      },
+    expect(result.error).toBeUndefined();
+    expect(result.model).toMatchObject({
+      api: "openai-chatgpt-responses",
+      baseUrl: "https://custom.example.com",
+      id: "gpt-5.4",
+      provider: "openai",
     });
     expect(result.model?.headers).toEqual({ "X-Custom-Auth": "token-123" });
   });
