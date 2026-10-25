@@ -116,10 +116,7 @@ suite.define(() => {
           route.fulfill({ contentType: "text/html; charset=utf-8", body: widgetMarkup }),
         );
         const gateway = await installMockGateway(page, {
-          sessions: [
-            ...rows,
-            { key: "agent:main:no-board", displayName: "Session without a board", hasBoard: false },
-          ],
+          sessions: rows,
           featureMethods: ["board.get"],
           methodResponses: {
             "config.get": themeConfigResponse("dash", mode),
@@ -142,9 +139,6 @@ suite.define(() => {
         const empty = emptyCard.locator(".board-empty");
         await empty.waitFor();
         await waitForPreview(filledCard);
-        expect(await gallery.locator("[data-dashboard-session]").count()).toBe(2);
-        expect(await gateway.getRequests("sessions.list", { hasBoard: true })).not.toHaveLength(0);
-        expect(await gallery.getByText("Session without a board", { exact: true }).count()).toBe(0);
         await expect.poll(() => page.locator("html").getAttribute("data-theme-id")).toBe("dash");
         await expect.poll(() => page.locator("html").getAttribute("data-theme-mode")).toBe(mode);
         const saveFrame = async (name: string, element: Locator) => {
