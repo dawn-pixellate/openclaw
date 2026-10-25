@@ -141,7 +141,6 @@ describe("Google image-generation provider", () => {
     const result = await generateImage({ prompt: "draw a dog" });
 
     const request = fetchRequest(fetchMock);
-    expect(request.url.length).toBeGreaterThan(0);
     expect(request.headers).toBeInstanceOf(Headers);
     expect(new Headers(request.headers).get("authorization")).toBe("Bearer oauth-token");
     expect(result).toEqual({
@@ -152,69 +151,44 @@ describe("Google image-generation provider", () => {
     });
   });
 
-  it("accepts valid multi-image inline JSON responses above the generic provider JSON cap", async () => {
-    const imageBytes = Buffer.alloc(4 * 1024 * 1024, 1);
-    const imagePayload = imageBytes.toString("base64");
-    installGoogleFetchMock(
-      googleImagePayload(Array.from({ length: 3 }, () => inlineImage(imagePayload))),
-    );
-
-    const result = await generateImage({});
-
-    expect(result.images).toHaveLength(3);
-    expect(result.images.map((image) => image.buffer.byteLength)).toEqual([
-      imageBytes.byteLength,
-      imageBytes.byteLength,
-      imageBytes.byteLength,
-    ]);
-  });
-
-  it("keeps generated image JSON above the configured media cap", async () => {
+  it.each([3, 1])("accepts %i images above generic JSON/configured media caps", async (count) => {
     const image = Buffer.alloc(4 * 1024 * 1024, 1);
-    installGoogleFetchMock(googleImagePayload([inlineImage(image)]));
-
-    // The old store-cap bound for 0.5 MB was about 3.7 MB of JSON for four images.
-    const result = await generateImage({ cfg: { agents: { defaults: { mediaMaxMb: 0.5 } } } });
-    expect(result.images[0]?.buffer.byteLength).toBe(image.byteLength);
-  });
-
-  it("sends reference images and explicit resolution for edit flows", async () => {
-    const fetchMock = installGoogleFetchMock();
-
-    await generateImage({
-      model: "gemini-3-pro-image",
-      prompt: "Change only the sky to a sunset.",
-      resolution: "4K",
-      inputImages: [
-        {
-          buffer: Buffer.from("reference-bytes"),
-          mimeType: "image/png",
-          fileName: "reference.png",
-        },
-      ],
+    installGoogleFetchMock(
+      googleImagePayload(Array.from({ length: count }, () => inlineImage(image))),
+    );
+    const result = await generateImage({
+      cfg: count === 1 ? { agents: { defaults: { mediaMaxMb: 0.5 } } } : {},
     });
-
-    expectGenerationRequest(
-      fetchMock,
-      "gemini-3-pro-image",
-      [inlineImage(Buffer.from("reference-bytes")), { text: "Change only the sky to a sunset." }],
-      { imageSize: "4K" },
+    expect(result.images.map((item) => item.buffer.byteLength)).toEqual(
+      Array(count).fill(image.byteLength),
     );
   });
 
-  it("forwards explicit aspect ratio without forcing a default when size is omitted", async () => {
-    const fetchMock = installGoogleFetchMock();
-
-    await generateImage({
-      model: "gemini-3-pro-image",
-      prompt: "portrait photo",
-      aspectRatio: "9:16",
-    });
-
-    expectGenerationRequest(fetchMock, "gemini-3-pro-image", [{ text: "portrait photo" }], {
-      aspectRatio: "9:16",
-    });
-  });
+  const reference = {
+    buffer: Buffer.from("reference-bytes"),
+    mimeType: "image/png",
+    fileName: "reference.png",
+  };
+  it.each([
+    [
+      { resolution: "4K", inputImages: [reference] },
+      [inlineImage(reference.buffer)],
+      { imageSize: "4K" },
+    ],
+    [{ aspectRatio: "9:16" }, [], { aspectRatio: "9:16" }],
+  ] satisfies Array<[Partial<ImageGenerationRequest>, unknown[], object]>)(
+    "sends explicit image settings without a default: %j",
+    async (overrides, parts, imageConfig) => {
+      const fetchMock = installGoogleFetchMock();
+      await generateImage({ model: "gemini-3-pro-image", ...overrides });
+      expectGenerationRequest(
+        fetchMock,
+        "gemini-3-pro-image",
+        [...parts, { text: "draw a cat" }],
+        imageConfig,
+      );
+    },
+  );
 
   it("honors configured private-network opt-in for Google image generation", async () => {
     installGoogleFetchMock();

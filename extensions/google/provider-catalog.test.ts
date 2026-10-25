@@ -58,27 +58,24 @@ describe("google provider catalog", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps Google AI Studio and Vertex model ids aligned", () => {
+    const models = buildGoogleStaticCatalogProvider().models;
     expect(buildGoogleVertexStaticCatalogProvider().models.map((model) => model.id)).toEqual(
-      buildGoogleStaticCatalogProvider().models.map((model) => model.id),
+      models.map((model) => model.id),
     );
-    expect(buildGoogleStaticCatalogProvider().models[0]).toEqual({
-      id: "gemini-4-argon",
-      name: "Gemini 4 Argon",
-      family: "google",
-      ...geminiFields,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      thinkingLevelMap,
-    });
-    expect(
-      buildGoogleStaticCatalogProvider().models.find((model) => model.id === "gemini-3.8-flash"),
-    ).toEqual({
-      id: "gemini-3.8-flash",
-      name: "Gemini 3.8 Flash",
-      family: "google",
-      ...geminiFields,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      thinkingLevelMap,
-    });
+    expect(models[0]?.id).toBe("gemini-4-argon");
+    for (const [id, name] of [
+      ["gemini-4-argon", "Gemini 4 Argon"],
+      ["gemini-3.8-flash", "Gemini 3.8 Flash"],
+    ]) {
+      expect(models.find((model) => model.id === id)).toEqual({
+        id,
+        name,
+        family: "google",
+        ...geminiFields,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        thinkingLevelMap,
+      });
+    }
   });
 
   it("builds the authenticated text catalog from Google models.list metadata", async () => {
@@ -124,11 +121,7 @@ describe("google provider catalog", () => {
       expectedGemini("gemini-3.7-flash", "Gemini 3.7 Flash", true),
       expectedGemini("gemini-3.8-flash", "Gemini 3.8 Flash", true),
       expectedGemini("gemini-4-argon", "Gemini 4 Argon", true),
-      expect.objectContaining({
-        id: "gemma-3-1b-it",
-        name: "Gemma 3 1B",
-        input: ["text"],
-      }),
+      expect.objectContaining({ id: "gemma-3-1b-it", name: "Gemma 3 1B", input: ["text"] }),
       expect.objectContaining({
         id: "gemma-3-4b-it",
         name: "Gemma 3 4B",
@@ -152,35 +145,30 @@ describe("google provider catalog", () => {
   });
 
   it("propagates static compat to discovered id variants of the same weights", async () => {
-    const cases: ReadonlyArray<{ id: string; compat: { codeMode: string } | undefined }> = [
-      { id: "gemini-3.5-flash", compat: { codeMode: "preferred" } },
-      { id: "gemini-3.5-flash-preview-06-17", compat: { codeMode: "preferred" } },
-      { id: "gemini-3.1-pro-preview-05-06", compat: { codeMode: "preferred" } },
-      { id: "gemini-flash-latest", compat: { codeMode: "preferred" } },
-      { id: "gemini-flash-lite-latest", compat: { codeMode: "preferred" } },
-      { id: "gemini-pro-latest", compat: { codeMode: "preferred" } },
-      // Dated variant of unflagged weights resolves but carries no compat.
-      { id: "gemini-2.5-flash-preview-05-20", compat: undefined },
-      // Unknown family member fails closed: no static entry, no compat.
-      { id: "gemini-3.9-flash", compat: undefined },
+    const supported = [
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-preview-06-17",
+      "gemini-3.1-pro-preview-05-06",
+      "gemini-flash-latest",
+      "gemini-flash-lite-latest",
+      "gemini-pro-latest",
     ];
-    const fetchGuard = inventory({ models: cases.map(({ id }) => liveRow(id)) });
-    vi.spyOn(ssrfRuntime, "fetchWithSsrFGuard").mockImplementation(fetchGuard);
-
-    const provider = await buildGoogleLiveCatalogProvider({
-      apiKey: "GEMINI_API_KEY",
-    });
-
-    for (const { id, compat } of cases) {
+    const ids = [...supported, "gemini-2.5-flash-preview-05-20", "gemini-3.9-flash"];
+    vi.spyOn(ssrfRuntime, "fetchWithSsrFGuard").mockImplementation(
+      inventory({ models: ids.map((id) => liveRow(id)) }),
+    );
+    const provider = await buildGoogleLiveCatalogProvider({ apiKey: "GEMINI_API_KEY" });
+    for (const id of ids) {
       const model = provider.models.find((entry) => entry.id === id);
       expect(model, id).toBeDefined();
-      expect(model?.compat, id).toEqual(compat);
+      expect(model?.compat, id).toEqual(
+        supported.includes(id) ? { codeMode: "preferred" } : undefined,
+      );
     }
   });
 
-  it.each([{}])("preserves a successful empty text inventory: %j", async (body) => {
-    const fetchGuard = inventory(body);
-
+  it("preserves a successful empty text inventory", async () => {
+    const fetchGuard = inventory({});
     const provider = await discover(fetchGuard, true);
 
     expect(provider.models).toEqual([]);
@@ -191,14 +179,7 @@ describe("google provider catalog", () => {
   it.each([{ models: "invalid" }, { models: [null] }])(
     "rejects a malformed inventory: %j",
     async (body) => {
-      const fetchGuard = inventory(body);
-      vi.spyOn(ssrfRuntime, "fetchWithSsrFGuard").mockImplementation(fetchGuard);
-      await expect(
-        buildGoogleLiveCatalogProvider({
-          discoveryMode: "strict",
-          apiKey: "google-key",
-        }),
-      ).rejects.toThrow("invalid model");
+      await expect(discover(inventory(body), true)).rejects.toThrow("invalid model");
     },
   );
 });
