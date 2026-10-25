@@ -68,20 +68,8 @@ describe("Buzz message events", () => {
       kind: BUZZ_DIFF_MESSAGE_KIND,
       threadId: "root-id",
       replyToId: "reply-id",
-      diff: {
-        repoUrl: "https://github.com/openclaw/openclaw",
-        commitSha: "abcdef1234567890",
-        filePath: "extensions/buzz/src/message-event.ts",
-        parentCommitSha: "1234567890abcdef",
-        sourceBranch: "feature/buzz",
-        targetBranch: "main",
-        pullRequestNumber: 113419,
-        language: "typescript",
-        description: "Preserve\nstructured diff context",
-        truncated: true,
-        altText: "Buzz plugin diff",
-      },
     });
+    expect(message?.diff?.description).toBe("Preserve\nstructured diff context");
     expect(message && formatBuzzMessageForAgent(message)).toBe(
       [
         "[Buzz structured diff]",

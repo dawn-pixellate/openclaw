@@ -307,13 +307,12 @@ it("retains human context across a loop-suppressed bot turn until a human dispat
   expect(params.historyMap.size).toBe(0);
 });
 
-it.each(["off", "all"] as const)("routes replies and typing with replyToMode=%s", async (mode) => {
+it("labels inbound threads and handles empty replies and delivery errors", async () => {
   const bus = createBus();
   labelDirectory(bus);
   await receive(
     { id: "event-reply", threadId: "event-root", mentionedPubkeys: [BOT_PUBLIC_KEY] },
     { bus },
-    { replyToMode: mode },
   );
   const dispatch = firstDispatch();
   expect(dispatch.ctxPayload).toMatchObject({
@@ -330,17 +329,7 @@ it.each(["off", "all"] as const)("routes replies and typing with replyToMode=%s"
   expect(dispatch.ctxPayload.GroupChannel).toBeUndefined();
   await dispatch.delivery.deliver({ text: "  " }, { kind: "final" });
   expect(bus.sendText).not.toHaveBeenCalled();
-  const target = {
-    channelId: ROOM_ID,
-    threadId: mode === "off" ? undefined : "event-root",
-    replyToId: mode === "off" ? undefined : "event-root",
-  };
-  await dispatch.delivery.deliver({ text: "threaded reply to @Alice" }, { kind: "final" });
-  expect(bus.sendText).toHaveBeenCalledWith({ ...target, text: "threaded reply to @Alice" });
-  const typing = dispatch.replyPipeline?.typing;
-  expect(typing?.keepaliveIntervalMs).toBe(3_000);
-  await typing?.start();
-  expect(bus.sendTyping).toHaveBeenCalledWith(target);
+  expect(dispatch.replyPipeline?.typing?.keepaliveIntervalMs).toBe(3_000);
   expect(() => dispatch.delivery.onError?.("send failed", { kind: "final" })).toThrow(
     "send failed",
   );

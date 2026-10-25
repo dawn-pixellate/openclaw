@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { finalizeEvent, getPublicKey, type Event, type Filter } from "nostr-tools";
-import type { ChannelGatewayContextV2 } from "openclaw/plugin-sdk/channel-contract";
+import { finalizeEvent, getPublicKey, matchFilter, type Event, type Filter } from "nostr-tools";
+import { createStartAccountContext } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   createPluginStateKeyedStoreForTests,
@@ -11,106 +11,42 @@ import {
 import { createTestPluginServiceScheduler } from "openclaw/plugin-sdk/plugin-test-api";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createBuzzRelayInfoFetchMock } from "./buzz-bus.test-helpers.js";
+import { createBuzzRelayInfoFetchMock, relayMocks } from "./buzz-bus.test-helpers.js";
 import type { BuzzInboundMessage } from "./message-event.js";
-import type { ResolvedBuzzAccount } from "./types.js";
 
-const relayMocks = vi.hoisted(() => ({
-  connect: vi.fn<() => Promise<void>>(),
-  auth: vi.fn<() => Promise<string>>(),
-  publish: vi.fn<(event: Event) => Promise<string>>(),
-  send: vi.fn<(message: string) => Promise<void>>(),
-  close: vi.fn(),
-  connected: true,
+const history = vi.hoisted(() => ({
   storedEvents: [] as Event[],
   messageFilters: [] as Filter[],
-  dropSubscriptionReason: undefined as string | undefined,
 }));
 
-function matchesRelayFilter(event: Event, filter: Filter): boolean {
-  if (filter.kinds && !filter.kinds.includes(event.kind)) {
-    return false;
-  }
-  if (filter.authors && !filter.authors.includes(event.pubkey)) {
-    return false;
-  }
-  for (const [key, values] of Object.entries(filter)) {
-    if (!key.startsWith("#") || !Array.isArray(values)) {
-      continue;
-    }
-    const tagName = key.slice(1);
-    const tagValues = event.tags.filter((tag) => tag[0] === tagName).map((tag) => tag[1] ?? "");
-    if (!tagValues.some((value) => (values as string[]).includes(value))) {
-      return false;
-    }
-  }
-  if (filter.since !== undefined && event.created_at < filter.since) {
-    return false;
-  }
-  if (filter.until !== undefined && event.created_at > filter.until) {
-    return false;
-  }
-  return true;
-}
-
 function selectRelayEvents(filter: Filter): Event[] {
-  const matched = relayMocks.storedEvents
-    .filter((event) => matchesRelayFilter(event, filter))
+  const matched = history.storedEvents
+    .filter((event) => matchFilter(filter, event))
     .toSorted((left, right) => right.created_at - left.created_at);
   return filter.limit === undefined ? matched : matched.slice(0, filter.limit);
 }
 
 vi.mock("nostr-tools", async (importOriginal) => {
+  const { mockBuzzRelay } = await import("./buzz-bus.test-helpers.js");
   const actual = await importOriginal<typeof import("nostr-tools")>();
   return {
     ...actual,
-    Relay: class {
-      onauth?: (template: unknown) => Promise<unknown>;
-      idleSince: number | undefined;
-      ongoingOperations = 0;
-      get connected() {
-        return relayMocks.connected;
-      }
-      connect = relayMocks.connect;
-      auth = relayMocks.auth;
-      publish = relayMocks.publish;
-      send = relayMocks.send;
-      close = relayMocks.close;
-      scheduleIdleClose = vi.fn();
-
-      prepareSubscription(
-        filters: Filter[],
-        handlers: {
-          onevent: (event: Event) => void;
-          oneose?: () => void;
-          onclose: (reason: string) => void;
-        },
-      ) {
-        let carriesMessages = false;
-        for (const filter of filters) {
-          if (filter.kinds?.includes(9)) {
-            relayMocks.messageFilters.push(filter);
-            carriesMessages = true;
-          }
-          for (const event of selectRelayEvents(filter)) {
-            handlers.onevent(event);
-          }
+    ...mockBuzzRelay((filters, handlers) => {
+      for (const filter of filters) {
+        if (filter.kinds?.includes(9)) {
+          history.messageFilters.push(filter);
         }
-        queueMicrotask(() => handlers.oneose?.());
-        if (carriesMessages && relayMocks.dropSubscriptionReason) {
-          const reason = relayMocks.dropSubscriptionReason;
-          relayMocks.dropSubscriptionReason = undefined;
-          queueMicrotask(() => {
-            handlers.onclose(reason);
-          });
+        for (const event of selectRelayEvents(filter)) {
+          handlers.onevent(event);
         }
-        return {
-          id: `sub:${relayMocks.messageFilters.length}`,
-          close: vi.fn(),
-          closed: false,
-        };
       }
-    },
+      queueMicrotask(() => handlers.oneose?.());
+      return {
+        id: `sub:${history.messageFilters.length}`,
+        close: vi.fn(),
+        closed: false,
+      };
+    }),
   };
 });
 
@@ -152,7 +88,6 @@ const LOOKBACK_SECONDS = 24 * 60 * 60;
 const START_SECONDS = Math.floor(Date.now() / 1_000);
 
 let tempDir: string | undefined;
-let previousStateDir: string | undefined;
 let currentNowMs = START_SECONDS * 1_000;
 let handled: string[] = [];
 let gates = new Map<string, Promise<void>>();
@@ -172,7 +107,7 @@ function gateHandler(text: string): { settle: () => void; fail: (error: Error) =
 }
 
 function postRoomMessage(text: string, createdAt: number, channelId = CHANNEL_ID): void {
-  relayMocks.storedEvents.push(
+  history.storedEvents.push(
     finalizeEvent(
       {
         kind: BUZZ_MESSAGE_KIND,
@@ -186,7 +121,7 @@ function postRoomMessage(text: string, createdAt: number, channelId = CHANNEL_ID
 }
 
 function publishRoomMembership(channelId: string): void {
-  relayMocks.storedEvents.push({
+  history.storedEvents.push({
     id: `membership-${channelId}`,
     kind: BUZZ_ROOM_MEMBERSHIP_KIND,
     pubkey: RELAY_PUBLIC_KEY,
@@ -221,16 +156,9 @@ function startGatewayProcess(channelIds: string[] = [CHANNEL_ID]): {
   const account = resolveBuzzAccount({ cfg });
   const abort = new AbortController();
   const ctx = {
+    ...createStartAccountContext({ account, cfg, abortSignal: abort.signal }),
     scheduler: createTestPluginServiceScheduler(),
-    cfg,
-    accountId: account.accountId,
-    account,
-    runtime: {},
-    abortSignal: abort.signal,
-    log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-    getStatus: vi.fn(),
-    setStatus: vi.fn(),
-  } as unknown as ChannelGatewayContextV2<ResolvedBuzzAccount>;
+  };
   return { abort, lifecycle: startBuzzGatewayAccount(ctx) };
 }
 
@@ -252,7 +180,7 @@ async function runGatewayProcess(
   const channelIds = params.channelIds ?? [CHANNEL_ID];
   const gatewayProcess = startGatewayProcess(channelIds);
   try {
-    await waitForSettled(() => relayMocks.messageFilters.length >= channelIds.length);
+    await waitForSettled(() => history.messageFilters.length >= channelIds.length);
     if (params.until) {
       await waitForSettled(params.until);
     }
@@ -263,7 +191,7 @@ async function runGatewayProcess(
 }
 
 function roomSubscriptionSince(channelId = CHANNEL_ID): number {
-  const filter = relayMocks.messageFilters.find((entry) =>
+  const filter = history.messageFilters.find((entry) =>
     (entry["#h"] as string[] | undefined)?.includes(channelId),
   );
   expect(filter?.since).toBeTypeOf("number");
@@ -276,7 +204,7 @@ async function readWatermark(channelId = CHANNEL_ID): Promise<number | undefined
 }
 
 function openProcessBoundary(): void {
-  relayMocks.messageFilters.length = 0;
+  history.messageFilters.length = 0;
   handled = [];
   gates = new Map();
 }
@@ -285,20 +213,18 @@ beforeEach(() => {
   vi.clearAllMocks();
   currentNowMs = START_SECONDS * 1_000;
   vi.spyOn(Date, "now").mockImplementation(() => currentNowMs);
-  previousStateDir = process.env.OPENCLAW_STATE_DIR;
   // openclaw-temp-dir: allow extension tests cannot import root test helpers.
   tempDir = mkdtempSync(path.join(tmpdir(), "openclaw-buzz-coldstart-"));
-  process.env.OPENCLAW_STATE_DIR = tempDir;
+  vi.stubEnv("OPENCLAW_STATE_DIR", tempDir);
   handled = [];
   gates = new Map();
-  relayMocks.messageFilters.length = 0;
-  relayMocks.dropSubscriptionReason = undefined;
+  history.messageFilters.length = 0;
   relayMocks.connected = true;
   relayMocks.connect.mockResolvedValue();
   relayMocks.auth.mockResolvedValue("ok");
   relayMocks.publish.mockResolvedValue("");
   relayMocks.send.mockResolvedValue();
-  relayMocks.storedEvents = [];
+  history.storedEvents = [];
   publishRoomMembership(CHANNEL_ID);
   publishRoomMembership(SECOND_CHANNEL_ID);
   inboundMocks.handleBuzzInbound.mockImplementation(
@@ -329,11 +255,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   await closeOpenClawStateDatabaseAsync();
   resetPluginStateStoreForTests();
-  if (previousStateDir === undefined) {
-    delete process.env.OPENCLAW_STATE_DIR;
-  } else {
-    process.env.OPENCLAW_STATE_DIR = previousStateDir;
-  }
+  vi.unstubAllEnvs();
   if (tempDir) {
     rmSync(tempDir, { recursive: true, force: true });
   }
