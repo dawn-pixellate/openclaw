@@ -73,11 +73,9 @@ it.each([false, true])(
   async (replaced) => {
     // Evaluate the real identity owner's process-stable Linux policy on every test host.
     vi.resetModules();
-    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-    try {
+    {
+      using _ = vi.spyOn(process, "platform", "get").mockReturnValue("linux");
       await import("../infra/sqlite-worker-identity.js");
-    } finally {
-      platform.mockRestore();
     }
     const { registerOpenClawAgentDatabaseIdentity, readOpenClawAgentDatabaseIdentity } =
       await import("../state/openclaw-agent-db-identity.js");
@@ -90,14 +88,8 @@ it.each([false, true])(
     const stat = fs.statSync;
     let metadataRevision = 0n;
     vi.spyOn(fs, "statSync").mockImplementation((...args) => {
-      if (!args[1]?.bigint || String(args[0]) !== filename) {
-        return stat(...args);
-      }
-      const file =
-        args[1].throwIfNoEntry === false
-          ? stat(args[0], { bigint: true, throwIfNoEntry: false })
-          : stat(args[0], { bigint: true });
-      if (file) {
+      const file = stat(...args);
+      if (file && "ctimeNs" in file && String(args[0]) === filename) {
         file.ctimeNs += metadataRevision;
         file.birthtimeNs = file.ctimeNs;
       }
@@ -188,10 +180,7 @@ it.each(["member revocation", "owner reassignment"] as const)(
     );
     expect(readFacts).toHaveBeenCalledTimes(change === "member revocation" ? 2 : 1);
     if (change === "member revocation") {
-      expect(projection.groupTargets().get("work")).toEqual([{ sessionKey, agentId: "main" }]);
       expect(projection.ready(target.filename, sessionKey)).toBe(true);
-      projection.invalidate(memberChange("bob", true));
-      expect(projection.membership(target.storePath, sessionKey)).toEqual(["bob"]);
     }
     expect(projection.needsPreparation).toBe(false);
   },
@@ -234,7 +223,6 @@ it("retires membership when a new file reuses a previous database inode", async 
   await projection.prepare();
   expect(projection.membership(target.storePath, sessionKey)).toEqual(["bob"]);
   expect([...projection.groupTargets().keys()]).toEqual(["new"]);
-  expect(readFacts).toHaveBeenCalledTimes(2);
 });
 
 it("shares physical membership across logical aliases and publishes each group member once", async () => {

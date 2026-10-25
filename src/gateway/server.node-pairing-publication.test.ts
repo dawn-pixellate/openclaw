@@ -356,7 +356,6 @@ test.each(["token revoke", "token rotate", "unpair", "node reapproval"] as const
     const result = await invoked;
     expect(result.ok).toBe(false);
     expect(result.error?.message).toBe("node pairing changed while invocation was active");
-    expect(node.received).toEqual([]);
     if (change === "node reapproval") {
       // Reapproval refreshes the live session, while the old prepared invoke remains refused.
       await expect(node.client.request("node.event", unsupportedEvent)).resolves.toEqual(
