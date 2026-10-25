@@ -695,7 +695,7 @@ async function enqueueText(
   for (const message of messages) {
     await dispatcher.invoke({
       schema: "2.0",
-      header: { event_type: "im.message.receive_v1" },
+      header: { event_type: "im.message.receive_v1", event_id: message.messageId },
       event: createTextEvent(message),
     });
     await Promise.resolve();
