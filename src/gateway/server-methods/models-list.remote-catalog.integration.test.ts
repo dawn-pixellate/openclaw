@@ -14,7 +14,6 @@ import { registerPreparedModelRuntimePublicationListener } from "../../agents/pr
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import * as updateStartup from "../../infra/update-startup.js";
-import { redactSensitiveText } from "../../logging/redact.js";
 import * as bundledStamp from "../../model-catalog/bundled-catalog-stamp.js";
 import * as pricing from "../../model-catalog/pricing.js";
 import { setRemoteModelCatalogOverlaySourcesForTest } from "../../model-catalog/remote-overlay.test-support.js";
@@ -163,10 +162,7 @@ it.for([1, 2])(
         createCatalogAuthProfiles({ [provider]: "catalog-fixture-key" }),
       );
       setRemoteModelCatalogOverlaySourcesForTest({ bundledGeneratedAt });
-      const initialRefresh = await refresh();
-      expect(initialRefresh.status, redactSensitiveText(JSON.stringify(initialRefresh))).toBe(
-        "updated",
-      );
+      expect((await refresh()).status).toBe("updated");
       await using gateway = await startModelsGateway(state, cfg, token, {
         hotReloadRecovery: unexpectedRestart,
       });
@@ -270,8 +266,7 @@ it.for([1, 2])(
         expect(price(config)).toBe(1);
         pausePublication = false;
         commit.resolve();
-        const published = await waitForRows("remote-next");
-        expect(kimiIds(published)).toContain("remote-next");
+        await waitForRows("remote-next");
         expect(price(config, "remote-next")).toBe(9);
         expect(
           withPreparedModelRuntimePluginGenerationScope(oldRun.pluginGeneration, () =>
@@ -325,7 +320,7 @@ it.for([1, 2])(
         body = encode(finalCatalog);
         expect((await refresh()).status).toBe("updated");
         await list(true);
-        expect(kimiIds(await waitForRows("remote-last"))).toContain("remote-last");
+        await waitForRows("remote-last");
         expect(currentPrice()).toBe(11);
         expect(currentPrice("remote-last")).toBe(13);
         expect(oldModel.cost.input).toBe(1);

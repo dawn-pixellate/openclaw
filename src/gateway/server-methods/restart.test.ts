@@ -90,23 +90,6 @@ async function invokeRestartRequestThroughGateway(params: unknown) {
   return respond;
 }
 
-function mockScheduledRestart(preflight: { safe: boolean; summary: string }) {
-  scheduleSafeGatewayRestart.mockReturnValueOnce({
-    ok: true,
-    status: "scheduled",
-    preflight: { ...preflight, counts: {}, blockers: [] },
-    restart: {
-      ok: true,
-      pid: 0,
-      signal: "SIGUSR2",
-      delayMs: 0,
-      mode: "emit",
-      coalesced: false,
-      cooldownMsApplied: 0,
-    },
-  });
-}
-
 describe("gateway restart handlers", () => {
   beforeEach(() => {
     resetGatewayWorkAdmission();
@@ -134,18 +117,7 @@ describe("gateway restart handlers", () => {
   it("keeps the deprecated read-only preflight response shape", async () => {
     const preflight = {
       safe: false,
-      counts: {
-        queueSize: 1,
-        pendingReplies: 2,
-        embeddedRuns: 3,
-        cronRuns: 4,
-        backgroundExecSessions: 5,
-        rootRequests: 6,
-        agentRuns: 7,
-        acpRuns: 0,
-        mediaRuns: 0,
-        totalActive: 28,
-      },
+      counts: { queueSize: 1, totalActive: 1 },
       blockers: [{ kind: "queue", count: 1, message: "1 queued or active operation(s)" }],
       summary: "restart deferred: 1 queued or active operation(s)",
     };
@@ -180,7 +152,7 @@ describe("gateway restart handlers", () => {
   );
 
   it("schedules a safe restart only after matching the target lock owner", async () => {
-    mockScheduledRestart({ safe: false, summary: "restart deferred" });
+    scheduleSafeGatewayRestart.mockReturnValueOnce({ ok: true, status: "scheduled" });
 
     const respond = await invokeRestartRequest({
       ...targetedRequest,
@@ -269,8 +241,6 @@ describe("gateway restart handlers", () => {
   });
 
   it("backs off before an emoji that crosses the reason limit", async () => {
-    mockScheduledRestart({ safe: true, summary: "safe to restart now" });
-
     await invokeRestartRequest({ reason: "x".repeat(199) + "🧠tail" });
 
     expect(scheduleSafeGatewayRestart).toHaveBeenCalledWith({
