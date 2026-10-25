@@ -95,7 +95,7 @@ export function compileDynamicConsumerEdges(source, filePath) {
         [creationFactory],
         path.resolve(path.dirname(poolLifecyclePath), poolFixtureSpecifier),
         filePath,
-        imports.length,
+        "PgPool",
       ),
     );
   }

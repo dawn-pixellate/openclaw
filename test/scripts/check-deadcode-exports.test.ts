@@ -32,7 +32,7 @@ describe("check-deadcode-exports", () => {
     const compile = knipConfig.compilers.mjs;
     const filePath = "config/knip-dynamic-consumers.mjs";
     expect(compile("// dynamic consumers", filePath)).toContain(
-      'import { createSqliteWorkerBackend as __dynamic2_0 } from "../scripts/perf/pg-pool-broker.fixture.mts";',
+      'import { createSqliteWorkerBackend as __dynamicPgPool_0 } from "../scripts/perf/pg-pool-broker.fixture.mts";',
     );
 
     const readFileSync = fs.readFileSync.bind(fs);
