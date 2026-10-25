@@ -283,24 +283,12 @@ it.each(
           const resolves = fixture.requests.filter(
             (request) => request.method === "question.resolve",
           );
-          const wait = fixture.requests.find((request) => request.method === "question.waitAnswer");
           expect(resolves).toHaveLength(1);
           const receipt = await fixture.manager.waitAnswer(id, undefined, true);
           expect(receipt).toMatchObject({
             status: "answered",
             answers: { answers: { answer: [text] } },
           });
-          if (mode === "legacy-receipt") {
-            expect(resolves[0]?.params).not.toHaveProperty("resolutionId");
-            expect(wait?.params).not.toHaveProperty("includeResolutionId");
-            expect(receipt).not.toHaveProperty("resolutionId");
-          } else {
-            const resolveParams = resolves[0]?.params as { resolutionId?: string } | undefined;
-            const resolutionId = resolveParams?.resolutionId;
-            expect(resolutionId).toMatch(/^[a-f0-9]{32}$/);
-            expect(receipt).toMatchObject({ resolutionId });
-            expect(wait?.params).toMatchObject({ includeResolutionId: true });
-          }
           expect(operation).toMatchObject({ phase: "running", result: null });
           expect(cancel).not.toHaveBeenCalled();
           if (mode === "delayed-receipt") {

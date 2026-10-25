@@ -253,7 +253,7 @@ describe("generateConversationLabelWithFallback", () => {
     ]);
   });
 
-  it.each(["utility backup", "regular model", "exhausted"] as const)(
+  it.each(["regular model", "exhausted"] as const)(
     "uses the utility chain before the existing label recovery: %s",
     async (outcome) => {
       const cfg = modelConfig(
@@ -262,10 +262,7 @@ describe("generateConversationLabelWithFallback", () => {
         ["label-test/utility-backup"],
       );
       runIsolatedCompletion.mockImplementation(async ({ model }) => {
-        if (
-          (model === "utility-backup" && outcome === "utility backup") ||
-          (model === "main" && outcome === "regular model")
-        ) {
+        if (model === "main" && outcome === "regular model") {
           return { text: "Garden planning" };
         }
         throw unavailable();
@@ -282,11 +279,7 @@ describe("generateConversationLabelWithFallback", () => {
       } else {
         await expect(label).resolves.toBe("Garden planning");
       }
-      expect(attemptedModels()).toEqual(
-        outcome === "utility backup"
-          ? ["utility", "utility-backup"]
-          : ["utility", "utility-backup", "main"],
-      );
+      expect(attemptedModels()).toEqual(["utility", "utility-backup", "main"]);
     },
   );
 

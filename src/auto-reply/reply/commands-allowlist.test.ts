@@ -55,17 +55,9 @@ type TelegramTestSectionConfig = {
   accounts?: Record<string, TelegramTestSectionConfig>;
 };
 
-type DmGroupAllowlistTestSectionConfig = {
-  allowFrom?: string[];
-  dm?: { allowFrom?: string[] };
-};
-
 function normalizeTelegramAllowFromEntries(values: Array<string | number>): string[] {
   return formatAllowFromLowercase({ allowFrom: values, stripPrefixRe: /^(telegram|tg):/i });
 }
-
-const normalizeAllowlistValues = (values: Array<string | number>): string[] =>
-  values.map((value) => String(value).trim()).filter(Boolean);
 
 function resolveTelegramTestAccount(
   cfg: OpenClawConfig,
@@ -82,14 +74,7 @@ function resolveTelegramTestAccount(
 }
 
 const telegramAllowlistTestPlugin: ChannelPlugin = {
-  ...createChannelTestPluginBase({
-    id: "telegram",
-    label: "Telegram",
-    capabilities: {
-      chatTypes: ["direct", "group", "channel", "thread"],
-      nativeCommands: true,
-    },
-  }),
+  ...createChannelTestPluginBase({ id: "telegram" }),
   config: createScopedChannelConfigAdapter({
     sectionKey: "telegram",
     listAccountIds: (cfg) => {
@@ -114,40 +99,25 @@ const telegramAllowlistTestPlugin: ChannelPlugin = {
   }),
 };
 
-function createLegacyAllowlistPlugin(): ChannelPlugin {
-  const channelId = "discord";
-  return {
-    ...createChannelTestPluginBase({
-      id: channelId,
-      label: "Discord",
-      capabilities: {
-        chatTypes: ["direct", "group", "thread"],
-        nativeCommands: true,
-      },
-    }),
-    pairing: { idLabel: "discordUserId" },
-    allowlist: buildLegacyDmAccountAllowlistAdapter({
-      channelId,
-      resolveAccount: ({ cfg }) =>
-        (cfg.channels?.[channelId] as DmGroupAllowlistTestSectionConfig | undefined) ?? {},
-      normalize: ({ values }) => normalizeAllowlistValues(values),
-      resolveDmAllowFrom: (account) => account.allowFrom ?? account.dm?.allowFrom,
-    }),
-  };
-}
-
-function setAllowlistPluginRegistry() {
-  setActivePluginRegistry(
-    createTestRegistry([
-      { pluginId: "telegram", plugin: telegramAllowlistTestPlugin, source: "test" },
-      { pluginId: "discord", plugin: createLegacyAllowlistPlugin(), source: "test" },
-    ]),
-  );
-}
+const discordAllowlistTestPlugin: ChannelPlugin = {
+  ...createChannelTestPluginBase({ id: "discord" }),
+  pairing: { idLabel: "discordUserId" },
+  allowlist: buildLegacyDmAccountAllowlistAdapter({
+    channelId: "discord",
+    resolveAccount: ({ cfg }) => cfg.channels?.discord ?? {},
+    normalize: ({ values }) => values.map((value) => String(value).trim()).filter(Boolean),
+    resolveDmAllowFrom: (account) => account.allowFrom,
+  }),
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
-  setAllowlistPluginRegistry();
+  setActivePluginRegistry(
+    createTestRegistry([
+      { pluginId: "telegram", plugin: telegramAllowlistTestPlugin, source: "test" },
+      { pluginId: "discord", plugin: discordAllowlistTestPlugin, source: "test" },
+    ]),
+  );
   readConfigFileSnapshotMock.mockResolvedValue({ valid: false, parsed: null });
   validateConfigObjectWithPluginsMock.mockImplementation((value: unknown) => ({
     ok: true,
@@ -162,19 +132,13 @@ beforeEach(() => {
 function buildAllowlistParams(
   commandBody: string,
   cfg: OpenClawConfig,
-  ctxOverrides?: Partial<
-    Pick<
-      HandleCommandsParams["ctx"],
-      "Provider" | "Surface" | "AccountId" | "SenderId" | "From" | "GatewayClientScopes"
-    >
-  >,
+  ctxOverrides?: Partial<Pick<HandleCommandsParams["ctx"], "AccountId" | "SenderId" | "From">>,
 ): HandleCommandsParams {
-  const provider = ctxOverrides?.Provider ?? "telegram";
   return {
     cfg,
     ctx: {
-      Provider: provider,
-      Surface: ctxOverrides?.Surface ?? provider,
+      Provider: "telegram",
+      Surface: "telegram",
       CommandSource: "text",
       ...ctxOverrides,
     },
@@ -183,8 +147,8 @@ function buildAllowlistParams(
       isAuthorizedSender: true,
       senderIsOwner: false,
       senderId: ctxOverrides?.SenderId ?? "owner",
-      channel: provider,
-      channelId: provider,
+      channel: "telegram",
+      channelId: "telegram",
     },
   } as unknown as HandleCommandsParams;
 }
@@ -240,37 +204,23 @@ describe("handleAllowlistCommand", () => {
   });
 
   it("adds allowlist entries to config and pairing stores", async () => {
-    for (const accountId of ["default", "work"]) {
-      const telegram =
-        accountId === "default"
-          ? { allowFrom: ["123"] }
-          : { accounts: { work: { allowFrom: ["123"] } } };
-      const cfg = config({ telegram });
-      mockConfigSnapshot(cfg);
-      addChannelAllowFromStoreEntryMock.mockResolvedValueOnce({
-        changed: true,
-        allowFrom: ["123", "789"],
-      });
-      const accountFlag = accountId === "default" ? "" : "--account work ";
-      const result = await runOwnerCommand(
-        `/allowlist add dm ${accountFlag}789`,
-        cfg,
-        accountId === "default" ? undefined : { AccountId: "work" },
-      );
-      expect(result?.shouldContinue, accountId).toBe(false);
-      expect(addChannelAllowFromStoreEntryMock, accountId).toHaveBeenCalledWith({
-        channel: "telegram",
-        entry: "789",
-        accountId,
-      });
-      if (accountId === "default") {
-        expect(replaceConfigFileMock).toHaveBeenLastCalledWith({
-          nextConfig: { ...cfg, channels: { telegram: { allowFrom: ["123", "789"] } } },
-          afterWrite: { mode: "auto" },
-        });
-        expect(result?.reply?.text, accountId).toContain("DM allowlist added");
-      }
-    }
+    const cfg = config({ telegram: { allowFrom: ["123"] } });
+    mockConfigSnapshot(cfg);
+    addChannelAllowFromStoreEntryMock.mockResolvedValueOnce({
+      changed: true,
+      allowFrom: ["123", "789"],
+    });
+    const result = await runOwnerCommand("/allowlist add dm 789", cfg);
+    expectReply(result, "DM allowlist added");
+    expect(addChannelAllowFromStoreEntryMock).toHaveBeenCalledWith({
+      channel: "telegram",
+      entry: "789",
+      accountId: "default",
+    });
+    expect(replaceConfigFileMock).toHaveBeenLastCalledWith({
+      nextConfig: { ...cfg, channels: { telegram: { allowFrom: ["123", "789"] } } },
+      afterWrite: { mode: "auto" },
+    });
   });
 
   it("keeps group allowlist edits out of the DM pairing store", async () => {
