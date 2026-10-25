@@ -42,6 +42,10 @@
   scrollbar-color: var(--details-scrollbar-thumb) transparent;
 }
 
+.chat-details-desktop-body:has(.chat-details-session[data-initial-pending]) {
+  visibility: hidden;
+}
+
 .chat-details-desktop-body:hover {
   --details-scrollbar-thumb: color-mix(in srgb, var(--muted) 32%, transparent);
 }

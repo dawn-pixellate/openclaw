@@ -73,13 +73,12 @@ it("retains cached Details while its descriptor arrives and replaces a new incar
     detailsWorkspace: { root: null, label: null, branch: "feature/cached" },
     onOpenSubagents() {},
   });
-  const body = view.container.querySelector<HTMLElement>(".chat-details-desktop-body")!;
-  expect(body.style.visibility).toBe("hidden");
+  const section = view.container.querySelector(".chat-details-session")!;
+  expect(section.hasAttribute("data-initial-pending")).toBe(true);
   view.update({ cachePending: false });
-  expect(body.style.visibility).not.toBe("hidden");
+  expect(section.hasAttribute("data-initial-pending")).toBe(false);
   view.update({ subagentSessionsSettled: false });
-  expect(body.style.visibility).not.toBe("hidden");
-  const section = view.container.querySelector(".chat-details-session");
+  expect(section.hasAttribute("data-initial-pending")).toBe(false);
   const environment = view.group("environment");
   expect(environment).not.toBeNull();
   view.update({

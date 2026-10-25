@@ -91,7 +91,6 @@ export type ChatDetailsProps = ChatSessionProgressProps &
     | "personActivity"
     | "onScrollPortRef"
   > & {
-    /** The scoped cache verdict or identity adoption is still pending. */
     cachePending?: boolean;
     desktopPresentation?: ChatDetailsDesktopPresentation;
     desktopDisclosures?: ChatDetailsDesktopDisclosures;

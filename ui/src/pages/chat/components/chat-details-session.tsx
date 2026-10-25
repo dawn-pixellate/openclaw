@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, createStore, lazy } from "solid-js";
+import { For, Show, createMemo, createSignal, createStore, lazy } from "solid-js";
 import type { SessionParticipant } from "../../../../../packages/gateway-protocol/src/schema/session-participant.js";
 import { Icon } from "../../../components/solid/icon.tsx";
 import type { MenuHandle } from "../../../components/solid/menu.tsx";
@@ -108,10 +108,6 @@ export const ChatDetailsSession = defineSolidBridge<Props>(
                 props.props?.subagentSessionsSettled !== false &&
                 (!props.props?.onOpenProcesses ||
                   isProcessesPresentationReady(processes(), gateway?.read().snapshot))),
-          );
-          createEffect(
-            () => [props.scrollport, revealed()] as const,
-            ([body, ready]) => body?.style.setProperty("visibility", ready ? "" : "hidden"),
           );
           const desktopPresentation = () =>
             props.desktop ? props.props?.desktopPresentation : undefined;
@@ -299,6 +295,7 @@ export const ChatDetailsSession = defineSolidBridge<Props>(
             <Show when={props.props}>
               <section
                 class="chat-details-session"
+                data-initial-pending={!revealed() ? "" : undefined}
                 data-details-desktop={props.desktop ? "" : undefined}
               >
                 <Show
