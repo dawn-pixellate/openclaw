@@ -190,16 +190,20 @@ describe("promptAuthConfig", () => {
     });
   });
 
-  it("loads the manifest catalog after provider setup", async () => {
+  it("retries provider selection before loading the installed provider's manifest catalog", async () => {
     const provider = "github-copilot";
     const existingConfig: OpenClawConfig = {
       models: { providers: { existing: providerModels("old") } },
     };
-    mocks.authChoice.mockResolvedValue(provider);
-    mocks.preferredProvider.mockResolvedValue(provider);
-    mocks.applyAuth.mockResolvedValue({
-      config: { ...existingConfig, plugins: { entries: { [provider]: { enabled: true } } } },
-    });
+    mocks.authChoice
+      .mockResolvedValueOnce("provider-plugin:wecom:default")
+      .mockResolvedValueOnce(provider);
+    mocks.preferredProvider.mockResolvedValueOnce("wecom").mockResolvedValueOnce(provider);
+    mocks.applyAuth
+      .mockResolvedValueOnce({ config: existingConfig, retrySelection: true })
+      .mockResolvedValueOnce({
+        config: { ...existingConfig, plugins: { entries: { [provider]: { enabled: true } } } },
+      });
     mocks.catalog.mockReturnValueOnce([
       {
         ref: `${provider}/new`,
@@ -221,32 +225,6 @@ describe("promptAuthConfig", () => {
       loadCatalog: true,
       providerScopedCatalog: false,
     });
-  });
-
-  it("returns to auth selection when plugin install onboarding asks for a retry", async () => {
-    mocks.authChoice
-      .mockResolvedValueOnce("provider-plugin:wecom:default")
-      .mockResolvedValueOnce("kilocode-api-key");
-    mocks.applyAuth
-      .mockResolvedValueOnce({ config: {}, retrySelection: true })
-      .mockResolvedValueOnce({
-        config: {
-          models: {
-            providers: {
-              kilocode: providerModels("kilo-auto/balanced"),
-              minimax: providerModels("MiniMax-M2.7"),
-            },
-          },
-        },
-      });
-    mocks.allowlist.mockResolvedValue({ models: undefined });
-    mocks.preferredProvider.mockResolvedValueOnce("wecom").mockResolvedValueOnce(undefined);
-
-    await promptAuthConfig({}, makeRuntime(), noopPrompter);
-
-    expect(mocks.authChoice).toHaveBeenCalledTimes(2);
-    expect(mocks.applyAuth).toHaveBeenCalledTimes(2);
-    expect(mocks.allowlist).toHaveBeenCalledTimes(1);
   });
 
   it.each(["none", "agent", "shared"] as const)("provider auth: initialize %s", async (owner) => {

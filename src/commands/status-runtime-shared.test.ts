@@ -198,27 +198,25 @@ describe("status-runtime-shared", () => {
     );
   });
 
-  it("does not add Codex synthetic usage for OpenAI routes pinned to OpenClaw runtime", async () => {
-    await resolveStatusUsageSummary(usageParams("openclaw"));
-
-    expect(mocks.loadProviderUsageSummary).toHaveBeenCalledOnce();
-    expect(mocks.loadProviderUsageSummary.mock.calls[0]?.[0]).not.toHaveProperty("auth");
-  });
-
-  it("does not add Codex synthetic usage for API-key-backed OpenAI Codex runtime routes", async () => {
-    mocks.resolveModelAuthLabelAsync.mockReturnValue("api-key (openai:api)");
-
-    await resolveStatusUsageSummary(usageParams());
-
-    expect(mocks.loadProviderUsageSummary).toHaveBeenCalledOnce();
-    expect(mocks.loadProviderUsageSummary.mock.calls[0]?.[0]).not.toHaveProperty("auth");
-    expect(mocks.resolveModelAuthLabelAsync).toHaveBeenCalledWith({
-      provider: "openai",
-      cfg: expect.any(Object),
-      agentDir: "/tmp/status-agent",
-      includeExternalProfiles: false,
-    });
-  });
+  it.each(["openclaw", "codex"] as const)(
+    "does not add synthetic usage for API-backed %s routes",
+    async (runtime) => {
+      mocks.resolveModelAuthLabelAsync.mockReturnValue(
+        runtime === "codex" ? "api-key (openai:api)" : undefined,
+      );
+      await resolveStatusUsageSummary(usageParams(runtime));
+      expect(mocks.loadProviderUsageSummary).toHaveBeenCalledOnce();
+      expect(mocks.loadProviderUsageSummary.mock.calls[0]?.[0]).not.toHaveProperty("auth");
+      if (runtime === "codex") {
+        expect(mocks.resolveModelAuthLabelAsync).toHaveBeenCalledWith({
+          provider: "openai",
+          cfg: expect.any(Object),
+          agentDir: "/tmp/status-agent",
+          includeExternalProfiles: false,
+        });
+      }
+    },
+  );
 
   it("resolves usage auth from an explicitly selected agent", async () => {
     const config = explicitAgents({
