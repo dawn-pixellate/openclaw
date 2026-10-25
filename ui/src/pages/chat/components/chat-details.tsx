@@ -133,8 +133,7 @@ export function ChatDetails(props: ChatDetailsViewProps) {
   const outputsDemand = createMemo(() =>
     desktop() && opened() && props.chat?.outputs ? props.chat.retainOutputs : undefined,
   );
-  // Automatic content follows transcript paint; explicit opens bypass that wait.
-  // After first mount, retain disclosure state while closed or reconnecting.
+  // Retain disclosures after first mount; automatic content follows transcript paint.
   const [sessionOpened] = createSignal<boolean>(
     (previous) =>
       previous || (opened() && (!props.contentPending || intent() === "open" || !desktop())),
@@ -550,7 +549,7 @@ export function ChatDetails(props: ChatDetailsViewProps) {
       <Show when={sessionOpened()}>
         <ChatLazyBoundary
           fallback={
-            desktop() && props.chat?.currentSessionId ? undefined : (
+            desktop() && (props.chat?.cachePending || props.chat?.currentSessionId) ? undefined : (
               <PanelLoadingSkeleton variant="file-list" label={t("common.loading")} compact />
             )
           }

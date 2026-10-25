@@ -10,6 +10,7 @@ import {
   getChatBranchesQueryState,
   loadChatBranches,
 } from "./chat-history-branches.ts";
+import { chatHistoryRequests } from "./chat-history-state.ts";
 import type { ChatMobileHost, MobileDetailsRoute } from "./chat-mobile-host.ts";
 import { ChatPaneBrowserAnnotationRender } from "./chat-pane-browser-annotation-render.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
@@ -292,6 +293,7 @@ export abstract class ChatPaneHeaderLayout extends ChatPaneBrowserAnnotationRend
       ? {
           elements,
           chat: merge(paneChatProps, detailsActions, detailsOutputs, {
+            cachePending: chatHistoryRequests(state).initialSnapshotHydration?.titlePending,
             environment,
             outputs: detailsOutputs.outputs
               ? {

@@ -84,16 +84,22 @@ suite.define(() => {
           controlUiE2eBuiltModuleRequest("ui/src/pages/chat/components/chat-details-session.tsx"),
         );
         onTestFinished(module.release);
+        await gateway.setOnline(false);
         await page.reload();
-        await gateway.waitForRequest("sessions.list", { match: childQuery });
-        await page.locator(".chat-thread").getByText(text, { exact: true }).waitFor();
+        const moduleUrl = await module.request;
         const details = page.locator(".chat-details[data-open]");
         await details.waitFor();
-        const moduleUrl = await module.request;
-        expect(await details.locator(".chat-details-session").count()).toBe(0);
+        await nextPaint(page);
         expect(await details.locator("openclaw-panel-loading-skeleton").count()).toBe(0);
+        expect(await details.locator(".chat-details-session").count()).toBe(0);
+        expect(await page.locator(".chat-thread .chat-virtual-row").count()).toBe(0);
         const width = await details.evaluate((panel) => panel.getBoundingClientRect().width);
         expect(width).toBe(300);
+        await gateway.setOnline(true);
+        await gateway.waitForRequest("sessions.list", { match: childQuery });
+        await page.locator(".chat-thread").getByText(text, { exact: true }).waitFor();
+        expect(await details.locator(".chat-details-session").count()).toBe(0);
+        expect(await details.locator("openclaw-panel-loading-skeleton").count()).toBe(0);
 
         module.release();
         await page.evaluate(`import(${JSON.stringify(moduleUrl)}).then(() => undefined)`);
@@ -124,6 +130,30 @@ suite.define(() => {
       });
     },
   );
+
+  it("keeps the desktop skeleton after a cache miss until the Details chunk is ready", async () => {
+    await suite.withPage({ viewport: { width: 1700, height: 900 } }, async ({ page }) => {
+      const module = await holdModuleResponse(
+        page,
+        controlUiE2eBuiltModuleRequest("ui/src/pages/chat/components/chat-details-session.tsx"),
+      );
+      onTestFinished(module.release);
+      const gateway = await installMockGateway(page, {
+        heldMethods: ["chat.startup"],
+        sessions: [{ key: "agent:main:main", kind: "direct", label: "Cold Details" }],
+      });
+      await page.goto(suite.server.baseUrl + "chat");
+      await gateway.waitForRequest("chat.startup");
+      await module.request;
+      const details = page.locator(".chat-details[data-open]");
+      await details.locator("openclaw-panel-loading-skeleton").waitFor();
+      expect(await details.evaluate((panel) => panel.getBoundingClientRect().width)).toBe(300);
+      await gateway.resolveDeferred("chat.startup");
+      module.release();
+      await details.locator(".chat-details-session").waitFor();
+      expect(await details.locator("openclaw-panel-loading-skeleton").count()).toBe(0);
+    });
+  });
 
   it("shows a skeleton on first open and settles after closing and reopening a pending Details view", async () => {
     await suite.withPage(

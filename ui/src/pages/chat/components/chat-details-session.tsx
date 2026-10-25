@@ -104,7 +104,8 @@ export const ChatDetailsSession = defineSolidBridge<Props>(
           const [revealed] = createSignal(
             (previous = false) =>
               previous ||
-              (props.props?.subagentSessionsSettled !== false &&
+              (!props.props?.cachePending &&
+                props.props?.subagentSessionsSettled !== false &&
                 (!props.props?.onOpenProcesses ||
                   isProcessesPresentationReady(processes(), gateway?.read().snapshot))),
           );

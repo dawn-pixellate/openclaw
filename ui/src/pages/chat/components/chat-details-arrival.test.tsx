@@ -68,11 +68,14 @@ function mountDetails(overrides: Partial<ChatDetailsProps> = {}) {
 
 it("retains cached Details while its descriptor arrives and replaces a new incarnation", () => {
   const view = mountDetails({
+    cachePending: true,
     selectedSession: undefined,
     detailsWorkspace: { root: null, label: null, branch: "feature/cached" },
     onOpenSubagents() {},
   });
   const body = view.container.querySelector<HTMLElement>(".chat-details-desktop-body")!;
+  expect(body.style.visibility).toBe("hidden");
+  view.update({ cachePending: false });
   expect(body.style.visibility).not.toBe("hidden");
   view.update({ subagentSessionsSettled: false });
   expect(body.style.visibility).not.toBe("hidden");
