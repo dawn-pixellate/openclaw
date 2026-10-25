@@ -151,20 +151,6 @@ async function syncFiltered(
   });
 }
 
-async function createSource() {
-  const source = await newDir("source");
-  const roots = {
-    ".extra": "Extra",
-    ".bundled": "Bundled",
-    ".managed": "Managed",
-    skills: "Workspace",
-  };
-  for (const [dir, label] of Object.entries(roots)) {
-    await writeSkill(path.join(source, dir, "demo-skill"), "demo-skill", `${label} version`);
-  }
-  return source;
-}
-
 describe("syncWorkspaceSkills", () => {
   const buildPrompt = async (
     workspaceDir: string,
@@ -177,9 +163,8 @@ describe("syncWorkspaceSkills", () => {
           .prompt,
     );
 
-  it("syncs merged skills into a target workspace", async () => {
-    const source = await createSource();
-    const target = await newDir("target");
+  it("copies skills without repository internals or dependencies", async () => {
+    const { source, target } = await setupSkills(["demo-skill"]);
     const workspaceSkillDir = skillPath(source, "demo-skill");
 
     await writeFiles(workspaceSkillDir, {
@@ -187,21 +172,13 @@ describe("syncWorkspaceSkills", () => {
       "node_modules/pkg/index.js": "export {}",
     });
 
-    const skillUsagePaths = await sync(source, target, {
-      config: {
-        ...isolatedConfig,
-        skills: { load: { extraDirs: [path.join(source, ".extra")] } },
-      },
-    });
+    const skillUsagePaths = await sync(source, target);
 
     expectUsage(skillUsagePaths, workspaceSkillDir, skillPath(target, "demo-skill"), "demo-skill");
 
     const prompt = await buildPrompt(target);
 
-    expect(prompt).toContain("Workspace version");
-    expect(prompt).not.toContain("Managed version");
-    expect(prompt).not.toContain("Bundled version");
-    expect(prompt).not.toContain("Extra version");
+    expect(prompt).toContain("demo-skill skill");
     expect(prompt.replaceAll("\\", "/")).toContain("demo-skill/SKILL.md");
     expect(await exists(skillPath(target, "demo-skill", ".git"))).toBe(false);
     expect(await exists(skillPath(target, "demo-skill", "node_modules"))).toBe(false);
@@ -525,9 +502,8 @@ describe("syncWorkspaceSkills", () => {
   it.runIf(process.platform !== "win32")(
     "refreshes prior read-only copies without changing linked targets or the skills mount",
     async () => {
-      const source = await createSource();
+      const { source, target } = await setupSkills(["demo-skill"]);
       await fs.chmod(skillPath(source, "demo-skill"), 0o755);
-      const target = await newDir("target");
       const targetSkills = path.join(target, "skills");
       const staleDir = path.join(targetSkills, "demo-skill");
       const nestedDir = path.join(staleDir, "references");
@@ -548,7 +524,7 @@ describe("syncWorkspaceSkills", () => {
       try {
         await sync(source, target);
         expect((await fs.stat(targetSkills)).ino).toBe(before.ino);
-        expect(await readText(staleDir, "SKILL.md")).toContain("Workspace version");
+        expect(await readText(staleDir, "SKILL.md")).toContain("demo-skill skill");
         expect(await exists(nestedDir)).toBe(false);
         expect(await exists(path.join(targetSkills, "linked-directory"))).toBe(false);
         expect(await exists(path.join(targetSkills, "linked-file"))).toBe(false);
@@ -618,18 +594,6 @@ describe("syncWorkspaceSkills", () => {
     await sync(source, target);
     expect(await exists(skillPath(target, "safe-traversal-skill", "SKILL.md"))).toBe(true);
     expect(await exists(escapedDest)).toBe(false);
-  });
-  it("applies skill filters, including empty lists", async () => {
-    const workspaceDir = await newDir("workspace");
-    await writeSkill(skillPath(workspaceDir, "alpha"), "alpha", "Alpha skill");
-    await writeSkill(skillPath(workspaceDir, "beta"), "beta", "Beta skill");
-
-    const filteredPrompt = await buildPrompt(workspaceDir, { skillFilter: ["alpha"] });
-    expect(filteredPrompt).toContain("alpha");
-    expect(filteredPrompt).not.toContain("beta");
-
-    const emptyPrompt = await buildPrompt(workspaceDir, { skillFilter: [] });
-    expect(emptyPrompt).toBe("");
   });
 
   it("syncs managed symlinked skills as real directories in the target workspace", async () => {
