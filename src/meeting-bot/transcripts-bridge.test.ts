@@ -152,39 +152,6 @@ it("retires simultaneous tool subscribers when meeting metadata finalization fai
   expect(stopSource).toHaveBeenCalledOnce();
 });
 
-it("replays stored lines to an attached provider and streams new lines in order", async () => {
-  const onUtterance = vi.fn();
-  const request = attachment("external-1", { onUtterance });
-  await start();
-  await bridge.ingest(current, [{ speaker: "Avery", text: "First line" }]);
-  await expect(bridge.attach(current, request)).resolves.toMatchObject({ ok: true });
-  await bridge.ingest(current, [{ speaker: "Blake", text: "Second line" }]);
-  await expect(
-    bridge.detach({
-      ...request.session,
-      source: { ...request.session.source, agentId: "another-agent" },
-    }),
-  ).resolves.toMatchObject({ ok: false });
-  await expect(bridge.detach(request.session)).resolves.toMatchObject({ ok: true });
-  const replayed = vi.fn();
-  await expect(
-    bridge.attach(current, { ...request, onUtterance: replayed }),
-  ).resolves.toMatchObject({ ok: true });
-  await bridge.stop(current, async () => {});
-
-  expect(onUtterance.mock.calls.map(([utterance]) => utterance)).toMatchObject([
-    { sessionId: "external-1", speaker: { label: "Avery" }, text: "First line" },
-    { sessionId: "external-1", speaker: { label: "Blake" }, text: "Second line" },
-  ]);
-  expect(replayed.mock.calls.map(([utterance]) => utterance.id)).toEqual(
-    onUtterance.mock.calls.map(([utterance]) => utterance.id),
-  );
-  const stored = await store.readSession(current.id);
-  expect(await store.readSummary(stored!)).toMatchObject({
-    summary: { utteranceCount: 2 },
-  });
-});
-
 it("honors the existing global transcripts opt-out", async () => {
   bridge = createBridge({ enabled: false });
   await start();
@@ -275,6 +242,12 @@ it("drains subscriber delivery before detaching", async () => {
   await start();
   const request = attachment("external-drain", { onStatus, onUtterance: () => delivery });
   await bridge.attach(current, request);
+  await expect(
+    bridge.detach({
+      ...request.session,
+      source: { ...request.session.source, agentId: "another-agent" },
+    }),
+  ).resolves.toMatchObject({ ok: false });
   const ingesting = bridge.ingest(current, [{ text: "pending delivery" }]);
   const detaching = bridge.detach(request.session);
   await Promise.resolve();
@@ -313,6 +286,15 @@ it("queues detach behind a pending attachment replay", async () => {
   releaseReplay();
   await expect(attaching).resolves.toMatchObject({ ok: true });
   await expect(detaching).resolves.toMatchObject({ ok: true });
+  const replayed = vi.fn();
+  await expect(
+    bridge.attach(current, { ...request, onUtterance: replayed }),
+  ).resolves.toMatchObject({ ok: true });
+  expect(replayed.mock.calls.map(([utterance]) => utterance.id)).toEqual(
+    onUtterance.mock.calls.map(([utterance]) => utterance.id),
+  );
+  expect(replayed.mock.calls[0]?.[0].sessionId).toBe("external-pending");
+  await expect(bridge.detach(request.session)).resolves.toMatchObject({ ok: true });
   await bridge.ingest(current, [{ text: "after detach" }]);
 
   expect(onUtterance).toHaveBeenCalledOnce();

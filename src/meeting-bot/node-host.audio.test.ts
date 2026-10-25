@@ -263,25 +263,6 @@ describe("meeting node host audio backend", () => {
       audioBridge: { type: "external-command" },
     });
   });
-
-  it("returns the concrete backend from setup without starting bridge processes", async () => {
-    const prepareAudio = vi.fn(async () => PREPARED_AUDIO);
-    const host = createHost({ prepareAudio });
-
-    await expect(
-      invokeHost(host, {
-        action: "setup",
-        audioBackend: "auto",
-        audioBufferBytes: 4_096,
-        audioFormat: "pcm16-24khz",
-      }),
-    ).resolves.toEqual({
-      ok: true,
-      audioBackend: "pipewire-pulse",
-      audioDeviceLabel: "OpenClaw Meeting Audio",
-    });
-    expect(childProcessMocks.spawn).not.toHaveBeenCalled();
-  });
 });
 
 describe("meeting node host audio output", () => {

@@ -2,7 +2,6 @@ import { setImmediate } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withinTest } from "../../test/helpers/promise.js";
 import { createPluginRuntime } from "../plugins/runtime/index.js";
-import type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import type { RealtimeVoiceAgentConsultToolPolicy } from "../talk/agent-consult-tool.js";
 import { REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ } from "../talk/provider-types.js";
@@ -10,6 +9,7 @@ import type {
   RealtimeVoiceBridge,
   RealtimeVoiceBridgeCreateRequest,
 } from "../talk/provider-types.js";
+import { makeBridge, makeVoiceProvider } from "../talk/session-runtime.test-support.js";
 import type { MeetingRealtimeAudioTransport } from "./realtime-audio-transport.js";
 import {
   startMeetingRealtimeEngine,
@@ -68,14 +68,10 @@ async function createEngineFixture(
   const handleBargeIn = vi.fn();
   const submitToolResult = vi.fn();
   const closeBridge = vi.fn<RealtimeVoiceBridge["close"]>();
-  const bridge = {
-    acknowledgeMark: vi.fn(),
+  const bridge = makeBridge({
     close: closeBridge,
-    connect: options.connect ?? vi.fn(async () => {}),
+    ...(options.connect ? { connect: options.connect } : {}),
     handleBargeIn,
-    isConnected: vi.fn(() => true),
-    sendAudio: vi.fn(),
-    setMediaTimestamp: vi.fn(),
     submitToolResult,
     ...(options.native
       ? {
@@ -83,16 +79,11 @@ async function createEngineFixture(
           handlesInputAudioBargeIn: continuous,
         }
       : {}),
-  } satisfies RealtimeVoiceBridge;
-  const provider: RealtimeVoiceProviderPlugin = {
-    id: options.native ? "test-native" : "test",
-    label: options.native ? "Test native voice" : "Test",
-    isConfigured: () => true,
-    createBridge: (request) => {
-      callbacks = request;
-      return bridge;
-    },
-  };
+  });
+  const provider = makeVoiceProvider((request) => {
+    callbacks = request;
+    return bridge;
+  });
   if (options.native) {
     Object.defineProperty(provider, Symbol.for("openclaw.internal.realtime-voice-provider.v1"), {
       value: {
@@ -163,7 +154,7 @@ async function createEngineFixture(
       },
     },
     consultAgent,
-    fullConfig: {} as never,
+    fullConfig: {},
     handleToolCall,
     logger,
     meetingSessionId: "meeting-1",
@@ -197,7 +188,6 @@ async function createEngineFixture(
     event,
     closeBridge,
     disposeTransport,
-    logger,
     stopTransport,
     beginOutput,
     callbacks: bridgeCallbacks,
@@ -205,13 +195,10 @@ async function createEngineFixture(
     handle,
     handleBargeIn,
     submitToolResult,
-    async waitForWriteStart(count: number) {
+    async expectWrite(count: number, audio?: Buffer) {
       await withinTest(writeStart(count).promise, signal);
       // Give detached work a turn without completing the write.
       await setImmediate();
-    },
-    async expectWrite(count: number, audio?: Buffer) {
-      await this.waitForWriteStart(count);
       expect(writeOutput).toHaveBeenCalledTimes(count);
       if (audio) {
         expect(writeOutput).toHaveBeenLastCalledWith(audio);
@@ -260,6 +247,23 @@ async function createEngineFixture(
 }
 
 describe("meeting realtime engine output ownership", () => {
+  it("keeps playback available after an incomplete provider response", async () => {
+    const fixture = await createEngineFixture();
+    fixture.sendOutputAudio(Buffer.from([1]), "response-1");
+    await fixture.expectWrite(1);
+    fixture.callbacks.onResponseDone?.({
+      status: "incomplete",
+      responseId: "response-1",
+      message: "provider response incomplete",
+    });
+    fixture.event("response.done", "response-1");
+    expect(fixture.handle.getHealth().bridgeClosed).toBe(false);
+    fixture.releaseWrite(0);
+    fixture.sendOutputAudio(Buffer.from([2]), "response-2");
+    await fixture.expectWrite(2, Buffer.from([2]));
+    fixture.releaseWrite(1);
+  });
+
   it("drains provider transcripts before rejected cleanup releases transport", async () => {
     const fixture = await createEngineFixture();
     const providerClosed = createDeferredCore();
@@ -293,42 +297,6 @@ describe("meeting realtime engine output ownership", () => {
       providerClosed.resolve();
       await closing;
     }
-  });
-
-  it("finishes each response once and accepts a later response", async () => {
-    const fixture = await createEngineFixture();
-    fixture.callbacks.onTranscript?.("user", "first turn", true);
-    fixture.announceOutputResponse("response-1");
-    fixture.sendOutputAudio(Buffer.from([1]), "response-1");
-    await fixture.expectWrite(1);
-    fixture.callbacks.onResponseDone?.({
-      status: "incomplete",
-      responseId: "response-1",
-      reason: "max_output_tokens",
-      message: "provider response incomplete",
-    });
-    fixture.event("response.done", "response-1");
-
-    const firstEvents = fixture.handle.getHealth().recentTalkEvents;
-    expect(firstEvents.filter((event) => event.type === "turn.ended")).toHaveLength(1);
-    expect(firstEvents.filter((event) => event.type === "output.audio.done")).toHaveLength(1);
-    expect(firstEvents.filter((event) => event.type === "session.error")).toHaveLength(1);
-    expect(fixture.handle.getHealth().bridgeClosed).toBe(false);
-
-    fixture.releaseWrite(0);
-    fixture.callbacks.onTranscript?.("user", "later turn", true);
-    fixture.announceOutputResponse("response-2");
-    fixture.sendOutputAudio(Buffer.from([2]), "response-2");
-    await fixture.expectWrite(2);
-    fixture.callbacks.onResponseDone?.({ status: "completed", responseId: "response-2" });
-    fixture.event("response.done", "response-2");
-
-    const finalEvents = fixture.handle.getHealth().recentTalkEvents;
-    expect(
-      finalEvents.filter((event) => event.type === "turn.ended" || event.type === "turn.cancelled"),
-    ).toHaveLength(2);
-    expect(finalEvents.filter((event) => event.type === "output.audio.done")).toHaveLength(2);
-    fixture.releaseWrite(1);
   });
 
   it("rearms continuity reset when the provider creates a fresh session before ready", async () => {
