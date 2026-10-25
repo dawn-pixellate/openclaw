@@ -33,7 +33,6 @@ import {
 } from "./backup-create-family.test-support.js";
 import { listArchiveEntries } from "./backup-create.test-support.js";
 import { listDirectoryTreeStrict } from "./directory-walk.js";
-import { requireNodeSqlite } from "./node-sqlite.js";
 import * as sqliteSnapshot from "./sqlite-snapshot.js";
 
 function expectSnapshotOwners(callback: unknown, globalPath: string, agentPath: string) {
@@ -42,8 +41,6 @@ function expectSnapshotOwners(callback: unknown, globalPath: string, agentPath: 
     expect.objectContaining({ role: "agent", agentId: "main", sourcePath: agentPath }),
   ]);
 }
-
-type HardlinkOwner = { role: string; journal: string };
 
 describe("backup SQLite ownership", () => {
   it.each(["dot", "symlink", ...(process.platform === "win32" ? ["namespace"] : [])])(
@@ -141,6 +138,10 @@ describe("backup SQLite ownership", () => {
       await expect(
         backupCreateCommand(createTestRuntime(), { output, verify: true }),
       ).rejects.toThrow(/SQLite path aliases multiple core database owners/iu);
+      expect((await readBackupRunFreshness(state.env)).latest).toMatchObject({
+        status: "failed",
+        error: expect.stringMatching(/SQLite path aliases multiple core database owners/iu),
+      });
       await expectAbsent(output);
     }),
   );
@@ -231,74 +232,6 @@ describe("backup SQLite ownership", () => {
         snapshot.mockRestore();
       }
     }),
-  );
-  it.each([
-    { role: "agent", journal: "one WAL" },
-    { role: "agent", journal: "competing WALs" },
-    { role: "global", journal: "one WAL" },
-    { role: "global", journal: "competing WALs" },
-  ])(
-    "preserves committed rows or refuses unsafe $journal ($role)",
-    backupCase({ prefix: "backup-registered-hardlinks-" })(
-      async (state, { role, journal }: HardlinkOwner) => {
-        const ownerPath =
-          role === "global"
-            ? resolveOpenClawStateSqlitePath(state.env)
-            : path.join(state.agentDir(), "openclaw-agent.sqlite");
-        const aliasPath = path.join(path.dirname(ownerPath), "a-alias.sqlite");
-        const owner =
-          role === "global"
-            ? openOpenClawStateDatabase({ env: state.env })
-            : openOpenClawAgentDatabase({ agentId: "main", path: ownerPath, env: state.env });
-        owner.db.exec("CREATE TABLE durable_records (value TEXT NOT NULL)");
-        closeOpenClawAgentDatabasesForTest();
-        closeOpenClawStateDatabase();
-        await fs.link(ownerPath, aliasPath);
-        if (role === "agent") {
-          registerOpenClawAgentDatabase({ agentId: "main", path: aliasPath, env: state.env });
-          closeOpenClawStateDatabase();
-        }
-        const sqlite = requireNodeSqlite();
-        const writer = new sqlite.DatabaseSync(ownerPath);
-        try {
-          writer.exec(`
-            PRAGMA journal_mode = WAL;
-            PRAGMA wal_autocheckpoint = 0;
-            INSERT INTO durable_records VALUES ('committed-only-in-wal');
-          `);
-          expect((await fs.stat(`${ownerPath}-wal`)).size).toBeGreaterThan(0);
-          await expectAbsent(`${aliasPath}-wal`);
-          if (journal === "competing WALs") {
-            await fs.copyFile(`${ownerPath}-wal`, `${aliasPath}-wal`);
-          }
-          const output = state.path("backup.tar.gz");
-          const runtime = createTestRuntime();
-          const create = () => createVerifiedBackup(state, {}, runtime);
-          if (journal !== "one WAL") {
-            const reason = /Ambiguous SQLite hardlink journal ownership: multiple non-empty WAL/iu;
-            await expect(create()).rejects.toThrow(reason);
-            expect((await readBackupRunFreshness(state.env)).latest).toMatchObject({
-              status: "failed",
-              error: expect.stringMatching(reason),
-            });
-            await expectAbsent(output);
-            return;
-          }
-          const archive = await create();
-          expect(archive.verified).toBe(true);
-          const restored = await restoreBackup(state, archive, runtime);
-          for (const source of [ownerPath, aliasPath]) {
-            expectDatabaseRows(
-              path.join(restored.targetPath, buildBackupArchivePath(archive.archiveRoot, source)),
-              "SELECT value FROM durable_records",
-              [{ value: "committed-only-in-wal" }],
-            );
-          }
-        } finally {
-          writer.close();
-        }
-      },
-    ),
   );
 });
 

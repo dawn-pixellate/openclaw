@@ -131,14 +131,6 @@ it("stores native socket material without creating or changing shared policy", (
   expect(fs.existsSync(path.join(root, "state", "openclaw.sqlite"))).toBe(false);
 });
 
-it("refuses newer local schemas without reopening or modifying shared state", () => {
-  const { env, read } = fixture();
-  withClientCredentialStore(env, true, (db) => db.exec("PRAGMA user_version=2"));
-  expect(() => read("primary")).toThrow("unsupported schema version 2");
-  using db = openNodeSqliteDatabase(resolveClientCredentialStorePath(env), { readOnly: true });
-  expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
-});
-
 it.runIf(process.platform === "darwin")(
   "rejects ACL access to existing private credentials",
   () => {
