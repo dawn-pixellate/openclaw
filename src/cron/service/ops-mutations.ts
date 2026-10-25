@@ -16,7 +16,7 @@ import {
 } from "../config-revision.js";
 import { normalizeCronRunJobId } from "../run-history.js";
 import { removeCronJobBaseSession } from "../session-reaper.js";
-import { removeStaleCronJobFamilyRows } from "../store.js";
+import { removeStaleCronJobFamilyRowsByKey } from "../store.js";
 import type { CronJobMutation } from "../store/job-mutations.types.js";
 import { systemOwnedDeclarationKeyNamespace } from "../system-owned-declaration.js";
 import type { CronJobCreate, CronJobPatch } from "../types.js";
@@ -47,7 +47,7 @@ import type {
   CronUpdateOptions,
   CronUpdatePrecondition,
 } from "./state.js";
-import { emit } from "./state.js";
+import { emit, prepareCronServiceStore } from "./state.js";
 import {
   captureCronJobMutationSource,
   captureCronServiceMutationSource,
@@ -95,6 +95,7 @@ export async function add(
   input: CronJobCreate,
   opts?: CronAddOptions,
 ): Promise<CronAddResult> {
+  await prepareCronServiceStore(state);
   const source = captureCronJobMutationSource(state);
   let pendingSessionCleanup: Promise<void> | undefined;
   return await locked(state, async () => {
@@ -249,7 +250,7 @@ export async function removeStaleJobFamily(
 ): Promise<number> {
   return await locked(state, async () => {
     await ensureLoadedForOperation(state);
-    return await removeStaleCronJobFamilyRows(state.deps.storePath, family, opts);
+    return await removeStaleCronJobFamilyRowsByKey(state.deps.storeKey, family, opts);
   });
 }
 
@@ -333,6 +334,7 @@ export async function update(
   patch: CronJobPatch,
   opts?: CronUpdateOptions,
 ) {
+  await prepareCronServiceStore(state);
   const source = captureCronJobMutationSource(state);
   return await locked(state, async () => await updateLoadedJob({ state, source, id, patch, opts }));
 }
@@ -345,6 +347,7 @@ export async function updateWithPrecondition(
   precondition: CronUpdatePrecondition,
   opts?: CronUpdateOptions,
 ) {
+  await prepareCronServiceStore(state);
   const source = captureCronJobMutationSource(state);
   return await locked(
     state,
@@ -354,6 +357,7 @@ export async function updateWithPrecondition(
 
 /** Removes a cron job through its worker owner before canceling and cleaning up host work. */
 export async function remove(state: CronServiceState, id: string, opts?: CronRemoveOptions) {
+  await prepareCronServiceStore(state);
   const source = captureCronJobMutationSource(state);
   let sessionCleanup:
     | {
@@ -493,6 +497,7 @@ export async function removeAgentJobsTransactional<T>(
   agentId: string,
   commit: () => Promise<T>,
 ): Promise<T> {
+  await prepareCronServiceStore(state);
   const source = captureCronServiceMutationSource(state);
   return await locked(state, async () => {
     source.assertCurrent();

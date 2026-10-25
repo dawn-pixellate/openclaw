@@ -36,16 +36,17 @@ describe.skipIf(!connection)("PostgreSQL index ordering migration", () => {
     (kind) => {
       withEngineStoreAdmission(() => {
         const target = kind === "state" ? stateEngineSchema : agentEngineSchema;
+        const indexOrderingVersion = kind === "state" ? 32 : 34;
         const migration = target.postgresMigrations?.find(
-          (step) => step.version === target.version,
+          (step) => step.version === indexOrderingVersion,
         );
         if (!migration) {
-          throw new Error(`Missing current ${kind} PostgreSQL migration`);
+          throw new Error(`Missing ${kind} PostgreSQL index-ordering migration`);
         }
         const source: StoreSchema = {
           ...target,
           ...migration.fromSchema,
-          version: target.version - 1,
+          version: indexOrderingVersion - 1,
           postgresMigrations: [],
           postgresFragments: migration.fromSchema.postgresFragments?.map((fragment) =>
             fragment.id === "update_runs"

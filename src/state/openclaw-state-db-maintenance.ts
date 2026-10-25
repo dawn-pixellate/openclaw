@@ -35,6 +35,7 @@ import {
   MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION,
 } from "./openclaw-state-db-contract.js";
 import { migrateCronDeliveryAttemptState } from "./openclaw-state-db-cron-delivery-migration.js";
+import * as cronIdentity from "./openclaw-state-db-cron-identity-migration.js";
 import {
   hasDanglingSkillWorkshopCollectionReviewIndex,
   LEGACY_SKILL_WORKSHOP_COLLECTION_REVIEWS_INDEX,
@@ -517,10 +518,7 @@ const stateAutomationPolicyMigration = {
 };
 
 /** Version-gated column and row migrations, oldest first; each runs inside the caller's schema transaction. */
-export const versionedStateMigrations: ReadonlyArray<{
-  migrate: (db: DatabaseSync, previousVersion: number) => boolean;
-  applied: string;
-}> = [
+export const versionedStateMigrations = [
   statePortableIdentityMigration,
   stateMeetingChronologyMigration,
   { migrate: migrateJsonCanonicalWideRowsV13, applied: "Consolidated shared state tables (v13)" },
@@ -549,13 +547,14 @@ export const versionedStateMigrations: ReadonlyArray<{
   stateWriteIndexMigration,
   statePublicationDraftMigration,
   stateLocalWorkspaceManifestMigration,
-];
+  cronIdentity.stateCronIdentityMigration,
+] as const;
 
 /** Recent version migrations own only their tables; Doctor owns unrelated historical repair. */
 export function migrateBoundedStateSchema(
   db: DatabaseSync,
   previousVersion: number,
-  options: { versionMigrationOnly?: boolean } = {},
+  options: cronIdentity.StateCronIdentityMigrationOptions & { versionMigrationOnly?: boolean },
 ): string[] | undefined {
   const migrations = [
     statePredicateColumnMigration,
@@ -576,6 +575,7 @@ export function migrateBoundedStateSchema(
       migrate: () => false,
       applied: "Aligned PostgreSQL non-null index ordering (v32)",
     },
+    cronIdentity.stateCronIdentityMigration,
   ];
   const pending = migrations.filter(({ version }) => version > previousVersion);
   // An undeclared destination keeps the legacy full runner and full-backup requirement.
@@ -625,7 +625,7 @@ export function migrateBoundedStateSchema(
   }
   const changes: string[] = [];
   for (const migration of pending) {
-    migration.migrate(db, previousVersion);
+    migration.migrate(db, previousVersion, options);
     changes.push(migration.applied);
   }
   for (const index of indexes) {

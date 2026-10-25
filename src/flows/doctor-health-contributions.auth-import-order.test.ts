@@ -63,6 +63,7 @@ function makePrompter(shouldRepair: boolean): DoctorPrompter {
     confirmAggressiveAutoFix: vi.fn(async () => false),
     confirmRuntimeRepair: vi.fn(async () => false),
     select: vi.fn(async (_params, fallback) => fallback),
+    selectRuntimeRepair: vi.fn(async (_params, fallback) => fallback),
     shouldRepair,
     shouldForce: false,
     repairMode: {

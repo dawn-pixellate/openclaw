@@ -16,6 +16,7 @@ import { resolvePluginDoctorProviderRenames } from "../../../plugins/doctor-cont
 import { migratePluginConfigId } from "../../../plugins/update-config.js";
 import { protectActiveAuthProfileConfig } from "../../doctor-auth-profile-config.js";
 import { stripUnknownConfigKeys } from "../../doctor-config-analysis.js";
+import type { DoctorConfigPreflightResult } from "./config-migration-result.js";
 import {
   applyDoctorConfigMutation,
   type DoctorConfigMutationState,
@@ -124,9 +125,16 @@ export async function applyRetiredConfigStep(params: {
   doctorFixCommand: string;
   sourceConfig: OpenClawConfig;
   emitChanges: (changeLines: readonly string[]) => void;
+  preflight?: Pick<
+    DoctorConfigPreflightResult,
+    "heartbeatMigrationDeferred" | "cronStoreSelectionUnresolved"
+  >;
 }): Promise<DoctorConfigMutationState> {
   let state = params.state;
-  if (params.shouldRepair) {
+  if (params.preflight?.heartbeatMigrationDeferred) {
+    return state;
+  }
+  if (params.shouldRepair && !params.preflight?.cronStoreSelectionUnresolved) {
     const { tryProjectRetiredHeartbeatConfig } = await import("../../doctor-heartbeat-legacy.js");
     const { retireHeartbeatWithDoctor } = await import("../../doctor-heartbeat-retirement.js");
     const retiredConfig = tryProjectRetiredHeartbeatConfig(state.candidate)

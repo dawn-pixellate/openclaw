@@ -4,13 +4,53 @@ import { expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createDefaultProactiveJob } from "../cron/default-proactive-job.js";
 import { saveProactiveJobsForTest } from "../cron/proactive-job.test-support.js";
-import { saveCronJobsStore } from "../cron/store.js";
+import { resolveCronStorePathAsync, saveCronJobsStore } from "../cron/store.js";
 import { writeConfigMachineState } from "../state/config-machine-state-write.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { closeStateDatabaseForTest } from "../test-utils/database-cleanup.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { readHeartbeatSummarySnapshot } from "./heartbeat-summary-snapshot.js";
+import {
+  projectHeartbeatSummary,
+  readHeartbeatSummaryForStatus,
+  readHeartbeatSummarySnapshot,
+} from "./heartbeat-summary-snapshot.js";
 import { sqliteWorkerPreloadEnv } from "./sqlite-worker-preload.test-support.js";
+
+it("keeps diagnostics available and reports paused cron when partition selection is unresolved", async () => {
+  await withOpenClawTestState({ label: "heartbeat-unresolved-partition" }, async () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        ownership: "explicit",
+        defaults: { systemAgent: { agentId: "main" } },
+        entries: { main: {} },
+      },
+    };
+    try {
+      const storePath = await resolveCronStorePathAsync();
+      await saveProactiveJobsForTest(storePath, [createDefaultProactiveJob(cfg, "main", 1)]);
+      openOpenClawStateDatabase()
+        .db.prepare("DELETE FROM config_machine_state WHERE state_key = 'cron.defaultStoreKey'")
+        .run();
+      await closeStateDatabaseForTest();
+
+      const summary = await readHeartbeatSummaryForStatus(() => readHeartbeatSummarySnapshot(cfg));
+      expect(summary.jobs).toEqual([]);
+      expect(summary.selectionWarning).toContain("openclaw doctor --fix");
+      expect(summary.selectionWarning).toContain("Partition inventory:");
+      expect(projectHeartbeatSummary(undefined, summary.selectionWarning)).toMatchObject({
+        enabled: false,
+        every: "paused",
+        prompt: summary.selectionWarning,
+      });
+      await expect(readHeartbeatSummarySnapshot(cfg)).rejects.toMatchObject({
+        code: "CRON_STORE_SELECTION_REQUIRED",
+      });
+    } finally {
+      await closeStateDatabaseForTest();
+    }
+  });
+});
 
 it("reuses the selected partition without rereading its selection and observes committed changes", async () => {
   await withOpenClawTestState({ label: "heartbeat-selected-partition" }, async (state) => {

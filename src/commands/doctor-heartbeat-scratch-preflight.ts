@@ -1,8 +1,10 @@
 import { inheritLegacyDefaultAgentId } from "../config/legacy.default-agent-owner.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { readDefaultProactiveJobReceiptInDatabase } from "../cron/proactive-job-receipt.kernel.js";
-import { cronStoreKey } from "../cron/store/key.js";
-import { resolveCronJobsStorePathFromConfig } from "../cron/store/paths.js";
+import {
+  resolveCronJobsStorePathFromConfig,
+  resolveCronStoreKeyInDatabase,
+} from "../cron/store/paths.js";
 import { loadCronRows } from "../cron/store/row-codec.js";
 import { withExistingOpenClawStateDatabaseArtifactPreservingReadOnly } from "../state/openclaw-state-db-readonly.js";
 import { decodeDoctorHeartbeatJobRows } from "./doctor-heartbeat-jobs.js";
@@ -36,11 +38,12 @@ export async function assertHeartbeatScratchMigrationUnambiguous(
   const storePath = resolveCronJobsStorePathFromConfig(cfg, env);
   withExistingOpenClawStateDatabaseArtifactPreservingReadOnly(
     ({ db }) => {
-      const jobs = decodeDoctorHeartbeatJobRows(loadCronRows(db, cronStoreKey(storePath)));
+      const storeKey = resolveCronStoreKeyInDatabase(db, storePath, env);
+      const jobs = decodeDoctorHeartbeatJobRows(loadCronRows(db, storeKey));
       const { agentIds, receipts } = planDoctorHeartbeatMonitors(
         cfg,
         jobs,
-        (agentId) => readDefaultProactiveJobReceiptInDatabase(db, storePath, agentId),
+        (agentId) => readDefaultProactiveJobReceiptInDatabase(db, storeKey, agentId),
         findings.flatMap((finding) => (finding.target ? [finding.target] : [])),
       );
       for (const agentId of agentIds) {

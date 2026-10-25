@@ -6,6 +6,7 @@ import {
   recordDefaultProactiveJobInDatabase,
 } from "../cron/proactive-job-receipt.js";
 import { saveCronJobsStore, saveCronStore } from "../cron/store.js";
+import { resolveCronStoreKeyInDatabase } from "../cron/store/paths.js";
 import type { CronStoredJob } from "../cron/types.js";
 import { getLastHeartbeatEvent, resetHeartbeatEventsForTest } from "../infra/heartbeat-events.js";
 import { createWarnLogCapture } from "../logging/test-helpers/warn-log-capture.js";
@@ -65,8 +66,9 @@ describe("Gateway legacy heartbeat projection lifecycle", () => {
       const other = { ...projectionJob("health-other", primary.createdAtMs), agentId: "other" };
       await saveCronStore(service.storePath, { version: 1, jobs: [primary, other] });
       runOpenClawStateWriteTransaction(({ db }) => {
-        recordDefaultProactiveJobInDatabase(db, service.storePath, "main", primary.id, 1);
-        recordDefaultProactiveJobInDatabase(db, service.storePath, "other", other.id, 1);
+        const storeKey = resolveCronStoreKeyInDatabase(db, service.storePath);
+        recordDefaultProactiveJobInDatabase(db, storeKey, "main", primary.id, 1);
+        recordDefaultProactiveJobInDatabase(db, storeKey, "other", other.id, 1);
       });
       const reads = vi.spyOn(stateReads, "executeExistingOpenClawStateRead");
       const summaryReads = () =>
@@ -115,7 +117,8 @@ describe("Gateway legacy heartbeat projection lifecycle", () => {
       const job = projectionJob("health-overlap", Date.now());
       await saveCronStore(service.storePath, { version: 1, jobs: [job] });
       runOpenClawStateWriteTransaction(({ db }) => {
-        recordDefaultProactiveJobInDatabase(db, service.storePath, "main", job.id, 1);
+        const storeKey = resolveCronStoreKeyInDatabase(db, service.storePath);
+        recordDefaultProactiveJobInDatabase(db, storeKey, "main", job.id, 1);
       });
       const execute = stateReads.executeExistingOpenClawStateRead;
       let updated = false;
@@ -201,9 +204,10 @@ describe("Gateway legacy heartbeat projection lifecycle", () => {
         // Both jobs exist before start; only receipt membership changes across restart.
         await saveCronJobsStore(service.storePath, { version: 1, jobs: [primary, converted] });
         runOpenClawStateWriteTransaction(({ db }) => {
+          const storeKey = resolveCronStoreKeyInDatabase(db, service.storePath);
           recordDefaultProactiveJobInDatabase(
             db,
-            service.storePath,
+            storeKey,
             "main",
             primary.id,
             primary.createdAtMs,
@@ -237,7 +241,8 @@ describe("Gateway legacy heartbeat projection lifecycle", () => {
 
         await service.cron.stopAndDrain();
         runOpenClawStateWriteTransaction(({ db }) => {
-          recordConvertedProactiveJobInDatabase(db, service.storePath, "main", converted.id);
+          const storeKey = resolveCronStoreKeyInDatabase(db, service.storePath);
+          recordConvertedProactiveJobInDatabase(db, storeKey, "main", converted.id);
         });
         await service.cron.start();
         expect(projectionReads()).toHaveLength(2);

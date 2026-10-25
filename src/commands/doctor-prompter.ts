@@ -80,6 +80,14 @@ export function createDoctorPrompter(params: {
       }
       return guardCancel(await select(styleSelectParams(p)), params.runtime, 130) as T;
     },
+    selectRuntimeRepair: async <T>(p: Parameters<typeof select>[0], fallback: T) => {
+      // An ambiguous persisted identity requires an operator choice, including under --fix.
+      if (!repairMode.canPrompt || repairMode.updateInProgress || params.signal?.aborted) {
+        return fallback;
+      }
+      const answer = await select(styleSelectParams({ ...p, signal: params.signal ?? p.signal }));
+      return params.signal?.aborted ? fallback : (guardCancel(answer, params.runtime, 130) as T);
+    },
     shouldRepair: repairMode.shouldRepair,
     shouldForce: repairMode.shouldForce,
     repairMode,

@@ -8,6 +8,8 @@ import type { CronConfig } from "../../config/types.cron.js";
 import type { GatewayScheduler, GatewaySchedulerScope } from "../../infra/gateway-scheduler.js";
 import { LEGACY_IMPLICIT_AGENT_ID } from "../../routing/session-key.js";
 import type { ReplyOperationObservation } from "../../sessions/reply-operation-state.js";
+import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import { runOpenClawStateWorkerOperation } from "../../state/openclaw-state-worker-store.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import type { CronAgentAvailability } from "../agent-availability.js";
 import type { CronCompletionDeliveryFence } from "../delivery-attempt-fence.js";
@@ -17,6 +19,8 @@ import type { CronRuntimeAuthority } from "../runtime-authority.js";
 import type { ScheduledOccurrence } from "../scheduled-occurrence.js";
 import type { CronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import type { CronJobScratchState } from "../scratch-contract.js";
+import { cronStoreKey } from "../store/key.js";
+import { resolveCronStoreKeyAsync, resolveDefaultCronStorePath } from "../store/paths.js";
 import type { CronStreamExecApproval, CronStreamExecPolicy } from "../stream-exec-authority.js";
 import type { QuarantinedCronConfigJob } from "../types-shared.js";
 import type {
@@ -347,6 +351,7 @@ export type CronExecutionIdentityAdmission = {
 };
 
 type CronServiceDepsInternal = Omit<CronServiceDeps, "env" | "nowMs"> & {
+  storeKey: string;
   env: NodeJS.ProcessEnv;
   nowMs: () => number;
 };
@@ -441,6 +446,7 @@ export function createCronServiceState(deps: CronServiceDeps): CronServiceState 
     deps: {
       ...deps,
       env: deps.env ?? process.env,
+      storeKey: cronStoreKey(deps.storePath),
       defaultAgentId,
       nowMs: deps.nowMs ?? (() => deps.scheduler.now()),
     },
@@ -462,6 +468,41 @@ export function createCronServiceState(deps: CronServiceDeps): CronServiceState 
     lastQuarantineFailureWarnKey: null,
     storeLoadedAtMs: null,
   };
+}
+
+const preparedStoreSelections = new WeakMap<
+  CronServiceState,
+  {
+    admission: ReturnType<typeof captureOpenClawStateWorkerContext>["admission"];
+    promise: Promise<void>;
+  }
+>();
+
+/** Resolve the public path once per admission; warm operations carry the opaque key. */
+export async function prepareCronServiceStore(state: CronServiceState): Promise<void> {
+  const context = captureOpenClawStateWorkerContext();
+  const previous = preparedStoreSelections.get(state);
+  if (previous?.admission === context.admission) {
+    return previous.promise;
+  }
+  if (previous) {
+    state.store = null;
+    state.readSnapshot = undefined;
+  }
+  const promise = (async () => {
+    const env = state.deps.env;
+    if (cronStoreKey(state.deps.storePath) === resolveDefaultCronStorePath(env)) {
+      await runOpenClawStateWorkerOperation(context, async () => {});
+    }
+    state.deps.storeKey = await resolveCronStoreKeyAsync(state.deps.storePath, env, context);
+  })();
+  preparedStoreSelections.set(state, { admission: context.admission, promise });
+  void promise.catch(() => {
+    if (preparedStoreSelections.get(state)?.promise === promise) {
+      preparedStoreSelections.delete(state);
+    }
+  });
+  return promise;
 }
 
 /** Dispatches a cron event without letting subscriber errors escape scheduler work. */

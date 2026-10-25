@@ -57,5 +57,7 @@ export const SCHEMA_MIGRATION_BACKUP_TABLES: Record<
     ],
     // PostgreSQL-only index ordering; SQLite advances metadata only.
     32: [],
+    // Default cron identity is one machine-state binding; existing partition rows stay untouched.
+    33: ["config_machine_state"],
   },
 };
