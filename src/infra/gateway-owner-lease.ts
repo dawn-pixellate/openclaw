@@ -4,6 +4,7 @@ import path from "node:path";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { getFileLockProcessStartTime } from "../shared/pid-alive.js";
+import { readAgentDatabaseLeaseProvenance } from "../state/openclaw-agent-db-lease-provenance.js";
 import type { OpenClawStateSchemaReadAdmission } from "../state/openclaw-state-db-contract.js";
 import { isStatePostgres } from "../state/openclaw-state-db-engine.js";
 import {
@@ -39,7 +40,8 @@ import type {
 import { captureGatewayStateOwner, type StateDatabaseSchemaLease } from "./gateway-state-owner.js";
 import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "./kysely-sync.js";
 import { resolveDiagnosticProcessEnv } from "./process-env.js";
-import type { EngineConnection } from "./sql-connection.js";
+import { isPostgresSqlConnection, type EngineConnection } from "./sql-connection.js";
+import { readSqliteDatabaseIntegrityVerification } from "./sqlite-database-admission.js";
 import { throwSqliteLifecycleErrors } from "./sqlite-lifecycle-errors.js";
 import { retainSnapshotTempDirectory } from "./sqlite-readonly-location-cleanup.js";
 import type { PreparedSqliteReadOnlyLocation } from "./sqlite-readonly-location.types.js";
@@ -344,6 +346,11 @@ export function acquireGatewayOwnerLease(params: {
             ...payload,
             owner: { ...processOwner, startedAt },
             listeningAt: Date.now(),
+            // Seal reuse and startup verification share the physical owner's completed receipt.
+            stateIntegrityProvenance:
+              !isPostgresSqlConnection(db) && readSqliteDatabaseIntegrityVerification(db)
+                ? readAgentDatabaseLeaseProvenance(databasePath)
+                : null,
           }),
         );
         if (!updated) {

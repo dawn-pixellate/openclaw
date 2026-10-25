@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { withDoctorSqliteMaintenanceLock } from "../commands/doctor-sqlite-maintenance-lock.js";
 import * as pidAlive from "../shared/pid-alive.js";
+import * as provenance from "../state/openclaw-agent-db-lease-provenance.js";
 import { readOpenClawDatabaseQuarantineFailure } from "../state/openclaw-quarantine-store.js";
 import { seedOpenClawDatabaseQuarantine } from "../state/openclaw-quarantine-store.test-support.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../state/openclaw-state-db-contract.js";
@@ -34,7 +35,10 @@ import * as stateOwners from "./gateway-state-owner.js";
 import { acquireGatewayStateOwner, tryAcquireGatewayStateOwner } from "./gateway-state-owner.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
 import { writeGatewayServiceRestartIntentSync } from "./restart-intent.js";
-import { readSqliteDatabaseCleanClose } from "./sqlite-database-admission.js";
+import {
+  readSqliteDatabaseCleanClose,
+  readSqliteDatabaseIntegrityVerification,
+} from "./sqlite-database-admission.js";
 import { corruptSqliteIndexKey } from "./sqlite-index-corruption.test-support.js";
 import * as snapshotSource from "./sqlite-snapshot-source.js";
 import { runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
@@ -517,6 +521,22 @@ describe("Gateway owner lease", () => {
     const lease = owner.acquire();
     await lease.ready;
     expect(readGatewayOwnerLease({ env })?.state).toBe("live");
+  });
+
+  it("publishes completed shared-state integrity through its listening payload", async () => {
+    await using owner = fixture();
+    const lease = owner.acquire();
+    await lease.ready;
+    const pathname = resolveOpenClawStateSqlitePath(owner.env);
+    expect(readSqliteDatabaseIntegrityVerification(pathname)).toBeDefined();
+    expect(readGatewayOwnerLease({ env: owner.env })?.stateIntegrityProvenance).toBeUndefined();
+    vi.spyOn(provenance, "readAgentDatabaseLeaseProvenance").mockReturnValue("fixture:state-file");
+
+    lease.markListening();
+
+    expect(readGatewayOwnerLease({ env: owner.env })?.stateIntegrityProvenance).toBe(
+      "fixture:state-file",
+    );
   });
 
   it("repairs a missing publication identity on heartbeat and becomes live", async () => {

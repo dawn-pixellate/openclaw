@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { readGatewayOwnerLeaseFromDatabase } from "../infra/gateway-owner-lease.read.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
 import { assertSqliteIntegrity } from "../infra/sqlite-integrity.js";
 import { runWithSqliteCleanup } from "../infra/sqlite-lifecycle-errors.js";
@@ -13,6 +14,7 @@ import { prepareSqliteReadOnlyLocationSync } from "../infra/sqlite-snapshot-sour
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import { hasLegacyCronRunLogs } from "../infra/state-migrations.cron-run-logs.js";
 import { hasUpdateDoctorMigrationCapture } from "../infra/update-doctor-migration-attribution.js";
+import { readAgentDatabaseLeaseProvenance } from "./openclaw-agent-db-lease-provenance.js";
 import {
   getStateRuntimeSchemaAdmission,
   publishStateRuntimeSchemaAdmission,
@@ -118,12 +120,21 @@ export function isOpenClawStateSchemaFastPathEligible(
         const readTable = createSqliteTableContractReader(database);
         assertCurrentStateRuntimeSchema(database, pathname, readTable);
         assertNoLegacyStateRuntimeRepair(database, pathname);
-        publishIntegrity = assertOpenClawStateRuntimeIntegrity(
-          database,
-          pathname,
-          { schemaVersion, userVersion },
-          integrity,
-        );
+        const owner = readGatewayOwnerLeaseFromDatabase(database);
+        const peerAdmitted =
+          owner?.state === "live" &&
+          owner.pid !== process.pid &&
+          Boolean(owner.stateIntegrityProvenance) &&
+          owner.stateIntegrityProvenance === readAgentDatabaseLeaseProvenance(pathname);
+        // Borrowers record no verification: closing last must leave the next opener to verify.
+        if (!peerAdmitted) {
+          publishIntegrity = assertOpenClawStateRuntimeIntegrity(
+            database,
+            pathname,
+            { schemaVersion, userVersion },
+            integrity,
+          );
+        }
         return true;
       },
       { operationLabel: "state.admission.fast-path" },

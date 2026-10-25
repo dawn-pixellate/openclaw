@@ -50,6 +50,13 @@ provenance still run the full check. The borrowing process never checked the fil
 itself, so if it closes last it leaves the next opener to verify instead of writing
 a seal.
 
+Shared-state fast-path admission on Linux likewise reuses the live Gateway's
+completed integrity admission. The Gateway publishes file provenance in its
+owner lease only after it holds a full-verification receipt, including seal
+reuse. A different process must match that provenance and the owner's live PID
+and start time. Schema shape, version, and legacy-repair checks still run; the
+borrower records no full verification and cannot publish a clean-close seal.
+
 Independent read-only subprocesses do not share the Gateway's writer invalidations.
 Their local admission facts retire at final native close, even while the pooled
 process remains alive. Canonical auth reads can reuse the owner's compact schema
@@ -207,15 +214,16 @@ owner and grant for the normal lease duration. A fence lasting longer than that
 duration produces a Doctor warning; a replaced owner still refuses settlement.
 Rollback releases the fence and restores ordinary expiry handling.
 
-| When                                                   | Check                                                                                                                                                                                                                            |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Startup with a matching, recent clean-close seal       | Match checksum, schema identity, file metadata, and empty journals; reuse admitted facts without startup or post-ready scans                                                                                                     |
-| Startup without a reusable seal                        | Run the normal full format, schema, canonical-index, integrity, and foreign-key validation                                                                                                                                       |
-| Same-process reopen or new worker                      | Reuse live file-bound facts or a matching seal; retain current ownership and durable quarantine-row checks                                                                                                                       |
-| Another live process already admitted the same file    | On Linux, reuse that admission instead of a full scan when the peer's PID, start time, and lease provenance (including inode) still match; schema and index checks still run, and the borrower cannot publish a clean-close seal |
-| Before a migration or ordinary same-version repair     | Run whole-database quick integrity, full integrity of affected tables, and existing foreign-key, role, schema, and index checks; `--full-integrity-check` requests full database integrity                                       |
-| After a migration or repair                            | Verify changes and publish committed facts through the existing owner                                                                                                                                                            |
-| Explicit verification, Doctor recovery, and compaction | Retain full checks before accepting or rewriting the database; ordinary Doctor migrations use the migration policy above                                                                                                         |
+| When                                                       | Check                                                                                                                                                                                                                            |
+| ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Startup with a matching, recent clean-close seal           | Match checksum, schema identity, file metadata, and empty journals; reuse admitted facts without startup or post-ready scans                                                                                                     |
+| Startup without a reusable seal                            | Run the normal full format, schema, canonical-index, integrity, and foreign-key validation                                                                                                                                       |
+| Same-process reopen or new worker                          | Reuse live file-bound facts or a matching seal; retain current ownership and durable quarantine-row checks                                                                                                                       |
+| Another live process already admitted the same file        | On Linux, reuse that admission instead of a full scan when the peer's PID, start time, and lease provenance (including inode) still match; schema and index checks still run, and the borrower cannot publish a clean-close seal |
+| Shared-state fast path while a live Gateway holds the file | On Linux, reuse the Gateway owner lease's completed integrity admission when PID, start time, and file provenance match; retain schema, version, and legacy-repair checks, and never seal borrowed verification                  |
+| Before a migration or ordinary same-version repair         | Run whole-database quick integrity, full integrity of affected tables, and existing foreign-key, role, schema, and index checks; `--full-integrity-check` requests full database integrity                                       |
+| After a migration or repair                                | Verify changes and publish committed facts through the existing owner                                                                                                                                                            |
+| Explicit verification, Doctor recovery, and compaction     | Retain full checks before accepting or rewriting the database; ordinary Doctor migrations use the migration policy above                                                                                                         |
 
 The migration default does not compare every untouched index with its table.
 An index/table mismatch outside the declared migration scope therefore needs
