@@ -23,38 +23,36 @@ if (output) {
   };
   // Read-only routing handles are raw DatabaseSync objects. Count native
   // executions too, instead of counting only the writer's EngineConnection.
-  for (const method of ["all", "get", "run"]) {
-    StatementSync.prototype[method] = new Proxy(StatementSync.prototype[method], {
-      apply(target, receiver, args) {
-        return observeSqlite(receiver.sourceSQL, () => Reflect.apply(target, receiver, args));
-      },
-    });
+  for (const [prototype, methods] of [
+    [StatementSync.prototype, ["all", "get", "run", "iterate"]],
+    [DatabaseSync.prototype, ["exec"]],
+  ]) {
+    for (const method of methods) {
+      prototype[method] = new Proxy(prototype[method], {
+        apply(target, receiver, args) {
+          if (method !== "iterate") {
+            return observeSqlite(method === "exec" ? args[0] : receiver.sourceSQL, () =>
+              Reflect.apply(target, receiver, args),
+            );
+          }
+          const iterator = Reflect.apply(target, receiver, args);
+          const next = iterator.next;
+          let counted = false;
+          // Creating an iterator does not execute SQL. Count its first step only;
+          // completion timing and outcomes are outside this work-count observer.
+          iterator.next = function (...nextArgs) {
+            const step = () => Reflect.apply(next, this, nextArgs);
+            if (counted) {
+              return step();
+            }
+            counted = true;
+            return observeSqlite(receiver.sourceSQL, step);
+          };
+          return iterator;
+        },
+      });
+    }
   }
-  // oxlint-disable-next-line typescript/unbound-method -- The proxy forwards the original receiver through Reflect.apply.
-  StatementSync.prototype.iterate = new Proxy(StatementSync.prototype.iterate, {
-    apply(target, receiver, args) {
-      const iterator = Reflect.apply(target, receiver, args);
-      const next = iterator.next;
-      let counted = false;
-      // Creating an iterator does not execute SQL. Count its first step only;
-      // completion timing and outcomes are outside this work-count observer.
-      iterator.next = function (...nextArgs) {
-        const step = () => Reflect.apply(next, this, nextArgs);
-        if (counted) {
-          return step();
-        }
-        counted = true;
-        return observeSqlite(receiver.sourceSQL, step);
-      };
-      return iterator;
-    },
-  });
-  // oxlint-disable-next-line typescript/unbound-method -- The proxy forwards the original receiver through Reflect.apply.
-  DatabaseSync.prototype.exec = new Proxy(DatabaseSync.prototype.exec, {
-    apply(target, receiver, args) {
-      return observeSqlite(args[0], () => Reflect.apply(target, receiver, args));
-    },
-  });
   const OriginalWorker = workerThreads.Worker;
   workerThreads.Worker = class extends OriginalWorker {
     constructor(filename, options = {}) {
