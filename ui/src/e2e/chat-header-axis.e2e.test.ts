@@ -83,6 +83,8 @@ suite.define(() => {
       };
       return {
         nav: centerY(".chat-details-toggle svg"),
+        navSize: [rect(".chat-details-toggle svg").width, rect(".chat-details-toggle svg").height],
+        projectSize: [rect(".workspace-icon").width, rect(".workspace-icon").height],
         projectIcon: centerY(".workspace-icon"),
         projectText: centerY(".chat-pane__workspace-chip > .oc-menu-item__label > span"),
         menu: centerY(".chat-header-session-menu__trigger svg"),
@@ -95,6 +97,7 @@ suite.define(() => {
       };
     });
 
+    expect(geometry.projectSize).toEqual(geometry.navSize);
     expect(Math.abs(geometry.menu - geometry.nav)).toBeLessThanOrEqual(0.1);
     expect(geometry.contentTop).toBeGreaterThanOrEqual(geometry.headerBottom - 0.1);
     expect(geometry.headerOverflow).toBeLessThanOrEqual(1);
