@@ -99,19 +99,8 @@ function buildChannelRuntime(): PluginRuntime["channel"] {
 const vcEvent = {
   event_id: "evt_vc_123",
   call_id: "call_vc_123",
-  meeting: {
-    id: "6911188411934433028",
-    meeting_no: "123456789",
-    topic: "Weekly sync",
-  },
-  inviter: {
-    id: {
-      open_id: "ou_inviter_1",
-      user_id: "u_inviter_1",
-      union_id: "on_inviter_1",
-    },
-    user_name: "Alice",
-  },
+  meeting: { meeting_no: "123456789" },
+  inviter: { id: { open_id: "ou_inviter_1", user_id: "u_inviter_1", union_id: "on_inviter_1" } },
   invite_time: "1712345678",
 };
 const vcEnvelope = {
@@ -156,7 +145,11 @@ function createHandler(options?: {
   });
 }
 
-function startMonitor(vcAutoJoin?: boolean, runtime = createRuntimeSpies()) {
+async function withMonitor(
+  run: (control: { finish: () => void; monitor: Promise<void> }) => Promise<void>,
+  vcAutoJoin?: boolean,
+  runtime = createRuntimeSpies(),
+) {
   const started = createDeferred<void>();
   const finish = createDeferred<void>();
   monitorWebSocketMock.mockImplementationOnce(async () => {
@@ -171,7 +164,13 @@ function startMonitor(vcAutoJoin?: boolean, runtime = createRuntimeSpies()) {
     channelRuntime: buildChannelRuntime(),
     runtime,
   });
-  return { started: started.promise, finish: finish.resolve, monitor };
+  try {
+    await started.promise;
+    await run({ finish: finish.resolve, monitor });
+  } finally {
+    finish.resolve();
+    await monitor;
+  }
 }
 
 describe("createFeishuVcMeetingInvitedHandler", () => {
@@ -239,9 +238,7 @@ describe("monitorSingleAccount synthetic event registration", () => {
   });
 
   it("falls back to the legacy /menu synthetic message path for unrelated bot menu keys", async () => {
-    const { started, finish, monitor } = startMonitor();
-    try {
-      await started;
+    await withMonitor(async () => {
       await dispatcher.invoke(menuEnvelope("custom-key", "1700000000002"));
 
       expect(handleFeishuMessageMock).toHaveBeenCalledOnce();
@@ -250,44 +247,35 @@ describe("monitorSingleAccount synthetic event registration", () => {
         event: { message: { content: '{"text":"/menu custom-key"}' } },
       });
       expect(sendCardFeishuMock).not.toHaveBeenCalled();
-    } finally {
-      finish();
-      await monitor;
-    }
+    });
   });
 
   it("reports a fallback failure without reopening the committed menu event", async () => {
     const runtime = createRuntimeSpies();
-    const { started, finish, monitor } = startMonitor(undefined, runtime);
     const event = menuEnvelope("quick-actions", "1700000000004");
     sendCardFeishuMock.mockRejectedValueOnce(new Error("launcher unavailable"));
     handleFeishuMessageMock.mockRejectedValueOnce(new Error("fallback failed"));
-    try {
-      await started;
-      await dispatcher.invoke(event);
-      expect(runtime.error).toHaveBeenCalledWith(
-        "feishu[default]: error handling bot menu event: Error: fallback failed",
-      );
-      await dispatcher.invoke(event);
+    await withMonitor(
+      async () => {
+        await dispatcher.invoke(event);
+        expect(runtime.error).toHaveBeenCalledWith(
+          "feishu[default]: error handling bot menu event: Error: fallback failed",
+        );
+        await dispatcher.invoke(event);
 
-      expect(sendCardFeishuMock).toHaveBeenCalledOnce();
-      expect(handleFeishuMessageMock).toHaveBeenCalledOnce();
-    } finally {
-      finish();
-      await monitor;
-    }
+        expect(sendCardFeishuMock).toHaveBeenCalledOnce();
+        expect(handleFeishuMessageMock).toHaveBeenCalledOnce();
+      },
+      undefined,
+      runtime,
+    );
   });
 
   it("keeps meeting invitations inert until the live account opts in", async () => {
-    const { started, finish, monitor } = startMonitor();
-    try {
-      await started;
+    await withMonitor(async () => {
       await expect(dispatcher.invoke(vcEnvelope)).resolves.toBeUndefined();
       expect(handleFeishuMessageMock).not.toHaveBeenCalled();
-    } finally {
-      finish();
-      await monitor;
-    }
+    });
   });
 
   it("abandons deferred invitation ownership when the account transport ends", async () => {
@@ -299,9 +287,7 @@ describe("monitorSingleAccount synthetic event registration", () => {
     handleFeishuMessageMock.mockImplementation(async ({ turnAdoptionLifecycle }) => {
       await turnAdoptionLifecycle?.onAdopted();
     });
-    const { started, finish, monitor } = startMonitor(true);
-    try {
-      await started;
+    await withMonitor(async ({ finish, monitor }) => {
       await dispatcher.invoke(vcEnvelope);
       const key = dedupMocks.claimUnprocessedFeishuMessage.mock.calls[0]?.[0].messageId;
       expect((await feishuDedupeState.guard.claim(key, { namespace: "default" })).kind).toBe(
@@ -316,9 +302,6 @@ describe("monitorSingleAccount synthetic event registration", () => {
       await createHandler()(vcEvent);
       expect(handleFeishuMessageMock).toHaveBeenCalledTimes(2);
       expect(await feishuDedupeState.guard.hasRecent(key, { namespace: "default" })).toBe(true);
-    } finally {
-      finish();
-      await monitor;
-    }
+    }, true);
   });
 });

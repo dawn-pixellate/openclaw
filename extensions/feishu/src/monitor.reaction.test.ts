@@ -210,6 +210,11 @@ function parsedDispatch() {
   const { event, preparedContent } = dispatchedMessage();
   return { dispatched: event, parsed: parseFeishuMessageEvent(event, "ou_bot", preparedContent) };
 }
+async function debounceMessages(...messages: Array<Parameters<typeof createTextEvent>[0]>) {
+  await enqueueText(await setupDebounceMonitor(), ...messages);
+  await vi.advanceTimersByTimeAsync(25);
+}
+
 function setDedupPassThroughMocks() {
   vi.spyOn(dedup, "claimUnprocessedFeishuMessage").mockResolvedValue({
     kind: "claimed",
@@ -322,13 +327,10 @@ describe("Feishu inbound debounce regressions", () => {
 
   it("keeps root-less topic threads in separate debounce buckets", async () => {
     setDedupPassThroughMocks();
-    const dispatcher = await setupDebounceMonitor();
-    await enqueueText(
-      dispatcher,
+    await debounceMessages(
       { messageId: "om_topic_a", text: "topic alpha", threadId: "omt_topic_a" },
       { messageId: "om_topic_b", text: "topic beta", threadId: "omt_topic_b" },
     );
-    await vi.advanceTimersByTimeAsync(25);
     expect(handleFeishuMessageMock).toHaveBeenCalledTimes(2);
     expect(
       handleFeishuMessageMock.mock.calls.map(([{ event }]) => ({
@@ -361,9 +363,7 @@ describe("Feishu inbound debounce regressions", () => {
 
   it("preserves only the bot mention across separate messages ending without mentions", async () => {
     setDedupPassThroughMocks();
-    const dispatcher = await setupDebounceMonitor();
-    await enqueueText(
-      dispatcher,
+    await debounceMessages(
       {
         messageId: "om_user_mention",
         text: "@alice first",
@@ -372,7 +372,6 @@ describe("Feishu inbound debounce regressions", () => {
       { messageId: "om_bot_mention", text: "@bot second", mentions: [mention("ou_bot", "bot")] },
       { messageId: "om_plain_last", text: "plain follow-up" },
     );
-    await vi.advanceTimersByTimeAsync(25);
     const { dispatched, parsed } = parsedDispatch();
     expect(parsed.mentionedBot).toBe(true);
     expect(parsed.mentionTargets).toBeUndefined();
@@ -381,9 +380,7 @@ describe("Feishu inbound debounce regressions", () => {
 
   it("normalizes each debounced message once without mixing per-message mention keys", async () => {
     setDedupPassThroughMocks();
-    const dispatcher = await setupDebounceMonitor();
-    await enqueueText(
-      dispatcher,
+    await debounceMessages(
       {
         messageId: "om_literal_first",
         text: "@_bot @_user_1 first",
@@ -399,7 +396,6 @@ describe("Feishu inbound debounce regressions", () => {
         ],
       },
     );
-    await vi.advanceTimersByTimeAsync(25);
     const { dispatched, parsed } = parsedDispatch();
     expect(dispatched.message.message_id).toBe("om_literal_last");
     expect(parsed.content).toBe(
@@ -422,16 +418,13 @@ describe("Feishu inbound debounce regressions", () => {
             },
           },
     );
-    const dispatcher = await setupDebounceMonitor();
-    await enqueueText(
-      dispatcher,
+    await debounceMessages(
       { messageId: "om_old", text: "stale" },
       { messageId: "om_new_1", text: "first" },
       { messageId: "om_old", text: "stale" },
       { messageId: "om_new_2", text: "second" },
       { messageId: "om_old", text: "stale" },
     );
-    await vi.advanceTimersByTimeAsync(25);
     const { dispatched, parsed } = parsedDispatch();
     expect(dispatched.message.message_id).toBe("om_new_2");
     expect(parsed.content).toBe("first\nsecond");
