@@ -34,11 +34,11 @@ describe("sidebar agent creation access", () => {
       hello: null,
       reason: "Connect to the Gateway to perform this action",
     },
-  ])("explains $name and recovers", async ({ hello, phase = "connected", reason }) => {
+  ])("explains $name and recovers", async ({ hello, phase, reason }) => {
     const request = vi.fn().mockResolvedValue({});
     // SAFETY: This sidebar fixture uses only request; the harness supplies Gateway state.
     const gateway = createGatewayHarness({ request } as unknown as GatewayBrowserClient);
-    gateway.publish({ hello, phase });
+    gateway.publish({ hello, phase: phase ?? "connected" });
     const { sidebar, context } = await mountSidebar(
       gateway.gateway,
       createSessions("main", ["agent:main:main"]),
