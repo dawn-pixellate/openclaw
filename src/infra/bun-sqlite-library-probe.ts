@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { resolveRuntimeScriptEnv } from "../../cli-invocation.mjs";
 import { BUN_SQLITE_LIBRARY_PROBE_SOURCE } from "./bun-sqlite-library-probe.generated.js";
 import { runtimeProcessScriptEntrypoints } from "./runtime-process-manifest.js";
@@ -42,19 +41,27 @@ export function probeBunSqliteLibrary(candidate: string): SqliteLibraryProbe {
     } catch {
       throw new Error("SQLite library probe returned invalid output");
     }
-    if (!isRecord(facts) || facts.protocol !== 1) {
+    if (
+      typeof facts !== "object" ||
+      facts === null ||
+      Array.isArray(facts) ||
+      !("protocol" in facts) ||
+      facts.protocol !== 1
+    ) {
       throw new Error("SQLite library probe returned invalid output");
     }
     if (result.status !== 0) {
       throw new Error(
-        typeof facts.error === "string"
+        "error" in facts && typeof facts.error === "string"
           ? facts.error.slice(0, 512)
           : `SQLite library probe failed (${result.signal ?? result.status})`,
       );
     }
     if (
+      !("version" in facts) ||
       typeof facts.version !== "string" ||
       facts.version.length > 64 ||
+      !("extensionLoadingSupported" in facts) ||
       typeof facts.extensionLoadingSupported !== "boolean"
     ) {
       throw new Error("SQLite library probe returned invalid output");

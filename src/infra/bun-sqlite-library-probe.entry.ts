@@ -11,6 +11,7 @@ try {
     throw new Error("Expected one SQLite library path");
   }
   const require = createRequire(import.meta.url);
+  // SAFETY: The parent runs this entry under Bun, whose builtin provides this Database API.
   const { Database } = require("bun:sqlite") as {
     Database: { new (path: string): SqliteDatabase; setCustomSQLite(path: string): void };
   };

@@ -38,6 +38,8 @@ it("probes with the current runtime and no inherited startup hooks, then removes
 
 it.each([
   "not JSON",
+  "null",
+  "[]",
   JSON.stringify({ version: "3.53.4", extensionLoadingSupported: true }),
   JSON.stringify({ protocol: 1, version: "3.53.4", extensionLoadingSupported: "true" }),
   JSON.stringify({ protocol: 1, version: "3".repeat(65), extensionLoadingSupported: true }),
