@@ -340,7 +340,7 @@ export function createSessionTranscriptTurnKernel(
           currentIdentity.set(resolved.sessionKey, persisted);
           if (!writesEntry && appended && snapshot?.window?.row && snapshot.sideTables) {
             postimages.set(resolved.sessionKey, {
-              changed: true,
+              changed: !sqliteSessionEntriesEqual(currentEntry, appendedEntry),
               entry: appendedEntry,
               row: appended.row,
               window: snapshot.window.row,
