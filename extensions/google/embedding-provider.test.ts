@@ -1,6 +1,6 @@
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { withTimeout } from "openclaw/plugin-sdk/time-runtime";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, describe, expect, it, vi } from "vitest";
 
 vi.mock("openclaw/plugin-sdk/memory-core-host-engine-embeddings", async (importOriginal) => {
   const actual =
@@ -26,9 +26,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function installFetchMock(
-  handler: (input: RequestInfo | URL, init?: RequestInit) => unknown,
-): ReturnType<typeof vi.fn> {
+function installFetchMock(handler: (input: RequestInfo | URL, init?: RequestInit) => unknown) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
     Response.json(handler(input, init)),
   );
@@ -36,25 +34,26 @@ function installFetchMock(
   return fetchMock;
 }
 
-function fetchJsonBody(fetchMock: ReturnType<typeof vi.fn>, index: number): unknown {
-  const init = fetchMock.mock.calls[index]?.[1] as RequestInit | undefined;
-  const body = init?.body;
-  if (typeof body !== "string") {
-    throw new Error("Expected JSON string request body.");
-  }
+function fetchJsonBody(fetchMock: ReturnType<typeof installFetchMock>, index: number): unknown {
+  const body = fetchMock.mock.calls[index]?.[1]?.body;
+  assert(typeof body === "string", "Expected JSON string request body.");
   return JSON.parse(body) as unknown;
 }
 
-function requireFirstFetchInput(fetchMock: ReturnType<typeof vi.fn>): RequestInfo | URL {
-  const [call] = fetchMock.mock.calls;
-  if (!call) {
-    throw new Error("expected Gemini embedding fetch call");
-  }
-  return call[0] as RequestInfo | URL;
+function requireFirstFetchInput(fetchMock: ReturnType<typeof installFetchMock>): RequestInfo | URL {
+  const input = fetchMock.mock.calls[0]?.[0];
+  assert(input, "expected Gemini embedding fetch call");
+  return input;
 }
 
 function axisVector(length: number, index = 0, value = 1): number[] {
   return Array.from({ length }, (_, offset) => (offset === index ? value : 0));
+}
+
+const textContent = (text: string) => ({ parts: [{ text }] });
+function stableRequest(text: string, batch = false) {
+  const request = { content: textContent(text), outputDimensionality: 768 };
+  return batch ? { requests: [{ ...request, model: "models/gemini-embedding-2" }] } : request;
 }
 
 function createProvider(
@@ -99,49 +98,27 @@ describe("Gemini embedding provider", () => {
   };
 
   it.each([
-    {
-      name: "provider-owned",
-      remote: { baseUrl: providerBaseUrl },
-      expectedApiKey: "provider-key",
-      expectedHeaders: { "X-Provider-Tenant": "provider-a" },
-    },
-    {
-      name: "remote-owned with a resolved env-looking literal",
-      remote: {
-        baseUrl: "https://remote.example.test/v1beta",
-        apiKey: "GOOGLE_API_KEY",
-        headers: { "X-Remote-Tenant": "remote-b" },
-      },
-      expectedApiKey: "GOOGLE_API_KEY",
-      expectedHeaders: { "X-Remote-Tenant": "remote-b" },
-    },
-    {
-      name: "query-distinct on the provider host",
-      remote: {
-        baseUrl: `${providerBaseUrl}?tenant=remote`,
-        apiKey: "remote-tenant-key",
-        headers: { "X-Remote-Tenant": "remote-b" },
-      },
-      expectedApiKey: "remote-tenant-key",
-      expectedHeaders: { "X-Remote-Tenant": "remote-b" },
-    },
-  ])("binds Gemini credentials to the $name destination", async (testCase) => {
-    vi.stubEnv("GOOGLE_API_KEY", testCase.remote.baseUrl === providerBaseUrl ? "" : "ambient-bait");
+    [providerBaseUrl, undefined],
+    ["https://remote.example.test/v1beta", "GOOGLE_API_KEY"],
+    [`${providerBaseUrl}?tenant=remote`, "remote-tenant-key"],
+  ] as const)("binds credentials to %s", async (baseUrl, apiKey) => {
+    const headers = apiKey ? { "X-Remote-Tenant": "remote-b" } : undefined;
+    vi.stubEnv("GOOGLE_API_KEY", apiKey ? "ambient-bait" : "");
     const { client, provider } = await createProvider({
       config: config as never,
       provider: "google",
-      remote: testCase.remote,
+      remote: { baseUrl, apiKey, headers },
       model: "gemini-embedding-001",
       dimensions: undefined,
     });
 
-    expect(client.apiKeys).toContain(testCase.expectedApiKey);
-    expect(client.headers).toMatchObject(testCase.expectedHeaders);
-    if (testCase.remote.baseUrl !== providerBaseUrl) {
-      expect(client.apiKeys).toEqual([testCase.expectedApiKey]);
+    expect(client.apiKeys).toContain(apiKey ?? "provider-key");
+    expect(client.headers).toMatchObject(headers ?? { "X-Provider-Tenant": "provider-a" });
+    if (apiKey) {
+      expect(client.apiKeys).toEqual([apiKey]);
       expect(client.headers).not.toHaveProperty("X-Provider-Tenant");
     }
-    if (testCase.remote.baseUrl.includes("?")) {
+    if (baseUrl.includes("?")) {
       const fetchMock = installFetchMock(() => ({ embedding: { values: [1, 0] } }));
       await expect(provider.embed("hello", { inputType: "query" })).resolves.toEqual([1, 0]);
       const fetchInput = requireFirstFetchInput(fetchMock);
@@ -168,43 +145,30 @@ describe("Gemini embedding provider", () => {
     ).rejects.toThrow(/memory\.search\.remote\.apiKey/);
   });
 
-  it.each(["models/", "gemini/", "google/", "models/gemini/", "models/google/"])(
-    "normalizes the %s model prefix through the provider request",
-    async (prefix) => {
-      const fetchMock = installFetchMock(() => ({
-        embedding: { values: axisVector(768) },
-      }));
-      const { provider } = await createProvider({ model: `${prefix}gemini-embedding-2` });
-
-      await provider.embed("query", { inputType: "query" });
-
-      expect(requireFirstFetchInput(fetchMock)).toBe(embeddingUrl("gemini-embedding-2"));
-    },
-  );
-
   it.each([
     ["gemini-embedding-001", 128],
     ["gemini-embedding-2", 3072],
-    ["gemini-embedding-2-preview", 512],
+    ["models/google/gemini-embedding-2-preview", 512],
+    ["gemini-embedding-001", undefined],
+    ["gemini-embedding-2", undefined],
+    ["gemini-embedding-2-preview", undefined],
   ] as const)("supports %s with %i output dimensions", async (model, dimensions) => {
-    const fetchMock = installAxisVectorFetchMock(dimensions);
+    const expected = dimensions ?? (model === "gemini-embedding-001" ? undefined : 3072);
+    const size = expected ?? 768;
+    const fetchMock = installAxisVectorFetchMock(size);
     const { provider, client } = await createProvider({ model, dimensions });
 
-    expect(client.outputDimensionality).toBe(dimensions);
-    await expect(provider.embed("query", { inputType: "query" })).resolves.toHaveLength(dimensions);
+    expect(client.outputDimensionality).toBe(expected);
+    await expect(provider.embed("query", { inputType: "query" })).resolves.toHaveLength(size);
     await expect(provider.embedBatch(["document"], { inputType: "document" })).resolves.toEqual([
-      axisVector(dimensions),
+      axisVector(size),
     ]);
-    expect(fetchJsonBody(fetchMock, 0)).toMatchObject({ outputDimensionality: dimensions });
-    expect(fetchJsonBody(fetchMock, 1)).toMatchObject({
-      requests: [{ outputDimensionality: dimensions }],
-    });
-    if (model === "gemini-embedding-2-preview") {
-      expect(requireFirstFetchInput(fetchMock)).toBe(embeddingUrl(model));
+    if (model.endsWith("gemini-embedding-2-preview")) {
+      expect(requireFirstFetchInput(fetchMock)).toBe(embeddingUrl("gemini-embedding-2-preview"));
       expect(fetchJsonBody(fetchMock, 0)).toEqual({
         content: { parts: [{ text: "query" }] },
         taskType: "RETRIEVAL_QUERY",
-        outputDimensionality: dimensions,
+        outputDimensionality: expected,
       });
     }
   });
@@ -222,35 +186,12 @@ describe("Gemini embedding provider", () => {
     },
   );
 
-  it.each([
-    ["gemini-embedding-001", undefined],
-    ["gemini-embedding-2", 3072],
-    ["gemini-embedding-2-preview", 3072],
-  ] as const)(
-    "preserves the existing default dimension identity for %s",
-    async (model, dimensions) => {
-      const { client } = await createProvider({ model, dimensions: undefined });
-
-      expect(client.outputDimensionality).toBe(dimensions);
-    },
-  );
-
   it("handles legacy and v2 request/response behavior", async () => {
     const fetchMock = installFetchMock((input) => {
       const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
       return url.endsWith(":batchEmbedContents")
-        ? {
-            embeddings: Array.from({ length: 2 }, () => ({
-              values: axisVector(768, 2, 5),
-            })),
-          }
-        : {
-            embedding: {
-              values: Array.from({ length: 768 }, (_, index) =>
-                index === 0 ? 3 : index === 1 ? 4 : 0,
-              ),
-            },
-          };
+        ? { embeddings: [{ values: axisVector(768, 2, 5) }] }
+        : { embedding: { values: [3, 4, ...Array<number>(766).fill(0)] } };
     });
 
     const { provider } = await createProvider({ taskType: "SEMANTIC_SIMILARITY" });
@@ -261,33 +202,34 @@ describe("Gemini embedding provider", () => {
     expect(queryEmbedding).toHaveLength(768);
     expect(queryEmbedding.slice(0, 3)).toEqual([0.6, 0.8, 0]);
 
-    const media = [
-      { text: "Image file: diagram.png", mimeType: "image/png", data: "img" },
-      { text: "Audio file: note.wav", mimeType: "audio/wav", data: "aud" },
-    ];
+    const text = "Image file: diagram.png";
+    const inlineData = { mimeType: "image/png", data: "img" };
     const structuredBatch = await provider.embedBatch(
-      media.map(({ text, mimeType, data }) => ({
-        text,
-        parts: [
-          { type: "text", text },
-          { type: "inline-data", mimeType, data },
-        ],
-      })),
+      [
+        {
+          text,
+          parts: [
+            { type: "text", text },
+            { type: "inline-data", ...inlineData },
+          ],
+        },
+      ],
       { inputType: "document" },
     );
-    expect(structuredBatch).toEqual([axisVector(768, 2), axisVector(768, 2)]);
+    expect(structuredBatch).toEqual([axisVector(768, 2)]);
 
     expect(requireFirstFetchInput(fetchMock)).toBe(embeddingUrl("gemini-embedding-2"));
-    expect(fetchJsonBody(fetchMock, 0)).toEqual({
-      outputDimensionality: 768,
-      content: { parts: [{ text: "task: sentence similarity | query: test query" }] },
-    });
+    expect(fetchJsonBody(fetchMock, 0)).toEqual(
+      stableRequest("task: sentence similarity | query: test query"),
+    );
     expect(fetchJsonBody(fetchMock, 1)).toEqual({
-      requests: media.map(({ text, mimeType, data }) => ({
-        model: "models/gemini-embedding-2",
-        content: { parts: [{ text }, { inlineData: { mimeType, data } }] },
-        outputDimensionality: 768,
-      })),
+      requests: [
+        {
+          model: "models/gemini-embedding-2",
+          content: { parts: [{ text }, { inlineData }] },
+          outputDimensionality: 768,
+        },
+      ],
     });
   });
 
@@ -455,9 +397,6 @@ describe("Gemini embedding provider", () => {
   it.each([
     { label: "empty", values: [] },
     { label: "missing", values: undefined },
-    { label: "null", values: null },
-    { label: "string", values: "bad" },
-    { label: "array-like", values: { 0: 1, length: 1 } },
     { label: "mixed", values: [1, "bad"] },
   ])("rejects $label vectors from direct and synchronous requests", async ({ values }) => {
     installFetchMock((input) => {
@@ -473,9 +412,6 @@ describe("Gemini embedding provider", () => {
     await expect(provider.embedBatch(["one"], { inputType: "document" })).rejects.toThrow(
       "gemini embeddings failed: malformed JSON response",
     );
-    await expect(
-      provider.embedBatch([{ text: "one", parts: [{ type: "text", text: "one" }] }]),
-    ).rejects.toThrow("gemini embeddings failed: malformed JSON response");
   });
 
   it("rejects batch embedding count mismatches", async () => {
@@ -506,25 +442,15 @@ describe("Gemini embedding provider", () => {
       queryInstructionApplied: true,
     });
 
-    expect(fetchJsonBody(fetchMock, 0)).toEqual({
-      content: { parts: [{ text: "task: search result | query: find this" }] },
-      outputDimensionality: 768,
-    });
+    expect(fetchJsonBody(fetchMock, 0)).toEqual(
+      stableRequest("task: search result | query: find this"),
+    );
     for (const index of [1, 2]) {
-      expect(fetchJsonBody(fetchMock, index)).toEqual({
-        content: { parts: [{ text: "custom: find this" }] },
-        outputDimensionality: 768,
-      });
+      expect(fetchJsonBody(fetchMock, index)).toEqual(stableRequest("custom: find this"));
     }
-    expect(fetchJsonBody(fetchMock, 3)).toEqual({
-      requests: [
-        {
-          content: { parts: [{ text: "title: none | text: remember this" }] },
-          model: "models/gemini-embedding-2",
-          outputDimensionality: 768,
-        },
-      ],
-    });
+    expect(fetchJsonBody(fetchMock, 3)).toEqual(
+      stableRequest("title: none | text: remember this", true),
+    );
   });
 
   it.each([

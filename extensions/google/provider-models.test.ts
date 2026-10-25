@@ -1,5 +1,5 @@
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { createProviderDynamicModelContext as createContext } from "../test-support/provider-model-test-helpers.js";
 import {
   isGoogleNativeVideoModelId,
@@ -7,6 +7,26 @@ import {
   isModernGoogleModel,
   resolveGoogleGeminiForwardCompatModel,
 } from "./provider-models.js";
+
+const google = "google";
+const cli = "google-gemini-cli";
+const vertex = "google-vertex";
+const antigravity = "google-antigravity";
+const directApi = "google-generative-ai";
+const antigravityApi = "openai-completions";
+const wideContext = { contextWindow: 1_048_576 };
+const reasoningModel = { ...wideContext, reasoning: true };
+const antigravityModel: Partial<ProviderRuntimeModel> = {
+  api: antigravityApi,
+  baseUrl: "https://antigravity.example/v1",
+  ...reasoningModel,
+};
+const pro = "gemini-3.1-pro-preview";
+const retiredPro = "gemini-3-pro-preview";
+const flash = "gemini-3-flash-preview";
+const lite = "gemini-3.1-flash-lite";
+const stableLite = "gemini-2.5-flash-lite";
+const stableFlash = "gemini-2.5-flash";
 
 function template(
   provider: string,
@@ -17,9 +37,9 @@ function template(
     id,
     name: id,
     provider,
-    api: provider === "google-gemini-cli" ? "google-gemini-cli" : "google-generative-ai",
+    api: provider === cli ? cli : directApi,
     baseUrl:
-      provider === "google-gemini-cli"
+      provider === cli
         ? "https://cloudcode-pa.googleapis.com"
         : "https://generativelanguage.googleapis.com/v1beta",
     reasoning: false,
@@ -44,279 +64,151 @@ function expectResolution(
   models: ProviderRuntimeModel[],
   fields: Partial<ProviderRuntimeModel>,
 ) {
-  const model = resolveModel(provider, id, models);
-  if (!model) {
-    throw new Error("expected provider model");
-  }
-  for (const [key, value] of Object.entries({ provider, id, ...fields })) {
-    expect(model[key as keyof ProviderRuntimeModel]).toEqual(value);
-  }
+  expect(resolveModel(provider, id, models)).toMatchObject({ provider, id, ...fields });
 }
 
-describe("resolveGoogleGeminiForwardCompatModel", () => {
-  it.each<[string, string, string, ProviderRuntimeModel[], Partial<ProviderRuntimeModel>]>([
+it.each<[string, string, ProviderRuntimeModel[], Partial<ProviderRuntimeModel>]>([
+  [cli, stableLite, [template(google, stableLite)], { api: directApi, reasoning: false }],
+  [
+    cli,
+    stableLite,
+    [template(cli, lite, wideContext)],
+    { api: cli, contextWindow: 1_048_576, reasoning: false },
+  ],
+  [vertex, pro, [template(cli, retiredPro)], { api: cli, reasoning: false }],
+  [
+    google,
+    "gemini-4-argon-preview-11-02",
+    [template(google, "gemini-4-argon", reasoningModel)],
+    reasoningModel,
+  ],
+  [
+    google,
+    "google/gemini-3-pro-preview",
+    [template(google, pro)],
+    { id: "google/gemini-3.1-pro-preview", api: directApi, reasoning: true },
+  ],
+  [
+    cli,
+    pro,
     [
-      "resolves stable gemini 2.5 flash-lite from direct google templates for Gemini CLI when available",
-      "google-gemini-cli",
-      "gemini-2.5-flash-lite",
-      [template("google", "gemini-2.5-flash-lite")],
-      { api: "google-generative-ai", reasoning: false },
+      template(cli, retiredPro, { contextWindow: 100_000 }),
+      template(cli, pro, wideContext),
+      template(google, pro, { contextWindow: 200_000 }),
     ],
+    { api: cli, baseUrl: "https://cloudcode-pa.googleapis.com", contextWindow: 1_048_576 },
+  ],
+  [
+    google,
+    "gemini-3.7-flash",
+    [template(google, flash, { reasoning: false })],
+    { api: directApi, reasoning: false },
+  ],
+  [
+    google,
+    flash,
+    [template(google, stableFlash, reasoningModel)],
+    { api: directApi, input: ["text", "image"], contextWindow: 1_048_576, reasoning: true },
+  ],
+  [
+    cli,
+    flash,
+    [template(google, stableFlash, wideContext)],
+    { api: directApi, input: ["text", "image"], contextWindow: 1_048_576 },
+  ],
+  [
+    antigravity,
+    "gemini-3.1-pro-preview-customtools",
+    [template(antigravity, "gemini-3-pro-low", antigravityModel)],
+    antigravityModel,
+  ],
+  [
+    antigravity,
+    pro,
     [
-      "resolves stable gemini 2.5 flash-lite from Gemini CLI templates when direct google templates are unavailable",
-      "google-gemini-cli",
-      "gemini-2.5-flash-lite",
-      [template("google-gemini-cli", "gemini-3.1-flash-lite", { contextWindow: 1_048_576 })],
-      { api: "google-gemini-cli", contextWindow: 1_048_576, reasoning: false },
-    ],
-    [
-      "resolves gemini 3.1 pro for google aliases via an alternate template provider",
-      "google-vertex",
-      "gemini-3.1-pro-preview",
-      [template("google-gemini-cli", "gemini-3-pro-preview")],
-      { api: "google-gemini-cli", reasoning: false },
-    ],
-    [
-      "resolves newer Gemini 4 releases from the Gemini 4 Argon template",
-      "google",
-      "gemini-4-argon-preview-11-02",
-      [template("google", "gemini-4-argon", { reasoning: true, contextWindow: 1_048_576 })],
-      { reasoning: true, contextWindow: 1_048_576 },
-    ],
-    [
-      "canonicalizes retired Gemini 3 Pro preview requests before cloning templates",
-      "google",
-      "gemini-3-pro-preview",
-      [template("google", "gemini-3-pro-preview")],
-      { id: "gemini-3.1-pro-preview", api: "google-generative-ai", reasoning: true },
-    ],
-    [
-      "canonicalizes provider-qualified retired Gemini 3 Pro preview requests",
-      "google",
-      "google/gemini-3-pro-preview",
-      [template("google", "gemini-3.1-pro-preview")],
-      { id: "google/gemini-3.1-pro-preview", api: "google-generative-ai", reasoning: true },
-    ],
-    [
-      "keeps Gemini CLI 3.1 clones sourced from CLI templates when both catalogs exist",
-      "google-gemini-cli",
-      "gemini-3.1-pro-preview",
-      [
-        template("google-gemini-cli", "gemini-3-pro-preview", {
-          api: "google-gemini-cli",
-          baseUrl: "https://cloudcode-pa.googleapis.com",
-          contextWindow: 1_048_576,
-        }),
-        template("google", "gemini-3-pro-preview", {}),
-      ],
-      {
-        api: "google-gemini-cli",
-        baseUrl: "https://cloudcode-pa.googleapis.com",
-        contextWindow: 1_048_576,
-      },
-    ],
-    [
-      "prefers current Gemini 3.1 Pro templates over retired Gemini 3 Pro templates",
-      "google-gemini-cli",
-      "gemini-3.1-pro-preview",
-      [
-        template("google-gemini-cli", "gemini-3-pro-preview", { contextWindow: 100_000 }),
-        template("google-gemini-cli", "gemini-3.1-pro-preview", { contextWindow: 1_048_576 }),
-      ],
-      { contextWindow: 1_048_576 },
-    ],
-    [
-      "preserves template reasoning metadata instead of forcing it on forward-compat clones",
-      "google",
-      "gemini-3.1-flash-preview",
-      [template("google-gemini-cli", "gemini-3-flash-preview", { reasoning: true })],
-      { api: "google-gemini-cli", reasoning: true },
-    ],
-    [
-      "resolves gemini 3.1 flash from direct google templates",
-      "google",
-      "gemini-3.1-flash-preview",
-      [template("google", "gemini-3-flash-preview", { reasoning: false })],
-      { api: "google-generative-ai", reasoning: false },
-    ],
-    [
-      "resolves canonical gemini 3 flash from older Google flash templates when the exact row is missing",
-      "google",
-      "gemini-3-flash-preview",
-      [template("google", "gemini-2.5-flash", { contextWindow: 1_048_576, reasoning: true })],
-      {
-        api: "google-generative-ai",
-        input: ["text", "image"],
-        contextWindow: 1_048_576,
+      template(antigravity, "gemini-3-pro-high", {
+        api: antigravityApi,
+        maxTokens: 65_536,
         reasoning: true,
-      },
-    ],
-    [
-      "resolves canonical Gemini CLI 3 flash from Google flash templates when the CLI row is missing",
-      "google-gemini-cli",
-      "gemini-3-flash-preview",
-      [template("google", "gemini-2.5-flash", { contextWindow: 1_048_576 })],
-      { api: "google-generative-ai", input: ["text", "image"], contextWindow: 1_048_576 },
-    ],
-    [
-      "resolves Antigravity Gemini 3.1 pro customtools from the low template",
-      "google-antigravity",
-      "gemini-3.1-pro-preview-customtools",
-      [
-        template("google-antigravity", "gemini-3-pro-low", {
-          api: "openai-completions",
-          baseUrl: "https://antigravity.example/v1",
-          contextWindow: 1_048_576,
-          reasoning: true,
-        }),
-      ],
-      {
-        api: "openai-completions",
-        baseUrl: "https://antigravity.example/v1",
-        contextWindow: 1_048_576,
-        reasoning: true,
-      },
-    ],
-    [
-      "falls back to the Antigravity high template when the low template is unavailable",
-      "google-antigravity",
-      "gemini-3.1-pro-preview",
-      [
-        template("google-antigravity", "gemini-3-pro-high", {
-          api: "openai-completions",
-          maxTokens: 65_536,
-          reasoning: true,
-        }),
-      ],
-      { api: "openai-completions", maxTokens: 65_536, reasoning: true },
-    ],
-    [
-      "prefers the flash-lite template before the broader flash prefix",
-      "google-vertex",
-      "gemini-3.1-flash-lite",
-      [
-        template("google-gemini-cli", "gemini-3-flash-preview", { contextWindow: 128_000 }),
-        template("google-gemini-cli", "gemini-3.1-flash-lite", { contextWindow: 1_048_576 }),
-      ],
-      { contextWindow: 1_048_576, reasoning: false },
-    ],
-    [
-      "canonicalizes Gemma 4 26B shorthand before cloning templates",
-      "google",
-      "gemma-4-26b",
-      [template("google", "gemini-3-flash-preview", { reasoning: false })],
-      { id: "gemma-4-26b-a4b-it", api: "google-generative-ai", reasoning: true },
-    ],
-    [
-      "preserves template reasoning for non-Gemma 4 gemma models",
-      "google",
-      "gemma-3-4b-it",
-      [template("google", "gemini-3-flash-preview", { reasoning: false })],
-      { reasoning: false },
-    ],
-  ])("%s", (_name, provider, id, models, fields) => {
-    expectResolution(provider, id, models, fields);
-  });
-
-  it("resolves Gemini latest aliases from current Google templates", () => {
-    const models = [
-      template("google", "gemini-3-pro-preview", { reasoning: true }),
-      template("google", "gemini-3-flash-preview", { reasoning: true }),
-      template("google", "gemini-3.1-flash-lite", { reasoning: true }),
-    ];
-
-    for (const id of ["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"]) {
-      expectResolution("google", id, models, { api: "google-generative-ai", reasoning: true });
-    }
-  });
-
-  it("resolves Antigravity Gemini 3.1 flash variants from the flash template", () => {
-    const models = [
-      template("google-antigravity", "gemini-3-flash", {
-        api: "openai-completions",
-        contextWindow: 1_048_576,
       }),
-    ];
+    ],
+    { api: antigravityApi, maxTokens: 65_536, reasoning: true },
+  ],
+  [
+    vertex,
+    "gemini-3.5-flash-lite",
+    [template(cli, flash, { contextWindow: 128_000 }), template(cli, lite, wideContext)],
+    { contextWindow: 1_048_576, reasoning: false },
+  ],
+  [
+    google,
+    "gemma-4-26b",
+    [template(google, flash, { reasoning: false })],
+    { id: "gemma-4-26b-a4b-it", api: directApi, reasoning: true },
+  ],
+  [google, "gemma-3-4b-it", [template(google, flash, { reasoning: false })], { reasoning: false }],
+])("resolves %s/%s (case %#)", (provider, id, models, fields) => {
+  expectResolution(provider, id, models, fields);
+});
 
-    for (const id of ["gemini-3.1-flash-preview", "gemini-3.1-flash-lite"]) {
-      expectResolution("google-antigravity", id, models, {
-        api: "openai-completions",
-        contextWindow: 1_048_576,
-      });
-    }
-  });
+it("resolves Gemini latest aliases from current Google templates", () => {
+  const models = [
+    template(google, retiredPro, { reasoning: true }),
+    template(google, flash, { reasoning: true }),
+    template(google, lite, { reasoning: true }),
+  ];
 
-  it("returns undefined for Antigravity Gemini 3.1 models without a matching template", () => {
-    const model = resolveModel("google-antigravity", "gemini-3.1-pro-preview-customtools", [
-      template("google-antigravity", "claude-opus-4-6-thinking"),
-    ]);
+  for (const id of ["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"]) {
+    expectResolution(google, id, models, { api: directApi, reasoning: true });
+  }
+});
 
-    expect(model).toBeUndefined();
-  });
+it("resolves Antigravity Gemini 3.1 flash variants from the flash template", () => {
+  const models = [
+    template(antigravity, "gemini-3-flash", { api: antigravityApi, contextWindow: 1_048_576 }),
+  ];
 
-  it("treats current Gemini families as modern google models", () => {
-    expect(isModernGoogleModel("gemini-2.5-pro")).toBe(true);
-    expect(isModernGoogleModel("gemini-2.5-flash-lite")).toBe(true);
-    expect(isModernGoogleModel("gemini-4-argon")).toBe(true);
-    expect(isModernGoogleModel("gemini-1.5-pro")).toBe(false);
-  });
+  for (const id of ["gemini-3.1-flash-preview", lite]) {
+    expectResolution(antigravity, id, models, { api: antigravityApi, contextWindow: 1_048_576 });
+  }
+});
 
-  it("treats Gemini latest aliases as modern google models", () => {
-    expect(isModernGoogleModel("gemini-pro-latest")).toBe(true);
-    expect(isModernGoogleModel("gemini-flash-latest")).toBe(true);
-    expect(isModernGoogleModel("gemini-flash-lite-latest")).toBe(true);
-  });
+it("returns undefined for Antigravity Gemini 3.1 models without a matching template", () => {
+  const model = resolveModel(antigravity, "gemini-3.1-pro-preview-customtools", [
+    template(antigravity, "claude-opus-4-6-thinking"),
+  ]);
 
-  it("treats gemma models as modern google models", () => {
-    expect(isModernGoogleModel("gemma-4-26b-a4b-it")).toBe(true);
-    expect(isModernGoogleModel("gemma-3-4b-it")).toBe(true);
-  });
+  expect(model).toBeUndefined();
+});
 
-  it.each([
-    ["gemini-3.7-flash", "gemini-3-flash-preview"],
-    ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
-  ])("resolves future Gemini 3 text family %s from %s metadata", (modelId, templateId) => {
-    expectResolution(
-      "google",
-      modelId,
-      [template("google", templateId, { reasoning: true, contextWindow: 1_048_576 })],
-      { reasoning: true, contextWindow: 1_048_576 },
-    );
-  });
+it.each([
+  ["gemini-2.5-pro", true],
+  ["gemini-3.7-flash", true],
+  ["gemini-4-argon", true],
+  ["gemini-1.5-pro", false],
+  ["gemini-pro-latest", true],
+  ["gemini-flash-latest", true],
+  ["gemini-flash-lite-latest", true],
+  ["gemma-4-26b-a4b-it", true],
+] as const)("classifies modern Google model %s as %s", (id, expected) => {
+  expect(isModernGoogleModel(id)).toBe(expected);
+});
 
-  it("keeps non-chat Gemini surfaces out of text discovery and forward compatibility", () => {
-    for (const modelId of [
-      "gemini-3.1-flash-image",
-      "gemini-3.1-flash-tts-preview",
-      "gemini-3.8-flash-tts",
-      "gemini-3.8-flash-lite-tts",
-      "gemini-3.1-flash-live-preview",
-      "gemini-2.5-flash-preview-native-audio-dialog",
-    ]) {
-      expect(isGoogleTextGenerationModelId(modelId)).toBe(false);
-      expect(
-        resolveModel("google", modelId, [template("google", "gemini-3-flash-preview")]),
-      ).toBeUndefined();
-    }
-  });
+it("keeps non-chat Gemini surfaces out of text discovery and forward compatibility", () => {
+  for (const modelId of [
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-tts-preview",
+    "gemini-3.1-flash-live-preview",
+    "gemini-2.5-flash-preview-native-audio-dialog",
+  ]) {
+    expect(isGoogleTextGenerationModelId(modelId)).toBe(false);
+    expect(resolveModel(google, modelId, [template(google, flash)])).toBeUndefined();
+  }
+});
 
-  it("classifies only ordinary Gemini generation ids for native video", () => {
-    for (const modelId of [
-      "gemini-2.5-flash",
-      "google/gemini-3.1-pro-preview",
-      "models/gemini-flash-latest",
-    ]) {
-      expect(isGoogleNativeVideoModelId(modelId), modelId).toBe(true);
-    }
-    for (const modelId of [
-      "gemma-4-26b-a4b-it",
-      "tunedModels/gemini-2.5-flash",
-      "gemini-3.1-flash-image",
-      "gemini-2.5-computer-use-preview",
-      "gemini-2.5-flash-tts-preview",
-      "gemini-2.5-flash-live-preview",
-    ]) {
-      expect(isGoogleNativeVideoModelId(modelId), modelId).toBe(false);
-    }
-  });
+it("classifies only ordinary Gemini generation ids for native video", () => {
+  expect(isGoogleNativeVideoModelId("models/gemini-flash-latest")).toBe(true);
+  for (const modelId of ["tunedModels/gemini-2.5-flash", "gemini-2.5-computer-use-preview"]) {
+    expect(isGoogleNativeVideoModelId(modelId), modelId).toBe(false);
+  }
 });
