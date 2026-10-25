@@ -137,8 +137,7 @@ describe("managed local embedding setup health check", () => {
   });
 
   it("snapshots only local agents while preserving their setup findings", async () => {
-    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-setup-mixed-"));
-    roots.add(stateDir);
+    const stateDir = await createState(false);
     for (const agentId of ["default", "disabled", "local"]) {
       await createSemanticIndex(stateDir, "embeddinggemma-300m", agentId);
     }

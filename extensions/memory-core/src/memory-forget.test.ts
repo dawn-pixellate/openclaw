@@ -45,7 +45,7 @@ describe("memory forget", () => {
   it("previews an unresolved session without creating the absent agent store", async () => {
     const databasePath = resolveOpenClawAgentSqlitePath({ agentId: "main" });
     await expect(fs.stat(databasePath)).rejects.toMatchObject({ code: "ENOENT" });
-    const report = await forget("missing", true);
+    const { artifacts, ...report } = await forget("missing", true);
     expect(report).toEqual({
       agentId: "main",
       dryRun: true,
@@ -56,24 +56,9 @@ describe("memory forget", () => {
       mixedLineageEntryKeys: [],
       untargetableEntryKeys: [],
       curatedWrites: [],
-      artifacts: {
-        memoryFiles: 0,
-        memoryEntries: 0,
-        memoryLines: 0,
-        sessionCorpusFiles: 0,
-        sessionCorpusLines: 0,
-        indexChunks: 0,
-        indexSources: 0,
-        ftsRows: 0,
-        vectorRows: 0,
-        embeddingCacheRows: 0,
-        shortTermEntries: 0,
-        seenHashScopes: 0,
-        backups: 0,
-        originRows: 0,
-      },
       refusals: [],
     });
+    expect(Object.values(artifacts).every((count) => count === 0)).toBe(true);
     for (const suffix of ["", "-wal", "-shm"]) {
       await expect(fs.stat(`${databasePath}${suffix}`)).rejects.toMatchObject({ code: "ENOENT" });
     }

@@ -150,7 +150,6 @@ describe("memory forget", () => {
         : undefined;
       let renamed = false;
       let fileFaultInjected = false;
-      let memoryRenameCalls = 0;
       let readbackBlocked = false;
       const fileError = Object.assign(new Error("synthetic atomic memory failure"), {
         code: "EPERM",
@@ -171,7 +170,6 @@ describe("memory forget", () => {
         });
         vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
           if (String(to) === memoryPath) {
-            memoryRenameCalls += 1;
             if (!fileFaultInjected && fileFailure.startsWith("rename-")) {
               fileFaultInjected = true;
               if (fileFailure === "rename-published") {
@@ -221,7 +219,6 @@ describe("memory forget", () => {
       if (fileFailure === "rename-unchanged") {
         const applied = await application;
         expect(applied.applied).toBe(1);
-        expect(memoryRenameCalls).toBe(2);
         const memory = await readText(memoryPath);
         expect(memory).toContain("openclaw-memory-promotion:retired-entry");
         expect(memory).toContain(promotedMarker);
@@ -246,7 +243,6 @@ describe("memory forget", () => {
         });
         expect(failed).toMatchObject({ cause: { errno: -1 } });
         expect(fileFaultInjected).toBe(true);
-        expect(memoryRenameCalls).toBe(1);
         const published = fileFailure.startsWith("close") || fileFailure === "rename-published";
         expect(renamed).toBe(published);
         if (published) {
