@@ -1,4 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createSubscribedSessionHarness } from "../../agents/embedded-agent-subscribe.e2e-harness.js";
+import {
+  createOpenAiResponsesPartial,
+  createOpenAiResponsesTextEvent,
+} from "../../agents/embedded-agent-subscribe.openai-responses.test-helpers.js";
 import type { ModelCatalogSnapshot } from "../../agents/model-catalog.types.js";
 import type { ModelAliasIndex } from "../../agents/model-selection.js";
 import type { ModelDefinitionConfig, OpenClawConfig } from "../../config/config.js";
@@ -8,12 +13,18 @@ import * as activeThinkingPolicy from "../../plugins/provider-thinking-active.js
 import { prepareModelCatalogThinkingPolicies } from "../../plugins/provider-thinking.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import type { FinalizedTemplateContext as TemplateContext } from "../templating.js";
+import type { ReplyPayload } from "../types.js";
 import { createSessionEntry } from "./directive-handling.mixed-inline.test-helpers.js";
 import { clearInlineDirectives } from "./get-reply-directives-utils.js";
 import { resolveReplyDirectives } from "./get-reply-directives.js";
-import { replyDirectiveParams } from "./get-reply-directives.target-session.test-helpers.js";
+import {
+  makeTypingController,
+  replyDirectiveParams,
+} from "./get-reply-directives.target-session.test-helpers.js";
 import { withFastReplyConfig } from "./get-reply-fast-path.test-support.js";
+import { createBlockReplyDeliveryHandler } from "./reply-delivery.js";
 import { buildTestCtx } from "./test-ctx.js";
+import { createTypingSignaler } from "./typing-mode.js";
 
 const mocks = vi.hoisted(() => ({
   apply: vi.fn(),
@@ -21,7 +32,6 @@ const mocks = vi.hoisted(() => ({
   listForWorkspace: vi.fn(),
 }));
 const modelRef = { provider: "anthropic", model: "claude-opus-4-6" };
-const sessionKey = "agent:main:whatsapp:+2000";
 
 const directiveModel: ModelDefinitionConfig = {
   id: "claude-opus-4-6",
@@ -74,24 +84,6 @@ vi.mock("../../skills/discovery/chat-commands.runtime.js", () => ({
 type DirectiveApplyParams = Parameters<
   typeof import("./get-reply-directives-apply.js").applyInlineDirectiveOverrides
 >[0];
-type ResolveParams = Parameters<typeof resolveReplyDirectives>[0];
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  vi.stubEnv("OPENCLAW_TEST_FAST", "1");
-  mocks.listForWorkspace.mockReturnValue([]);
-  mocks.apply.mockImplementation(async (params: DirectiveApplyParams) => ({
-    kind: "continue",
-    directives: params.directives,
-    provider: params.provider,
-    model: params.model,
-    contextTokens: params.contextTokens,
-  }));
-});
-afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllEnvs();
-});
 
 function configWithModelAlias(alias: string, agentId?: string): OpenClawConfig {
   const models = { "anthropic/claude-opus-4-6": { alias } };
@@ -123,13 +115,14 @@ async function resolveModelDirective(params: {
   authorized?: boolean;
   cfg?: OpenClawConfig;
   surface?: string;
-  agentCfg?: ResolveParams["agentCfg"];
-  opts?: ResolveParams["opts"];
+  agentCfg?: Parameters<typeof resolveReplyDirectives>[0]["agentCfg"];
+  opts?: Parameters<typeof resolveReplyDirectives>[0]["opts"];
 }) {
   const authorized = params.authorized ?? true;
   const { body } = params;
   const agentText = params.agentText ?? body;
   const surface = params.surface ?? "whatsapp";
+  const sessionKey = "agent:main:whatsapp:+2000";
   const sessionEntry = createSessionEntry();
   const sessionCtx = {
     Body: agentText,
@@ -192,14 +185,29 @@ async function resolveModelDirective(params: {
 
 describe("reply directive resolution", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("OPENCLAW_TEST_FAST", "1");
     mocks.shouldHandle.mockImplementation(
       (params: { cfg: OpenClawConfig }) => params.cfg.commands?.text !== false,
     );
+    mocks.listForWorkspace.mockReturnValue([]);
+    mocks.apply.mockImplementation(async (params: DirectiveApplyParams) => ({
+      kind: "continue",
+      directives: params.directives,
+      provider: params.provider,
+      model: params.model,
+      contextTokens: params.contextTokens,
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it.each([false, true])(
-    "resolves delivery policy with explicit streaming=%s",
+    "preserves media caption ownership with streaming=%s",
     async (streaming) => {
+      const caption = streaming ? "Attachment caption" : "";
       const { result } = await resolveModelDirective({
         body: "Please send the attachment",
         agentCfg: streaming
@@ -207,10 +215,69 @@ describe("reply directive resolution", () => {
           : {},
         opts: streaming ? { disableBlockStreaming: false } : undefined,
       });
-      expect(continued(result)).toMatchObject({
-        blockStreamingEnabled: streaming,
-        resolvedBlockStreamingBreak: streaming ? "text_end" : "message_end",
+      const resolved = continued(result);
+      const onBlockReply = vi.fn<(payload: ReplyPayload) => void>();
+      const onPartialReply = vi.fn();
+      const handleBlockReply = createBlockReplyDeliveryHandler({
+        onBlockReply,
+        normalizeStreamingText: (payload) => ({ text: payload.text, skip: false }),
+        applyReplyToMode: (payload) => payload,
+        typingSignals: createTypingSignaler({
+          typing: makeTypingController(),
+          mode: "never",
+        }),
+        blockStreamingEnabled: resolved.blockStreamingEnabled,
+        blockReplyPipeline: null,
+        directBlockDeliveries: [],
       });
+      const { emit, subscription } = createSubscribedSessionHarness({
+        runId: "media-caption-directives",
+        onBlockReply: handleBlockReply,
+        onPartialReply,
+        blockReplyBreak: resolved.resolvedBlockStreamingBreak,
+      });
+      const mediaUrl = "/tmp/attachment.txt";
+      const text = `${caption}\nMEDIA:${mediaUrl}`.trimStart();
+      const message = createOpenAiResponsesPartial({
+        text,
+        id: "media-caption",
+        signaturePhase: "final_answer",
+        partialPhase: "final_answer",
+      });
+      try {
+        emit({ type: "message_start", message });
+        for (const type of ["text_delta", "text_end"] as const) {
+          emit(
+            createOpenAiResponsesTextEvent({
+              type,
+              text,
+              partial: message,
+              messagePhase: "final_answer",
+            }),
+          );
+          await subscription.waitForPendingEvents();
+        }
+        emit({ type: "message_end", message });
+        await subscription.waitForPendingEvents();
+        expect(
+          onBlockReply.mock.calls.map(([payload]) => ({
+            text: payload.text ?? "",
+            mediaUrl: payload.mediaUrl,
+          })),
+        ).toEqual(
+          streaming
+            ? [
+                { text: caption, mediaUrl: undefined },
+                { text: "", mediaUrl },
+              ]
+            : [{ text: caption, mediaUrl }],
+        );
+        if (caption) {
+          expect(onPartialReply).toHaveBeenCalledWith(expect.objectContaining({ text: caption }));
+        }
+      } finally {
+        subscription.unsubscribe();
+      }
     },
   );
 
@@ -255,7 +322,7 @@ describe("reply directive resolution", () => {
 
     const { result, sessionEntry } = await resolveModelDirective({
       body,
-      cfg: { commands: { text: true } },
+      cfg: { commands: { text: true } } as OpenClawConfig,
       surface: "webchat",
     });
 
@@ -274,7 +341,7 @@ describe("reply directive resolution", () => {
 
     const { result } = await resolveModelDirective({
       body,
-      cfg: { commands: { text: true } },
+      cfg: { commands: { text: true } } as OpenClawConfig,
       surface: "webchat",
     });
 

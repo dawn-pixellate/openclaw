@@ -18,6 +18,11 @@ function appearance(face: Element) {
   const { opacity, filter } = getComputedStyle(face);
   return { opacity, filter };
 }
+function dimensions(face: Element) {
+  const { width, height } = face.getBoundingClientRect();
+  return [width, height];
+}
+
 function canvasContext(width = 1, height = 1) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -60,9 +65,14 @@ function paintedCounterLuminance(
   // Sample below the text, clear of the unread badge and circular border.
   const scale = image.width / bounds.width;
   const rect = face.getBoundingClientRect();
-  const x = Math.floor((rect.left + rect.width / 2 - bounds.left) * scale);
-  const y = Math.floor((rect.bottom - 3 - bounds.top) * scale);
-  return pixelLuminance(context.getImageData(x, y, 1, 1).data);
+  return pixelLuminance(
+    context.getImageData(
+      Math.floor((rect.left + rect.width / 2 - bounds.left) * scale),
+      Math.floor((rect.bottom - 3 - bounds.top) * scale),
+      1,
+      1,
+    ).data,
+  );
 }
 
 function cutouts(stack: HTMLElement, row: HTMLElement) {
@@ -92,6 +102,7 @@ function sidebarFixture(pinned: boolean) {
   return {
     sidebar,
     row: sidebar.querySelector<HTMLElement>(".sidebar-recent-session")!,
+    indicator: sidebar.querySelector<HTMLElement>(".sidebar-session-indicator")!,
   };
 }
 async function applyTheme(theme: ThemeName, mode: "light" | "dark") {
@@ -122,25 +133,34 @@ async function expectCenteredInk(face: HTMLElement) {
   const foreground = context.getImageData(0, 0, 1, 1).data;
   context.drawImage(image, 0, 0);
   const pixels = context.getImageData(0, 0, image.width, image.height).data;
-  // Exclude the circular edge and peer, then measure only foreground-colored ink.
-  const ink = Array.from(
-    { length: image.width * image.height },
-    (_, pixel) => [pixel % image.width, Math.floor(pixel / image.width)] as const,
-  ).filter(
-    ([x, y]) =>
-      Math.hypot(x + 0.5 - image.width / 2, y + 0.5 - image.height / 2) <= image.width * 0.375 &&
-      [0, 1, 2].every(
-        (channel) =>
-          Math.abs(pixels[(y * image.width + x) * 4 + channel]! - foreground[channel]!) <= 40,
-      ),
-  );
+  let left = image.width,
+    right = -1,
+    top = image.height,
+    bottom = -1;
+  for (let y = 0; y < image.height; y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      // Exclude the circular edge and the peer behind this topmost face.
+      if (Math.hypot(x + 0.5 - image.width / 2, y + 0.5 - image.height / 2) > image.width * 0.375) {
+        continue;
+      }
+      const offset = (y * image.width + x) * 4;
+      if (
+        [0, 1, 2].every(
+          (channel) => Math.abs(pixels[offset + channel]! - foreground[channel]!) <= 40,
+        )
+      ) {
+        left = Math.min(left, x);
+        right = Math.max(right, x);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y);
+      }
+    }
+  }
   const scale = image.width / Number.parseFloat(getComputedStyle(face).width);
-  for (const [coordinates, extent] of [
-    [ink.map(([x]) => x), image.width],
-    [ink.map(([, y]) => y), image.height],
+  for (const [start, end, extent] of [
+    [left, right, image.width],
+    [top, bottom, image.height],
   ] as const) {
-    const start = coordinates.reduce((value, coordinate) => Math.min(value, coordinate), Infinity);
-    const end = coordinates.reduce((value, coordinate) => Math.max(value, coordinate), -Infinity);
     expect(end).toBeGreaterThan(start);
     expect(Math.abs((start + end + 1 - extent) / (2 * scale))).toBeLessThanOrEqual(0.5);
   }
@@ -171,7 +191,7 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
   it.each(
     BUILTIN_THEME_IDS.flatMap((theme) =>
       modes.flatMap((mode) =>
-        (theme === "claw" ? [2, 3, 12, 13] : [12]).flatMap((ownerCount) =>
+        (theme === "claw" ? [2, 3, 5, 12, 13] : [12]).flatMap((ownerCount) =>
           (theme === "claw"
             ? ["present", "running", "away", "unread"]
             : ["present", "away"]
@@ -238,6 +258,11 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
       // One real browser capture contains all four states; sample each counter's pixels below.
       const capture = ownerCount > 2 && presence !== "away" ? await captureFace(sidebar) : null;
       for (const { state, row, stack, primary, peer } of rows) {
+        expect(primary.getAttribute("aria-label")).toBe("Owned by Ada");
+        expect(primary.textContent?.trim()).toBe("A");
+        expect(stack.getAttribute("aria-label")).toBe(
+          ownerCount === 2 ? "Owned by Ada · with Bob" : `Owned by Ada · +${ownerCount - 1} more`,
+        );
         expect(row.matches(":hover")).toBe(state === "hover");
         if (
           theme === "claw" &&
@@ -250,6 +275,19 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
             .toEqual([0, 1].map(() => ({ width: "1px", matchesRow: true })));
         }
         const peerBounds = peer.getBoundingClientRect();
+        const stackBounds = stack.getBoundingClientRect();
+        expect(stackBounds).toMatchObject({ width: 28, height: 20 });
+        const leftToRight = ownerCount === 2 ? [peer, primary] : [primary, peer];
+        for (const [index, face] of leftToRight.entries()) {
+          expect(face.getBoundingClientRect()).toMatchObject({
+            width: 18,
+            height: 18,
+            top: stackBounds.top + 1,
+            left: stackBounds.left + index * 10,
+          });
+        }
+        expect(getComputedStyle(primary).fontSize).toBe(getComputedStyle(peer).fontSize);
+        expect(dimensions(primary.querySelector(".viewer-avatar > span")!)).toEqual([16, 16]);
         const primaryStyle = appearance(primary),
           peerStyle = appearance(peer);
         const opacity = presence === "away" ? "0.45" : "1";
@@ -261,7 +299,6 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
           expect(peerStyle.filter).toBe(primaryStyle.filter);
         }
         if (presence === "running") {
-          const stackBounds = stack.getBoundingClientRect();
           const traceBounds = row.querySelector(".session-glyph__trace")!.getBoundingClientRect();
           expect(traceBounds).toMatchObject({
             left: stackBounds.left - 2,
@@ -281,8 +318,10 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
           }
         }
         if (ownerCount === 2) {
+          expect(dimensions(peer.querySelector("span")!)).toEqual([16, 16]);
           continue;
         }
+        expect(peer.textContent).toBe(`+${ownerCount - 1}`);
         const textRange = document.createRange();
         textRange.selectNodeContents(peer);
         const textBounds = textRange.getBoundingClientRect();
@@ -294,6 +333,7 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
           ).toBe(true);
         }
         const style = getComputedStyle(peer);
+        expect(style.borderTopWidth).toBe("1px");
         if (presence === "away") {
           continue;
         }
@@ -348,6 +388,10 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
       const chip = view.container.querySelector<HTMLElement>("openclaw-session-owner-chip")!;
       await readyAvatars(chip);
       const owner = chip.querySelector<HTMLElement>(".session-owner-chip")!;
+      if (size === "row") {
+        expect(owner.getBoundingClientRect()).toMatchObject({ width: 20, height: 20 });
+        expect(chip.querySelector(".session-owner-stack")).toBeNull();
+      }
       chip.style.zoom = "4";
       await expectCenteredInk(owner);
       if (size === "row") {

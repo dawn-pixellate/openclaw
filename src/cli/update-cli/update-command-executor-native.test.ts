@@ -29,6 +29,97 @@ const sourceImportArgs = resolveRuntimeWorkerUrl(
 const fixture = useExecutorFixture("native-owner-", { controlMode: 0o777 });
 const receipts = useExecutorReceipts();
 
+it("nested native child retains a settled spawner until its descendant finishes", async () => {
+  const { root } = fixture();
+  const proceed = path.join(root, "proceed");
+  const effect = path.join(root, "effect");
+  const bindingFile = path.join(root, "binding");
+  const ownerUrl = resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.executor).href;
+  const leaf = `
+      ${fixtureReceiptClientSource(receipts.channel.endpoint)}
+      import fs from "node:fs";
+      import {setTimeout} from "node:timers/promises";
+      import {json} from "node:stream/consumers";
+      import {withDelegatedUpdateCommandExecutor} from ${JSON.stringify(ownerUrl)};
+      const {grant,proceed,effect}=await json(process.stdin);
+      await withDelegatedUpdateCommandExecutor(grant,grant.runId,grant.root,async fence=>{
+        fs.writeFileSync(${JSON.stringify(bindingFile)},JSON.stringify({rootKey:grant.parent.key,spawnerKey:grant.spawner.key}));
+        sendReceipt(${JSON.stringify(bindingFile)},"ready");
+        while(!fs.existsSync(proceed)) await setTimeout(10);
+        fence.assertCurrent();
+        fs.writeFileSync(effect,"owned");
+      });
+    `;
+  const intermediate = `
+      import {json} from "node:stream/consumers";
+      import {withDelegatedUpdateCommandExecutor,withUpdateCommandExecutorChild} from ${JSON.stringify(ownerUrl)};
+      import {runUtf8CommandWithTimeout} from ${JSON.stringify(resolveRuntimeWorkerUrl(updateExecutorNativeEntrypoints.processExec).href)};
+      const input=await json(process.stdin);
+      await withDelegatedUpdateCommandExecutor(input.grant,input.grant.runId,input.grant.root,async fence=>{
+        const result=await withUpdateCommandExecutorChild(fence,input.grant.root,(grant,beforeInput)=>runUtf8CommandWithTimeout(
+          [process.execPath,...${JSON.stringify(sourceImportArgs)},"--input-type=module","-e",${JSON.stringify(leaf)}],
+          {input:JSON.stringify({...input,grant}),beforeInput,timeoutMs:15000,killProcessTree:true,
+           requireProcessTreeExtinction:true}));
+        if(result.code!==0)throw new Error(result.stderr);
+        fence.assertCurrent();
+      });
+    `;
+  const run = withUpdateCommandExecutor(randomUUID(), async (executor) => {
+    const fence = await executor.enter(root);
+    const pending = withUpdateCommandExecutorChild(fence, root, (grant, beforeInput) =>
+      runUtf8CommandWithTimeout(
+        [process.execPath, ...sourceImportArgs, "--input-type=module", "-e", intermediate],
+        {
+          input: JSON.stringify({ grant, proceed, effect }),
+          beforeInput,
+          timeoutMs: 20_000,
+          killProcessTree: true,
+          requireProcessTreeExtinction: true,
+        },
+      ),
+    );
+    try {
+      await receipts.ready(bindingFile, pending);
+      const binding = JSON.parse(fs.readFileSync(bindingFile, "utf8"));
+      expect(binding.rootKey).toBe(root);
+      expect(binding.spawnerKey).not.toBe(root);
+      const store = createManagedHandoffLeaseStore();
+      expect(store.acquire(root, "replacement", { kind: "update" }).kind).toBe("busy");
+      const spawner = store.read(binding.spawnerKey);
+      if (spawner.kind !== "current") {
+        throw new Error("Missing admitted spawner");
+      }
+      // Simulate a settled intermediate without killing either real child.
+      // Its live descendant must still block release of the spawner row.
+      using spies = new DisposableStack();
+      const isDead = pidAlive.isPidDefinitelyDead;
+      const isTreeAlive = processTree.isChildProcessTreeAlive;
+      spies.use(
+        vi
+          .spyOn(pidAlive, "isPidDefinitelyDead")
+          .mockImplementation((pid) => pid === spawner.lease.executor.pid || isDead(pid)),
+      );
+      spies.use(
+        vi
+          .spyOn(processTree, "isChildProcessTreeAlive")
+          .mockImplementation(
+            (child) => child.pid !== spawner.lease.executor.pid && isTreeAlive(child),
+          ),
+      );
+      expect(store.release(spawner.lease), "live descendant retains intermediate custody").toBe(
+        false,
+      );
+    } finally {
+      fs.writeFileSync(proceed, "go");
+    }
+    const result = await pending;
+    expect(result.code, result.stderr).toBe(0);
+  });
+  await run;
+  expect(fs.readFileSync(effect, "utf8")).toBe("owned");
+  expect(createManagedHandoffLeaseStore().read(root).kind).toBe("absent");
+});
+
 // Compose real root -> spawner -> registered receiver -> native/config writers.
 // Only database LOCATION and scheduling barriers are fixtures, never authority.
 it

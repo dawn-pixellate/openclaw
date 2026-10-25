@@ -14,6 +14,7 @@ import { waitForSolid } from "../test-helpers/solid-settle.ts";
 import "./markdown-mermaid.tsx";
 import { handleMarkdownCodeBlockClick } from "./markdown-code-blocks.ts";
 import { handleMarkdownTableInteraction, releaseMarkdownTables } from "./markdown-tables.ts";
+import { CopyButton } from "./solid/copy-button.tsx";
 
 const owners: HTMLElement[] = [];
 const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
@@ -22,9 +23,9 @@ const writeText = vi.fn<(text: string) => Promise<void>>();
 const fallbackCopies: string[] = [];
 const selectors = { code: ".code-block-copy", table: ".markdown-table__copy" };
 
-function expectClipboard(text: string) {
+function expectClipboard(text: string, fallback: string[] = []) {
   expect(clipboard).toBe(text);
-  expect(fallbackCopies).toEqual([]);
+  expect(fallbackCopies).toEqual(fallback);
 }
 
 beforeEach(() => {
@@ -68,7 +69,7 @@ async function waitForDiagram(diagram: HTMLElement) {
   await diagram.querySelector("img")!.decode();
 }
 
-async function mountCopy(surface: "code" | "table" | "mermaid") {
+async function mountCopy(surface: "code" | "table" | "mermaid" | "message") {
   const owner = document.body.appendChild(document.createElement("section"));
   owners.push(owner);
   owner.className = "chat-text";
@@ -87,13 +88,17 @@ async function mountCopy(surface: "code" | "table" | "mermaid") {
       surface === "code" ? handleMarkdownCodeBlockClick : handleMarkdownTableInteraction,
     );
     button = owner.querySelector(selectors[surface]);
-  } else {
+  } else if (surface === "mermaid") {
     const diagram = document.createElement("openclaw-mermaid");
     diagram.source = "flowchart LR\nA --> B";
     owner.append(diagram);
     await diagram.updateComplete;
     await waitForDiagram(diagram);
     button = diagram.querySelector(".copy-button");
+  } else {
+    mountSolid(() => <CopyButton text="Current message" bare />, { container: owner });
+    flush();
+    button = owner.querySelector("button");
   }
   if (!button) {
     throw new Error(`Missing ${surface} copy control`);
@@ -184,15 +189,27 @@ describe("Markdown clipboard operation lifetime", () => {
         });
         const owner = document.body.appendChild(document.createElement("section"));
         owners.push(owner);
-        const images = [
-          {
-            url: `/api/chat/media/outgoing/agent%3Amain%3Amain/${crypto.randomUUID()}/full`,
-            alt: "Synthetic image",
-          },
-        ];
-        mountSolid(() => <MessageImages images={images} />, { container: owner });
+        mountSolid(
+          () => (
+            <MessageImages
+              images={[
+                {
+                  url: `/api/chat/media/outgoing/agent%3Amain%3Amain/${crypto.randomUUID()}/full`,
+                  alt: "Synthetic image",
+                },
+              ]}
+            />
+          ),
+          { container: owner },
+        );
         await waitForSolid(() => expect(owner.querySelector(".chat-image-action")).not.toBeNull());
-        copy = () => owner.querySelector<HTMLButtonElement>('[aria-label="Copy image"]')!.click();
+        copy = async () => {
+          owner
+            .querySelector<HTMLButtonElement>(
+              '.chat-image-actions button[aria-label="Copy image"]',
+            )!
+            .click();
+        };
       } else {
         const frame = document.body.appendChild(document.createElement("iframe"));
         owners.push(frame);
@@ -228,6 +245,14 @@ describe("Markdown clipboard operation lifetime", () => {
     },
   );
 
+  it("copies browser-card URLs when the Clipboard API is absent on plain HTTP", async () => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    const browser = await mountBrowserCard();
+    await browser.copy();
+    await flushCopy();
+    expectClipboard("https://example.com/document", ["https://example.com/document"]);
+  });
+
   it("keeps a newer browser URL copy when older code copying rejects", async () => {
     const pending = delayFirstWrite();
     const code = await mountCopy("code");
@@ -235,8 +260,7 @@ describe("Markdown clipboard operation lifetime", () => {
     code.button.click();
     await browser.copy();
     await flushCopy();
-    expectClipboard("https://example.com/document");
-    expect(code.button.isConnected).toBe(true);
+    expect(clipboard).toBe("https://example.com/document");
     await rejectCopy(pending);
     expectClipboard("https://example.com/document");
   });
@@ -258,7 +282,7 @@ describe("Markdown clipboard operation lifetime", () => {
     },
   );
 
-  it.each(["code", "table", "mermaid"] as const)(
+  it.each(["code", "table", "mermaid", "message"] as const)(
     "does not start fallback after the %s control is retired",
     async (surface) => {
       const pending = delayFirstWrite();
@@ -270,6 +294,19 @@ describe("Markdown clipboard operation lifetime", () => {
       expectClipboard("original clipboard");
     },
   );
+
+  it("preserves the newer copy when an older connected code control rejects", async () => {
+    const pending = delayFirstWrite();
+    const older = await mountCopy("code");
+    const newer = await mountCopy("message");
+    older.button.click();
+    newer.button.click();
+    await flushCopy();
+    expect(clipboard).toBe("Current message");
+    expect(older.button.isConnected).toBe(true);
+    await rejectCopy(pending);
+    expectClipboard("Current message");
+  });
 
   it.each(
     (["code", "table"] as const).flatMap((surface) =>
@@ -351,12 +388,15 @@ describe("Markdown clipboard operation lifetime", () => {
     expect(button.getAttribute("aria-label")).toBe("Copied!");
   });
 
-  it("keeps fallback available for the current Mermaid control", async () => {
-    writeText.mockRejectedValueOnce(new Error("Synthetic clipboard rejection"));
-    const { button } = await mountCopy("mermaid");
-    button.click();
-    await flushCopy();
-    expect(fallbackCopies).toEqual([writeText.mock.calls[0]![0]]);
-    expect(button.getAttribute("aria-label")).toBe("Copied!");
-  });
+  it.each(["code", "table", "mermaid", "message"] as const)(
+    "keeps fallback available for the current %s control",
+    async (surface) => {
+      writeText.mockRejectedValueOnce(new Error("Synthetic clipboard rejection"));
+      const { button } = await mountCopy(surface);
+      button.click();
+      await flushCopy();
+      expect(fallbackCopies).toEqual([writeText.mock.calls[0]![0]]);
+      expect(button.getAttribute("aria-label")).toBe("Copied!");
+    },
+  );
 });

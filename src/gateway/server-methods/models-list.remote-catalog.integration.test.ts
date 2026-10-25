@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ModelsListResult } from "../../../packages/gateway-protocol/src/schema/agents-models-skills.js";
@@ -14,6 +14,7 @@ import { registerPreparedModelRuntimePublicationListener } from "../../agents/pr
 import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import * as updateStartup from "../../infra/update-startup.js";
+import { redactSensitiveText } from "../../logging/redact.js";
 import * as bundledStamp from "../../model-catalog/bundled-catalog-stamp.js";
 import * as pricing from "../../model-catalog/pricing.js";
 import { setRemoteModelCatalogOverlaySourcesForTest } from "../../model-catalog/remote-overlay.test-support.js";
@@ -82,18 +83,21 @@ it.for([1, 2])(
     let body = encode(first);
     let exitWorkerOnce = false;
     let providerThread = 0;
-    const endpoint = createServer((request, response) => {
+    const replyProvider = (response: ServerResponse) => {
       response.writeHead(200, { "content-type": "application/json" });
+      const payload = exitWorkerOnce ? { exitWorker: true } : ["known-provider-model"];
+      exitWorkerOnce = false;
+      response.end(JSON.stringify(payload));
+    };
+    const endpoint = createServer((request, response) => {
       if (request.url === "/catalog.json") {
+        response.writeHead(200, { "content-type": "application/json" });
         response.end(body);
       } else {
         providerThread = Number(
           new URL(request.url ?? "/", "http://fixture.invalid").searchParams.get("thread"),
         );
-        response.end(
-          JSON.stringify(exitWorkerOnce ? { exitWorker: true } : ["known-provider-model"]),
-        );
-        exitWorkerOnce = false;
+        replyProvider(response);
       }
     });
     try {
@@ -162,7 +166,10 @@ it.for([1, 2])(
         createCatalogAuthProfiles({ [provider]: "catalog-fixture-key" }),
       );
       setRemoteModelCatalogOverlaySourcesForTest({ bundledGeneratedAt });
-      expect((await refresh()).status).toBe("updated");
+      const initialRefresh = await refresh();
+      expect(initialRefresh.status, redactSensitiveText(JSON.stringify(initialRefresh))).toBe(
+        "updated",
+      );
       await using gateway = await startModelsGateway(state, cfg, token, {
         hotReloadRecovery: unexpectedRestart,
       });
@@ -184,10 +191,6 @@ it.for([1, 2])(
         const list = (refreshCatalog = false) =>
           client.request<ModelsListResult>("models.list", { view: "all", refresh: refreshCatalog });
         const kimiIds = (catalog: ModelsListResult) => catalogModelIds(catalog, "kimi");
-        const hasProvider = (catalog: ModelsListResult) =>
-          catalog.models.some(
-            (row) => row.provider === provider && row.id === "known-provider-model",
-          );
         const waitForRows = async (
           model: string,
           isReady: (catalog: ModelsListResult) => boolean = () => true,
@@ -213,29 +216,30 @@ it.for([1, 2])(
           }
         };
         const price = (config: OpenClawConfig, model = "remote-first") =>
-          resolveModelCostConfig({ config, agentDir: state.agentDir(), provider: "kimi", model })
-            ?.input;
+          resolveModelCostConfig({
+            config,
+            agentDir: state.agentDir(),
+            provider: "kimi",
+            model,
+          })?.input;
         const currentPrice = (model = "remote-first") => price(getRuntimeConfig(), model);
-        const restartWorker = async (model: string) => {
-          const previousThread = providerThread;
-          exitWorkerOnce = true;
+        const settleInterrupted = async (pending: Promise<ModelsListResult>) => {
           await withinTest(
-            list(true).catch((error: unknown) => {
+            pending.catch((error: unknown) => {
               expect(error).toMatchObject({ code: "UNAVAILABLE" });
             }),
             signal,
           );
-          await loadPublishedGatewayReplyDispatchRuntime({ agentId: "main" });
-          const catalog = await list(true);
-          await waitForRows(model, () => providerThread !== previousThread);
-          expect(providerThread).not.toBe(previousThread);
-          return catalog;
         };
         expect(kimiIds(await list(true))).toContain("remote-first");
         // Remote rows can precede executable provider publication; admit only its completed pair.
         await waitForRows(
           "remote-first",
-          (catalog) => !catalog.pendingProviders?.length && hasProvider(catalog),
+          (catalog) =>
+            !catalog.pendingProviders?.length &&
+            catalog.models.some(
+              (row) => row.provider === provider && row.id === "known-provider-model",
+            ),
         );
         const config = getRuntimeConfig();
         const input = {
@@ -261,12 +265,17 @@ it.for([1, 2])(
         for (const catalog of saved) {
           expect(kimiIds(catalog)).toContain("remote-first");
           expect(kimiIds(catalog)).not.toContain("remote-next");
-          expect(hasProvider(catalog)).toBe(true);
+          expect(
+            catalog.models.some(
+              (row) => row.provider === provider && row.id === "known-provider-model",
+            ),
+          ).toBe(true);
         }
         expect(price(config)).toBe(1);
         pausePublication = false;
         commit.resolve();
-        await waitForRows("remote-next");
+        const published = await waitForRows("remote-next");
+        expect(kimiIds(published)).toContain("remote-next");
         expect(price(config, "remote-next")).toBe(9);
         expect(
           withPreparedModelRuntimePluginGenerationScope(oldRun.pluginGeneration, () =>
@@ -298,7 +307,9 @@ it.for([1, 2])(
         const releaseRetained = retainPreparedPluginGeneration(retained.pluginGeneration);
         try {
           const retainedCatalog = expectDefined(
-            await retained.snapshot.loadFullModelCatalog?.({ refresh: true }),
+            await retained.snapshot.loadFullModelCatalog?.({
+              refresh: true,
+            }),
             "retained catalog",
           );
           const retainedIds = catalogModelIds({ models: retainedCatalog.entries }, "kimi");
@@ -309,7 +320,28 @@ it.for([1, 2])(
           await releaseRetained();
           await retainedBuild.completion;
         }
-        expect(kimiIds(await restartWorker("remote-next"))).toContain("remote-next");
+        for (const rejected of [
+          "{",
+          JSON.stringify({ ...next, generatedAt: generatedAt + 2, minVersion: "9999.1.1" }),
+        ]) {
+          body = rejected;
+          expect((await refresh()).status).toBe("error");
+          expect(kimiIds(await list())).toContain("remote-next");
+          expect(price(config)).toBe(7);
+        }
+        body = encode(first);
+        const stale = await refresh();
+        expect(stale).toMatchObject({ status: "unchanged", generatedAt: generatedAt + 1 });
+        expect(kimiIds(await list())).toContain("remote-next");
+        expect(price(config)).toBe(7);
+
+        const committedThread = providerThread;
+        exitWorkerOnce = true;
+        await settleInterrupted(list(true));
+        await loadPublishedGatewayReplyDispatchRuntime({ agentId: "main" });
+        expect(kimiIds(await list(true))).toContain("remote-next");
+        await waitForRows("remote-next", () => providerThread !== committedThread);
+        expect(providerThread).not.toBe(committedThread);
         expect(currentPrice()).toBe(7);
 
         const finalCatalog = makeCatalog(2, [
@@ -320,7 +352,7 @@ it.for([1, 2])(
         body = encode(finalCatalog);
         expect((await refresh()).status).toBe("updated");
         await list(true);
-        await waitForRows("remote-last");
+        expect(kimiIds(await waitForRows("remote-last"))).toContain("remote-last");
         expect(currentPrice()).toBe(11);
         expect(currentPrice("remote-last")).toBe(13);
         expect(oldModel.cost.input).toBe(1);
@@ -336,8 +368,14 @@ it.for([1, 2])(
         expect(kimiIds(withoutRemote)).not.toContain("remote-next");
         expect(kimiIds(withoutRemote)).not.toContain("remote-last");
         expect(currentPrice("remote-last")).toBeUndefined();
-        expect(kimiIds(await restartWorker("remote-first"))).not.toContain("remote-last");
+        const disabledThread = providerThread;
+        exitWorkerOnce = true;
+        await settleInterrupted(list(true));
+        await loadPublishedGatewayReplyDispatchRuntime({ agentId: "main" });
+        expect(kimiIds(await list(true))).not.toContain("remote-last");
+        await waitForRows("remote-first", () => providerThread !== disabledThread);
         expect(currentPrice("remote-last")).toBeUndefined();
+        expect(providerThread).not.toBe(disabledThread);
         expect([oldModel.cost.input, newModel.cost.input]).toEqual([1, 7]);
         expect(unexpectedRestart).not.toHaveBeenCalled();
       } finally {

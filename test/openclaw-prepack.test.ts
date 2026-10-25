@@ -12,7 +12,9 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as tar from "tar";
 import { afterEach, expect, it } from "vitest";
+import { pnpmLockfileDocuments } from "../scripts/lib/pnpm-lockfile-documents.mjs";
 import { restorePrepackArtifacts } from "../scripts/openclaw-postpack.mjs";
 import {
   collectSourcePackWorkspaceDependencyErrors,
@@ -50,6 +52,12 @@ function run(
   options: { env?: NodeJS.ProcessEnv; timeout?: number } = {},
 ) {
   return spawnSync(command, args, { encoding: "utf8", stdio: piped, cwd, ...options });
+}
+const rootPackageManager = (JSON.parse(read(".", "package.json")) as { packageManager: string })
+  .packageManager;
+const rootPnpmEnvironment = pnpmLockfileDocuments(read(".", "pnpm-lock.yaml")).environment;
+if (!rootPnpmEnvironment) {
+  throw new Error("pnpm-lock.yaml is missing its environment document");
 }
 
 const standaloneBundledChannelSmokeFiles = [
@@ -143,6 +151,63 @@ function createPreparedPrepackFixture(entrySource: string) {
   };
   writeFiles(rootDir, sourceFiles);
   return { rootDir, sourceFiles };
+}
+
+function runPreparedPrepack() {
+  const { rootDir, sourceFiles } = createPreparedPrepackFixture(validChannelEntry);
+  const packageJson = JSON.parse(sourceFiles["package.json"]);
+  Object.assign(packageJson, {
+    packageManager: rootPackageManager,
+    devDependencies: { "@openclaw/session-url-contract": "workspace:*" },
+    scripts: {
+      "build:package": "node rebuild.mjs",
+      "update:compat:check": "node check-update-compat.mjs",
+      prepack: "node lifecycle.mjs prepack",
+      postpack: "node lifecycle.mjs postpack",
+    },
+  });
+  sourceFiles["package.json"] = `${JSON.stringify(packageJson, null, 2)}\n`;
+  sourceFiles["CHANGELOG.md"] += "\n## 2026.7.1\n- Previous release notes with enough detail.\n";
+  // Without the toolchain lock, pnpm 12 resolves registry metadata before running prepack.
+  writeFiles(rootDir, {
+    "package.json": sourceFiles["package.json"],
+    "pnpm-lock.yaml": `---\n${rootPnpmEnvironment}\n---\nlockfileVersion: '9.0'\nimporters: {}\n`,
+    "CHANGELOG.md": sourceFiles["CHANGELOG.md"],
+    "docs/docs_map.md": "Source docs-map stub.\n",
+    "rebuild.mjs":
+      'import { writeFileSync } from "node:fs";\n' +
+      'writeFileSync("build-invoked", "build:package\\n");\n',
+    "check-update-compat.mjs":
+      'import { writeFileSync } from "node:fs";\n' +
+      'writeFileSync("compat-check-invoked", "update:compat:check\\n");\n',
+    "lifecycle.mjs": `import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const ownerArgs = process.argv[2] === "prepack"
+  ? ${JSON.stringify(resolveRuntimeWorkerArgv(resolveRuntimeWorkerUrl(toolingTsEntrypoints.prepack), testNodeExecPath))}
+  : [${JSON.stringify(path.resolve("scripts/openclaw-postpack.mjs"))}];
+const result = spawnSync(process.execPath, ownerArgs, { encoding: "utf8" });
+writeFileSync(process.argv[2] + "-result.json", JSON.stringify({ status: result.status, signal: result.signal, stdout: result.stdout, stderr: result.stderr }));
+process.stdout.write(result.stdout ?? "");
+process.stderr.write(result.stderr ?? "");
+process.exit(result.status ?? 1);
+`,
+  });
+  const packDir = path.join(rootDir, "pack");
+  mkdirSync(packDir);
+  const result = run("pnpm", ["pack", "--silent", "--pack-destination", packDir], rootDir, {
+    env: {
+      ...process.env,
+      TSX_TSCONFIG_PATH: path.resolve("tsconfig.json"),
+      OPENCLAW_PREPACK_PREPARED: "1",
+    },
+    timeout: 30_000,
+  });
+  // pnpm may suppress lifecycle output; observe the actual hook before its reporter.
+  const lifecycle = JSON.parse(read(rootDir, "prepack-result.json")) as {
+    status: number | null;
+    signal: NodeJS.Signals | null;
+  };
+  return { rootDir, result, lifecycle };
 }
 
 function runStandaloneBundledChannelSmoke(entrySource: string) {
@@ -257,45 +322,59 @@ it.each([false, true])(
   },
 );
 
-it("prepares existing artifacts without invoking build or updater commands", () => {
-  const { rootDir, sourceFiles } = createPreparedPrepackFixture(validChannelEntry);
-  writeFiles(rootDir, {
-    "package.json": JSON.stringify({
-      ...JSON.parse(sourceFiles["package.json"]),
-      devDependencies: { "@openclaw/session-url-contract": "workspace:*" },
-      scripts: { "build:package": "exit 91", "update:compat:check": "exit 92" },
-    }),
-  });
-  const result = run(
-    testNodeExecPath,
-    resolveRuntimeWorkerArgv(
-      resolveRuntimeWorkerUrl(toolingTsEntrypoints.prepack),
-      testNodeExecPath,
-    ),
-    rootDir,
-    {
-      timeout: 30_000,
-      env: {
-        ...process.env,
-        TSX_TSCONFIG_PATH: path.resolve("tsconfig.json"),
-        OPENCLAW_PREPACK_PREPARED: "1",
-      },
-    },
-  );
-  expect([result.error, result.signal, result.status], result.stderr).toEqual([undefined, null, 0]);
+it("packs prepared packages without rebuilding or consulting live npm updater coverage", () => {
+  const { rootDir, result, lifecycle } = runPreparedPrepack();
+  expect(result.error).toBeUndefined();
+  expect(lifecycle).toMatchObject({ status: 0, signal: null });
+  expectAbsent(rootDir, "compat-check-invoked", "build-invoked");
 });
 
-it("rejects plain source packing unless workspace dependencies are prepared", () => {
+it("rejects the plain source pack that pnpm rewrites without bundling @openclaw/ai", () => {
   const rootDir = tempDirs.make("openclaw-source-pack-workspace-");
   const aiDir = path.join(rootDir, "packages", "ai");
+  const packDir = path.join(rootDir, "pack");
+  const extractDir = path.join(rootDir, "extract");
+  const version = "2099.1.2-test.0";
   const rootPackageJson = {
     dependencies: { "@openclaw/ai": "workspace:*" },
     name: "openclaw-source-pack-regression",
+    packageManager: rootPackageManager,
+    version,
   };
+  mkdirSync(packDir);
+  mkdirSync(extractDir);
   writeFiles(rootDir, {
     "package.json": `${JSON.stringify(rootPackageJson, null, 2)}\n`,
-    "packages/ai/package.json": '{"name":"@openclaw/ai"}\n',
+    "pnpm-workspace.yaml": 'packages:\n  - "packages/*"\n',
+    "packages/ai/package.json": `${JSON.stringify({ name: "@openclaw/ai", version }, null, 2)}\n`,
   });
+
+  const install = run("pnpm", ["install", "--ignore-scripts", "--reporter=silent"], rootDir);
+  expect(install.status, install.stderr).toBe(0);
+  const packed = run(
+    "pnpm",
+    ["pack", "--config.ignore-scripts=true", "--json", "--pack-destination", packDir],
+    rootDir,
+  );
+  expect(packed.status, packed.stderr).toBe(0);
+  const packResult = JSON.parse(packed.stdout) as { filename: string } | { filename: string }[];
+  const filename = Array.isArray(packResult) ? packResult[0]?.filename : packResult.filename;
+  expect(filename).toBeTruthy();
+  const tarballPath = path.resolve(packDir, path.basename(filename ?? ""));
+  tar.x({ cwd: extractDir, file: tarballPath, sync: true });
+
+  const packedPackageJson = JSON.parse(read(extractDir, "package/package.json")) as {
+    bundleDependencies?: string[];
+    dependencies?: Record<string, string>;
+  };
+  expect(packedPackageJson.dependencies?.["@openclaw/ai"]).toBe(version);
+  expect(packedPackageJson.bundleDependencies).toBeUndefined();
+  expectAbsent(
+    path.join(extractDir, "package"),
+    "node_modules/@openclaw/ai",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+  );
   const errors = (env: NodeJS.ProcessEnv = {}) =>
     collectSourcePackWorkspaceDependencyErrors(rootPackageJson, env);
   expect(errors()).toEqual([

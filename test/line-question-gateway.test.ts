@@ -93,8 +93,9 @@ type Scenario = {
   paired: boolean;
   policy: "pairing" | "allowlist";
   lookup: "pending" | "terminal" | "failed";
-  revoke: "none" | "read" | "push";
+  revoke: "none" | "read" | "reply" | "push";
   push: "success" | "server-error" | "transport-error";
+  reply: "success" | "reject" | "partial";
   replyToken: string;
 };
 type Counts = readonly [writes: number, replies: number, pushes: number, pairings: number];
@@ -111,6 +112,9 @@ const scenarios: ScenarioRow[] = [
   ]),
   ["allowed terminal notice", {}, [0, 1, 0, 0]],
   ["failed lookup notice", { lookup: "failed" }, [0, 1, 0, 0]],
+  ["revoked failed reply prevents push", { revoke: "reply", reply: "reject" }, [0, 1, 0, 0]],
+  ["failed reply falls back to push", { reply: "reject" }, [0, 1, 1, 0]],
+  ["partial reply never pushes", { reply: "partial" }, [0, 1, 0, 0]],
   ["revoked tokenless notice", { revoke: "read", replyToken: "" }, [0, 0, 0, 0]],
   ...(["server-error", "transport-error"] as const).flatMap<ScenarioRow>((push) => [
     [`revoked ${push} retry`, { replyToken: "", revoke: "push", push }, [0, 0, 1, 0]],
@@ -128,6 +132,7 @@ it.each(scenarios)(
       lookup: "terminal",
       revoke: "none",
       push: "success",
+      reply: "success",
       replyToken: "reply-token",
       ...overrides,
     };
@@ -135,10 +140,13 @@ it.each(scenarios)(
     const revoke = (stage: Scenario["revoke"]) => {
       if (testCase.revoke === stage) {
         boundary.paired = [];
+        boundary.trace.push("pairing:revoked");
       }
     };
     boundary.paired = testCase.paired ? [userId] : [];
+    let questionStatus = testCase.lookup === "terminal" ? "answered" : "pending";
     boundary.callGateway.mockImplementation(async ({ method }) => {
+      boundary.trace.push(method);
       if (method === "question.get") {
         revoke("read");
         if (testCase.lookup === "failed") {
@@ -146,7 +154,7 @@ it.each(scenarios)(
         }
         return {
           question: {
-            status: testCase.lookup === "terminal" ? "answered" : "pending",
+            status: questionStatus,
             questions: [
               {
                 questionId: "deploy_target",
@@ -157,11 +165,12 @@ it.each(scenarios)(
         };
       }
       if (method === "question.resolve") {
-        return { status: "answered" };
+        questionStatus = "answered";
+        return { status: questionStatus };
       }
       throw new Error(`Unexpected Gateway method: ${method}`);
     });
-    const providerCalls: Array<{ operation: string; body: unknown }> = [];
+    const providerCalls: Array<{ operation: string; body: unknown; retryKey: string | null }> = [];
     const unexpectedProviderIo: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -193,7 +202,18 @@ it.each(scenarios)(
         );
         const operation = url.pathname === "/v2/bot/message/reply" ? "reply" : "push";
         requireIo(typeof init?.body === "string", "Expected JSON string request body");
-        providerCalls.push({ operation, body: JSON.parse(init.body) });
+        let requestBody: unknown;
+        try {
+          requestBody = JSON.parse(init.body);
+        } catch {
+          requireIo(false, "Invalid JSON request body");
+        }
+        providerCalls.push({
+          operation,
+          body: requestBody,
+          retryKey: new Headers(init?.headers).get("X-Line-Retry-Key"),
+        });
+        boundary.trace.push(`line:${operation}`);
         if (
           operation === "push" &&
           testCase.push !== "success" &&
@@ -204,6 +224,15 @@ it.each(scenarios)(
             throw Object.assign(new Error("Fixture socket reset"), { code: "ECONNRESET" });
           }
           return Response.json({ message: "Fixture server error" }, { status: 500 });
+        }
+        if (operation === "reply") {
+          revoke("reply");
+          if (testCase.reply === "reject") {
+            return Response.json({ message: "Invalid reply token" }, { status: 400 });
+          }
+          if (testCase.reply === "partial") {
+            return new Response("not-json", { status: 200 });
+          }
         }
         return Response.json({ sentMessages: [{ id: `message-${providerCalls.length}` }] });
       }),
@@ -224,6 +253,7 @@ it.each(scenarios)(
     });
     runtime.channel.inbound.run = runTurn;
     const plugin = lineEntry.loadChannelPlugin({ createLoaderForTest: createEntryLoader });
+    expect(plugin).toBe(linePublicApi.linePlugin);
     runtimeStore.setRuntime(runtime);
     const cfg: OpenClawConfig = {
       channels: {
@@ -304,14 +334,26 @@ it.each(scenarios)(
         providerCalls.filter((request) => request.operation === "reply").length,
         providerCalls.filter((request) => request.operation === "push").length,
       ]).toEqual([replies, pushes]);
+      const pushKeys = providerCalls
+        .filter((request) => request.operation === "push")
+        .map((request) => request.retryKey);
+      expect([...new Set(pushKeys)]).toEqual(pushes ? [expect.any(String)] : []);
       expect(boundary.upsertPairing).toHaveBeenCalledTimes(pairings);
       expect(runTurn).not.toHaveBeenCalled();
       if (writes) {
+        expect(questionStatus).toBe("answered");
         expect(calls.at(-1)?.params).toEqual({
           id: questionId,
           answers: { answers: { deploy_target: ["Production"] } },
           resolvedBy: userId,
         });
+      }
+      if (writes || testCase.revoke === "read") {
+        expect(boundary.trace).toEqual([
+          "store:allowed",
+          "question.get",
+          ...(writes ? ["store:allowed", "question.resolve"] : ["pairing:revoked", "store:denied"]),
+        ]);
       }
     } finally {
       abort.abort();

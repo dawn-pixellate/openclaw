@@ -15,6 +15,7 @@ vi.mock("../agents/embedded-agent-runner/runs.js", () => {
 
 function createDeps(options: {
   activeSessionId?: string;
+  unconfirmed?: boolean;
   activity?: RealtimeVoiceAgentRunActivity;
 }) {
   return {
@@ -35,6 +36,9 @@ function createDeps(options: {
         target: "embedded_run" as const,
         gatewayHealth: "live" as const,
         enqueuedAtMs: 123,
+        ...(options.unconfirmed
+          ? { transcriptCommit: "unconfirmed" as const, errorMessage: "receipt unavailable" }
+          : {}),
       }),
     ),
     getDiagnosticSessionActivitySnapshot: vi.fn(() => options.activity ?? {}),
@@ -193,7 +197,6 @@ describe("controlRealtimeVoiceAgentRun", () => {
       active: true,
       queued: true,
       speak: true,
-      show: true,
       suppress: false,
     });
     expect(deps.queueEmbeddedAgentMessageWithOutcomeAsync).toHaveBeenCalledWith(
@@ -206,6 +209,22 @@ describe("controlRealtimeVoiceAgentRun", () => {
         taskSuggestionDeliveryMode: undefined,
       },
     );
+  });
+
+  it("reports unconfirmed followup without claiming success or sending again", async () => {
+    const deps = createDeps({ activeSessionId: "session-active", unconfirmed: true });
+    const result = await control({ text: "continue", mode: "followup" }, deps);
+    expect(result).toMatchObject({
+      ok: false,
+      queued: true,
+      reason: "delivery_unconfirmed",
+      speak: true,
+      show: true,
+      suppress: false,
+    });
+    expect(result.message).toContain("could not confirm");
+    expect(result.message).toContain("not sent again");
+    expect(deps.queueEmbeddedAgentMessageWithOutcomeAsync).toHaveBeenCalledOnce();
     expect(deps.abortEmbeddedAgentRun).not.toHaveBeenCalled();
   });
 
