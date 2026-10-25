@@ -11,6 +11,8 @@ import {
 const stores = (...parts: string[]) => path.resolve("tmp", "stores", ...parts);
 const targetPath = (store: string, options: Parameters<typeof resolveTarget>[1] = {}) =>
   resolveTarget(store, options).path;
+const registration = (agentId: string, file: string) => ({ agentId, path: stores(file) });
+const workerSuffix = (index = 1) => `shared.worker${index === 1 ? "" : `.${index}`}.sqlite`;
 
 describe("resolveSqliteTargetFromSessionStorePath", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -156,57 +158,39 @@ describe("resolveSqliteTargetFromSessionStorePath", () => {
     },
   );
 
-  for (const [name, agentId, registrations, expectedFile] of [
+  for (const [name, agentId, registeredDatabases, expectedFile] of [
     [
       "does not treat ambiguous suffix registration as ownership",
       "worker",
-      [
-        ["worker", "shared.worker.sqlite"],
-        ["ops", "shared.worker.sqlite"],
-      ],
-      "shared.worker.2.sqlite",
+      [registration("worker", workerSuffix()), registration("ops", workerSuffix())],
+      workerSuffix(2),
     ],
     [
       "does not assign an ambiguously registered unsuffixed target to the default",
       "main",
-      [
-        ["main", "shared.sqlite"],
-        ["ops", "shared.sqlite"],
-      ],
+      [registration("main", "shared.sqlite"), registration("ops", "shared.sqlite")],
       "shared.main.sqlite",
     ],
     [
       "searches past every occupied suffix for the first free target",
       "worker",
-      Array.from({ length: 33 }, (_, offset) => {
-        const index = offset + 1;
-        const fileName = index === 1 ? "shared.worker.sqlite" : `shared.worker.${index}.sqlite`;
-        return ["ops", fileName] as const;
-      }),
-      "shared.worker.34.sqlite",
+      Array.from({ length: 33 }, (_, offset) => registration("ops", workerSuffix(offset + 1))),
+      workerSuffix(34),
     ],
     [
       "ignores a sparse huge suffix when the conventional suffix is free",
       "worker",
-      [["ops", "shared.worker.2147483647.sqlite"]],
-      "shared.worker.sqlite",
+      [registration("ops", workerSuffix(2147483647))],
+      workerSuffix(),
     ],
     [
       "does not treat noncanonical numeric suffix spellings as occupied indices",
       "worker",
-      [
-        ["ops", "shared.worker.sqlite"],
-        ["ops", "shared.worker.02.sqlite"],
-      ],
-      "shared.worker.2.sqlite",
+      [registration("ops", workerSuffix()), registration("ops", "shared.worker.02.sqlite")],
+      workerSuffix(2),
     ],
   ] as const) {
     it(name, () => {
-      const registeredDatabases = registrations.map(([registeredAgentId, fileName]) => ({
-        agentId: registeredAgentId,
-        path: stores(fileName),
-      }));
-
       expect(
         targetPath(path.join("tmp", "stores", "shared.json"), {
           agentId,

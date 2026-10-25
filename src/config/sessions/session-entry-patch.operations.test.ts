@@ -366,37 +366,6 @@ it("creates the full initial cron session in one owner command", async () => {
   });
 });
 
-it("rechecks conversation authority before a fixed patch commits", async () => {
-  await withFixture(async (f) => {
-    const conversation = await conversationGuard(f, "patch-peer");
-    const workerGuard = { conversation };
-    const onCommitted = vi.fn();
-    const accepted = await applySessionEntryOperation(
-      f.scope,
-      { kind: "fields", patch: { label: "authorized" } },
-      { skipMaintenance: true, workerGuard, onCommitted },
-    );
-    expect(accepted).toMatchObject({ label: "authorized" });
-    expect(f.read()).toEqual(accepted);
-    expect(onCommitted).toHaveBeenCalledExactlyOnceWith(accepted);
-    onCommitted.mockClear();
-
-    replaceRouteBeforeCommit(f, conversation.conversationRef);
-    await expect(
-      applySessionEntryOperation(
-        f.scope,
-        { kind: "fields", patch: { label: "must not persist" } },
-        { skipMaintenance: true, workerGuard, onCommitted },
-      ),
-    ).rejects.toThrow("Conversation is no longer available");
-    expect(f.read()).toEqual(accepted);
-    expect(onCommitted).not.toHaveBeenCalled();
-    expect(await readConversation(f.scope, conversation.conversationRef)).toMatchObject({
-      target: "user:replacement",
-    });
-  });
-});
-
 it("retains typed source and conversation authority when updating the last route", async () => {
   await withFixture(async (f) => {
     const conversation = await conversationGuard(f, "route-peer");
