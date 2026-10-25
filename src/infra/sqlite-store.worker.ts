@@ -15,6 +15,7 @@ import {
   installDatabaseEngineSelection,
 } from "./database-engine/context.js";
 import { captureSqliteNativeRuntimeAdmission } from "./node-sqlite.js";
+import { bindPostgresPool, postgresPoolWorkerFailure } from "./postgres-sync/pool.js";
 import {
   installSqliteDatabaseAdmissions,
   withSqliteDatabaseAdmissionExchange,
@@ -191,6 +192,9 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
   let openNotEntered = false;
   let commandAdmissionRefused = false;
   try {
+    if (request.postgresPool) {
+      bindPostgresPool(request.postgresPool);
+    }
     if (request.databaseAdmissions) {
       installSqliteDatabaseAdmissions(request.databaseAdmissions);
     }
@@ -537,6 +541,10 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
     } else {
       await executeCommand(deserialize(request.input));
     }
+    const poolFailure = postgresPoolWorkerFailure();
+    if (poolFailure) {
+      throw poolFailure;
+    }
     const serialized = serialize(value);
     if (timing && !inputNext && request.type !== "result-next") {
       timing.serialized = performance.now();
@@ -591,7 +599,9 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
     reply = {
       id: request.id,
       ok: false,
-      ...(retire || (nativeCleanupFailure && executed) ? { retire: true } : {}),
+      ...(retire || postgresPoolWorkerFailure() || (nativeCleanupFailure && executed)
+        ? { retire: true }
+        : {}),
       ...(refusedBeforeAgentOpen ? { openOutcome: "refused-before-agent-open" } : {}),
       ...(openNotEntered ? { openNotEntered: true } : {}),
       ...(admissionRefused ? { admissionRefused: true } : {}),

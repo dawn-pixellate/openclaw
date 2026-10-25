@@ -5,6 +5,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import {
   BroadcastChannel,
+  MessagePort,
   getEnvironmentData,
   setEnvironmentData,
   threadId,
@@ -27,6 +28,38 @@ const record = (event) =>
     `${JSON.stringify({ at: Date.now(), pid: process.pid, parentPid: process.ppid, threadId, ...event })}\n`,
   );
 const phase = () => readFileSync(path.join(output, "phase"), "utf8").trim();
+
+// Count setup and direct requests without reading payload values or changing envelopes.
+const ownValue = (value, key) =>
+  value && typeof value === "object"
+    ? Object.getOwnPropertyDescriptor(value, key)?.value
+    : undefined;
+const bridgePorts = new WeakSet();
+const bridgeOperations = new Set(["connect", "close", "release", "recovery-generation", "query"]);
+const nativePortPostMessage = MessagePort.prototype.postMessage;
+MessagePort.prototype.postMessage = function (message, ...args) {
+  const connection = ownValue(message, "connection");
+  const operation = ownValue(message, "operation");
+  const type =
+    ownValue(message, "host") instanceof MessagePort
+      ? "pg-pool-host"
+      : ownValue(connection, "port") instanceof MessagePort &&
+          ownValue(connection, "signal") instanceof SharedArrayBuffer
+        ? "pg-pool-connection"
+        : bridgeOperations.has(operation) &&
+            Number.isInteger(ownValue(message, "id")) &&
+            (operation === "connect" || bridgePorts.has(this))
+          ? "pg-bridge-request"
+          : undefined;
+  const result = Reflect.apply(nativePortPostMessage, this, [message, ...args]);
+  if (type === "pg-bridge-request" && operation === "connect") {
+    bridgePorts.add(this);
+  }
+  if (type) {
+    record({ type, phase: phase(), ...(type === "pg-bridge-request" ? { operation } : {}) });
+  }
+  return result;
+};
 const children = createRequire(import.meta.url)("node:child_process");
 const nativeSpawn = children.spawn;
 const nativeFork = children.fork;
@@ -99,21 +132,28 @@ const script = process.argv[1];
 if (/[/\\]postgres-sync[/\\]bridge\.worker\.[cm]?[jt]s$/.test(script ?? "")) {
   const pg = createRequire(import.meta.url)("pg");
   const digest = (value) => createHash("sha256").update(value).digest("hex").slice(0, 12);
-  const schema = digest(workerData.schema);
+  const schemas = new WeakMap();
   for (const method of ["connect", "end", "query"]) {
     const original = pg.Client.prototype[method];
     pg.Client.prototype[method] = function (...args) {
       if (method === "query") {
+        if (
+          typeof args[0] === "string" &&
+          args[0].startsWith("SELECT set_config(") &&
+          args[1]?.[2]
+        ) {
+          schemas.set(this, digest(args[1][2]));
+        }
         record({
           type: "pg-query",
-          schema,
+          schema: schemas.get(this) ?? (workerData.schema ? digest(workerData.schema) : undefined),
           phase: phase(),
           sql: typeof args[0] === "string" ? args[0] : args[0].text,
         });
       } else {
         record({
           type: `pg-${method}`,
-          schema,
+          schema: schemas.get(this) ?? (workerData.schema ? digest(workerData.schema) : undefined),
           database: digest(this.connectionParameters.database),
           phase: phase(),
         });

@@ -3,6 +3,10 @@ import { performance } from "node:perf_hooks";
 import { isMainThread, threadId, type Worker } from "node:worker_threads";
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
 import { getDatabaseEngineSelection } from "../../infra/database-engine/context.js";
+import {
+  createPostgresPoolEndpoints,
+  postgresPoolTransferList,
+} from "../../infra/postgres-sync/pool.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import {
   resolveRuntimeWorkerThreadExecArgv,
@@ -63,15 +67,17 @@ export function createSqliteTranscriptArchiveWorker(
     releaseService();
   };
   let worker: Worker;
+  const postgresPool = createPostgresPoolEndpoints();
   try {
     worker = createCpuTrackedWorker(workerUrl, {
       resourceLimits: { maxOldGenerationSizeMb: 512 },
       workerData: {
         ...workerData,
+        postgresPool,
         databaseAdmissionPort: admission.port,
         databaseEngineSelection: getDatabaseEngineSelection(),
       },
-      transferList: [admission.port],
+      transferList: [admission.port, ...postgresPoolTransferList(postgresPool)],
       execArgv: resolveRuntimeWorkerThreadExecArgv(workerUrl),
     });
   } catch (error) {

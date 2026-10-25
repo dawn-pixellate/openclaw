@@ -4,6 +4,10 @@ import {
   toErrorObject,
 } from "@openclaw/normalization-core/error-coercion";
 import { getDatabaseEngineSelection } from "../infra/database-engine/context.js";
+import {
+  createPostgresPoolEndpoints,
+  postgresPoolTransferList,
+} from "../infra/postgres-sync/pool.js";
 import { runtimeProcessEntrypoints } from "../infra/runtime-process-entrypoints.js";
 import {
   resolveRuntimeWorkerThreadExecArgv,
@@ -447,6 +451,7 @@ export function startOpenClawStateLeaseHeartbeat(
       databaseEngineSelection:
         startupContext?.databaseEngineSelection ?? getDatabaseEngineSelection(),
       databaseAdmissionPort: databaseAdmission.port,
+      postgresPool: createPostgresPoolEndpoints(),
       path: databasePath,
       expectedIdentity,
       ...(startupContext ? { deferActivation: true as const } : {}),
@@ -470,7 +475,10 @@ export function startOpenClawStateLeaseHeartbeat(
           runInDetachedAsyncContext(() => {
             const native = createCpuTrackedWorker(url, {
               workerData: data,
-              transferList: [databaseAdmission.port],
+              transferList: [
+                databaseAdmission.port,
+                ...postgresPoolTransferList(data.postgresPool),
+              ],
               env: sourceTsconfig ? { TSX_TSCONFIG_PATH: sourceTsconfig } : {},
               execArgv,
               stdout: true,

@@ -1394,6 +1394,9 @@ export const databaseWorkerCoreTestFiles = [
   "src/infra/database-engine/message-progress-retention.conformance.test.ts",
   "src/infra/database-engine/session-archive-alias.conformance.test.ts",
   "src/infra/database-engine/outcome-surfaces.postgres.test.ts",
+  "src/infra/postgres-sync/bridge-prestart.test.ts",
+  "src/infra/postgres-sync/connection.test.ts",
+  "src/infra/worker-cpu.postgres-bridge.test.ts",
 ];
 
 const databaseWorkerCoreTestFileSet = new Set(databaseWorkerCoreTestFiles);

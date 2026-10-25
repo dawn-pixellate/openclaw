@@ -48,13 +48,14 @@ function transportFixture(
   const { port1, port2 } = new MessageChannel();
   const control = new Int32Array(new SharedArrayBuffer(8));
   control.set([1, 1]);
-  const terminate = vi.fn(async () => 0);
+  const service = new Int32Array(new SharedArrayBuffer(8));
+  service[0] = 1;
   // Exercise the connection over real ports; live tests cover worker startup and admission.
   const db = harness.connection();
   Object.assign(db, {
     port: port1,
     control,
-    worker: { terminate, off: vi.fn() },
+    service,
     requestId: 1,
   });
   const sent = vi.spyOn(port1, "postMessage");
@@ -113,7 +114,8 @@ function transportFixture(
             };
       port2.postMessage(reply);
     }
-    Atomics.store(control, index, id);
+    Atomics.store(control, 0, id);
+    Atomics.add(service, 0, 1);
     return "ok";
   });
   harness.cleanups.push(() => {
@@ -130,7 +132,6 @@ function transportFixture(
     db,
     sent,
     waits,
-    terminate,
     normal: () => (mode = "normal"),
     command: (value: string) => (command = value),
     rejectQuery: (error: PostgresErrorData) => (queryError = error),
@@ -240,7 +241,7 @@ it("waits through a late notify until its own completion and preserves increasin
 it.each(["mismatched", "missing", "timeout"] as const)(
   "poisons %s requests and never sends another operation",
   (mode) => {
-    const { db, sent, terminate, waits } = transportFixture(mode);
+    const { db, sent, waits } = transportFixture(mode);
     const before = readToken(db.anchor, "entry");
     let failure: unknown;
     try {
@@ -255,7 +256,6 @@ it.each(["mismatched", "missing", "timeout"] as const)(
     expect(hasSqliteWorkerOutcomeUnknown(failure)).toBe(true);
     const after = readToken(db.anchor, "entry");
     expect(after).not.toBe(before);
-    expect(terminate).toHaveBeenCalledOnce();
     if (mode === "timeout") {
       expect(waits).toHaveLength(1);
     }

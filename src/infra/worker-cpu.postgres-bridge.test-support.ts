@@ -7,6 +7,7 @@ import {
   type Worker,
 } from "node:worker_threads";
 import { createPostgresBridge } from "./postgres-sync/bridge-prestart.js";
+import { createPostgresPoolEndpoints, postgresPoolTransferList } from "./postgres-sync/pool.js";
 import type { PostgresBridge } from "./postgres-sync/protocol.js";
 import { resolveRuntimeWorkerThreadExecArgv } from "./runtime-worker-url.js";
 import { createCpuTrackedWorker, receiveWorkerMemoryPort } from "./worker-cpu.js";
@@ -22,9 +23,10 @@ let childControl: MessagePort | undefined;
 async function createChild(depth: number): Promise<void> {
   const { port1, port2 } = new MessageChannel();
   const workerUrl = new URL(import.meta.url);
+  const postgresPool = createPostgresPoolEndpoints();
   const worker = createCpuTrackedWorker(workerUrl, {
-    workerData: { control: port2, depth },
-    transferList: [port2],
+    workerData: { control: port2, depth, postgresPool },
+    transferList: [port2, ...postgresPoolTransferList(postgresPool)],
     execArgv: resolveRuntimeWorkerThreadExecArgv(workerUrl),
   });
   child = worker;
@@ -72,7 +74,6 @@ async function receive(command: Command): Promise<unknown> {
     const bridge = bridges.pop();
     if (bridge) {
       bridge.port.close();
-      await bridge.worker.terminate();
     }
   }
   return bridges.length;

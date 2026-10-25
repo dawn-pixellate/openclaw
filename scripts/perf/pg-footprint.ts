@@ -1,5 +1,5 @@
 // node --import ./scripts/tsx.mjs scripts/perf/pg-footprint.ts --mode seed|run --root <new-internal-root>
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -36,6 +36,7 @@ const { values } = parseArgs({
     engine: { type: "string", default: "postgres" },
     entry: { type: "string", default: "dist/entry.js" },
     profile: { type: "boolean", default: false },
+    "observer-free": { type: "boolean", default: false },
   },
 });
 if (
@@ -225,11 +226,15 @@ if (values.mode === "seed") {
   const sampleRequest = path.join(output, "sample-request");
   writeFileSync(sampleRequest, Buffer.alloc(256, " "));
   const observer = process.env.SQLMEASURE_OBSERVER;
-  if (!observer || !path.isAbsolute(observer)) {
+  if (!values["observer-free"] && (!observer || !path.isAbsolute(observer))) {
     throw new Error("SQLMEASURE_OBSERVER must name the frozen observer.cjs");
   }
   const channel = `pg-footprint-${randomUUID()}`;
-  const samples: Array<{ sample: string; at: number }> = [];
+  const samples: Array<{
+    sample: string;
+    at: number;
+    processes?: Array<{ pid: number; rssKiB: number; threads: number }>;
+  }> = [];
   const phase = (name: string) => writeFileSync(path.join(output, "phase"), name);
   phase("boot");
   const port = await getFreePort();
@@ -247,7 +252,9 @@ if (values.mode === "seed") {
         PGFOOTPRINT_OUTPUT: output,
         PGFOOTPRINT_CHANNEL: channel,
         SQLMEASURE_OUT: output,
-        NODE_OPTIONS: `--require=${JSON.stringify(observer)} --import=${JSON.stringify(path.resolve("scripts/perf/pg-footprint-preload.mjs"))}`,
+        NODE_OPTIONS: values["observer-free"]
+          ? ""
+          : `--require=${JSON.stringify(observer)} --import=${JSON.stringify(path.resolve("scripts/perf/pg-footprint-preload.mjs"))}`,
       },
       detached: true,
       stdio: ["ignore", log, log],
@@ -282,6 +289,41 @@ if (values.mode === "seed") {
   const sample = async (label: string) => {
     // RSS is measured in the unprofiled run; profiling uses thread exit artifacts.
     if (values.profile) {
+      return;
+    }
+    if (values["observer-free"]) {
+      const rows = execFileSync("ps", ["-axo", "pid=,ppid=,rss="], { encoding: "utf8" })
+        .trim()
+        .split("\n")
+        .map((line) => line.trim().split(/\s+/).map(Number));
+      const owned = new Set([child.pid!]);
+      for (;;) {
+        const before = owned.size;
+        for (const [pid, parent] of rows) {
+          if (owned.has(parent!)) {
+            owned.add(pid!);
+          }
+        }
+        if (before === owned.size) {
+          break;
+        }
+      }
+      samples.push({
+        sample: label,
+        at: Date.now(),
+        processes: rows
+          .filter(([pid]) => owned.has(pid!))
+          .map(([pid, , rssKiB]) => ({
+            pid: pid!,
+            rssKiB: rssKiB!,
+            threads: execFileSync("ps", ["-M", "-p", String(pid), "-o", "pid="], {
+              encoding: "utf8",
+            })
+              .trim()
+              .split("\n").length,
+          })),
+      });
+      await wait(200);
       return;
     }
     const before = workerEvents();
@@ -442,7 +484,7 @@ if (values.mode === "seed") {
     };
     await history("first-request");
     await history("warm-request");
-    if (values.engine === "postgres") {
+    if (values.engine === "postgres" && !values["observer-free"]) {
       const events = workerEvents();
       if (
         !events.some((event) => event.type === "pg-connect") ||
