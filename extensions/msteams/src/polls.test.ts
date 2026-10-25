@@ -157,16 +157,10 @@ describe("msteams polls", () => {
 
   it("keeps large vote maps split across bounded rows", async () => {
     const store = createMSTeamsPollStoreState();
-    const votes = Object.fromEntries(
-      Array.from({ length: 500 }, (_, index) => [
-        `user-${String(index).padStart(4, "0")}-${"x".repeat(160)}`,
-        ["0"],
-      ]),
-    );
-
     await store.createPoll(poll({ id: "poll-large" }));
-    for (const [voterId, selections] of Object.entries(votes)) {
-      await store.recordVote({ pollId: "poll-large", voterId, selections });
+    for (let index = 0; index < 500; index++) {
+      const voterId = `user-${String(index).padStart(4, "0")}-${"x".repeat(160)}`;
+      await store.recordVote({ pollId: "poll-large", voterId, selections: ["0"] });
     }
     await store.recordVote({ pollId: "poll-large", voterId: "user-new", selections: ["1"] });
 
