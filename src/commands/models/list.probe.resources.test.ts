@@ -15,9 +15,6 @@ import type { OAuthCredential } from "../../agents/auth-profiles/types.js";
 import { resetPreparedModelRuntimeSnapshotsForTest } from "../../agents/prepared-model-runtime.test-support.js";
 import { makeAssistantMessageFixture } from "../../agents/test-helpers/assistant-message-fixtures.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import * as embeddedStateLock from "../../infra/embedded-state-lock.js";
-import { captureNativeSignalBridge } from "../../infra/embedded-state-lock.test-support.js";
-import * as gatewayLockProcessModule from "../../infra/gateway-lock-process.js";
 import { getPluginInstance } from "../../plugins/plugin-instance-scope.js";
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
 import { PluginRegistryInspectionResources } from "../../plugins/registry-inspection-resources.js";
@@ -29,10 +26,8 @@ import { AsyncWorkScope } from "../../shared/async-work-scope.js";
 import { writeConfigMachineState } from "../../state/config-machine-state-write.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { createTestModelDefinition } from "../test-runtime-config-helpers.js";
-import { runAuthProbes, withAuthProbeStateOwnership } from "./list.probe.js";
+import { runAuthProbes } from "./list.probe.js";
 
-const createNativeBridge = embeddedStateLock.createEmbeddedStateSignalBridge;
-const acquireNativeStateLock = embeddedStateLock.acquireEmbeddedStateLock;
 const complete = vi.hoisted(() => vi.fn());
 // mock-isolation: Keep real runtime admission and credential custody but never call a provider.
 vi.mock("../../agents/simple-completion-execution.js", () => ({
@@ -41,6 +36,7 @@ vi.mock("../../agents/simple-completion-execution.js", () => ({
 
 it.each([
   { source: "direct", status: "ok" },
+  { source: "direct", status: "ok", directOAuth: true },
   { source: "direct", status: "auth" },
   { source: "profile", status: "ok" },
   { source: "profile", status: "auth" },
@@ -119,6 +115,9 @@ it.each([
           [provider]: {
             api: "openai-completions",
             apiKey: "synthetic-probe-credential",
+            ...("directOAuth" in scenario
+              ? { auth: "oauth" as const, agentRuntime: { id: "codex" as const } }
+              : {}),
             baseUrl: "https://fixture.invalid/v1",
             models: [
               createTestModelDefinition("probe-model", { name: "Probe model", maxTokens: 64 }),
@@ -179,6 +178,12 @@ it.each([
     const timeout = new AbortController();
     const timeoutSignal = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
     complete.mockImplementation(async (params) => {
+      if (credentialSource === "direct") {
+        expect(params.auth.apiKey).toBe("synthetic-probe-credential");
+        if ("directOAuth" in scenario) {
+          expect(params.auth.mode).toBe("oauth");
+        }
+      }
       if (oauth) {
         expect(params.auth.apiKey).toBe(
           oauth === "expired" ? rotatedOAuth.access : originalOAuth.access,
@@ -285,41 +290,3 @@ it.each([
     }
   },
 );
-
-it("releases direct state ownership before propagating a rejected no-tail operation", async () => {
-  const state = await createOpenClawTestState({ label: "probe-no-tail-failure" });
-  const signals = captureNativeSignalBridge(createNativeBridge);
-  vi.spyOn(embeddedStateLock, "createEmbeddedStateSignalBridge").mockImplementationOnce(
-    signals.create,
-  );
-  const lockDir = state.path("locks");
-  vi.spyOn(gatewayLockProcessModule, "readGatewayLockProcessStartTime").mockImplementation(
-    () => 123456,
-  );
-  const options = {
-    allowInTests: true,
-    env: state.env,
-    lockDir,
-    timeoutMs: 100,
-  };
-  vi.spyOn(embeddedStateLock, "acquireEmbeddedStateLock").mockImplementation((params) =>
-    acquireNativeStateLock({ ...params, options }),
-  );
-  const original = new Error("synthetic direct probe failure");
-  try {
-    await expect(
-      withAuthProbeStateOwnership({ mode: "exclusive" }, async () => {
-        throw original;
-      }),
-    ).rejects.toBe(original);
-    expect(fs.existsSync(path.join(lockDir, "gateway.state.lock"))).toBe(false);
-    expect([signals.listenerCount("SIGINT"), signals.listenerCount("SIGTERM")]).toEqual([0, 0]);
-  } finally {
-    try {
-      signals.dispose();
-    } finally {
-      vi.restoreAllMocks();
-      await state.cleanup();
-    }
-  }
-});

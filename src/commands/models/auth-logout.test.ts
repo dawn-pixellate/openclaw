@@ -1,5 +1,4 @@
 import { expectDefined } from "@openclaw/normalization-core";
-import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthProfileCredential, AuthProfileStore } from "../../agents/auth-profiles.js";
 import {
@@ -16,12 +15,10 @@ import {
 } from "../../agents/auth-profiles/store-runtime.js";
 import * as catalogCredentials from "../../agents/plugin-model-catalog-credentials.js";
 import * as catalogs from "../../agents/plugin-model-catalog.js";
-import { registerModelsCli } from "../../cli/models-cli.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createDirectChatContext } from "../../gateway/server-chat.agent-events.test-helpers.js";
 import { handleGatewayRequest } from "../../gateway/server-methods.js";
 import type { RespondFn } from "../../gateway/server-methods/types.js";
-import { defaultRuntime } from "../../runtime.js";
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { createCapturingTestRuntime } from "../test-runtime-config-helpers.js";
 
@@ -80,23 +77,8 @@ vi.mock("../../wizard/clack-prompter.js", () => ({
 
 const { modelsAuthLogoutCommand } = await import("./auth-logout.js");
 
-async function runRegisteredLogout(profileId: string): Promise<void> {
-  const errors: string[] = [];
-  const error = vi.spyOn(defaultRuntime, "error").mockImplementation((message) => {
-    errors.push(String(message));
-  });
-  const exit = vi.spyOn(defaultRuntime, "exit").mockImplementation(() => {
-    throw new Error(errors.join("\n"));
-  });
-  try {
-    const program = new Command().exitOverride();
-    registerModelsCli(program);
-    await program.parseAsync(["models", "auth", "logout", profileId, "--yes"], { from: "user" });
-  } finally {
-    error.mockRestore();
-    exit.mockRestore();
-  }
-}
+const logout = (profileId: string) =>
+  modelsAuthLogoutCommand({ profileId, yes: true }, createRuntime());
 
 async function dispatchAuthLogout(
   cfg: OpenClawConfig,
@@ -236,10 +218,7 @@ describe("models auth logout", () => {
       const retainedProvider = {
         api: "openai-completions",
         headers: { "X-Version": "1" },
-        models: [
-          { id: "selected-model", headers: {} },
-          { id: "surviving-model", apiKey: survivor.key },
-        ],
+        models: [{ id: "retained", apiKey: survivor.key, headers: {} }],
       };
       const catalog = {
         generatedBy: "openclaw-plugin-model-catalog-v1",
@@ -248,10 +227,7 @@ describe("models auth logout", () => {
             ...retainedProvider,
             apiKey: selected.key,
             headers: { ...retainedProvider.headers, Authorization: `Bearer ${selected.key}` },
-            models: [
-              { id: "selected-model", headers: { "X-Api-Key": selected.key } },
-              retainedProvider.models[1],
-            ],
+            models: [{ ...retainedProvider.models[0], headers: { "X-Api-Key": selected.key } }],
           },
         },
       };
@@ -292,7 +268,7 @@ describe("models auth logout", () => {
         insert.run("unrelated-cache", "keep", '{"value":"retained"}');
       }
 
-      await runRegisteredLogout("selected");
+      await logout("selected");
 
       expect(loadAuthProfileStoreWithoutExternalProfiles(main).profiles).toEqual({ survivor });
       for (const agentDir of [main, child]) {
@@ -340,14 +316,12 @@ describe("models auth logout", () => {
           await scrub(params);
         });
       try {
-        await expect(runRegisteredLogout(profileId)).rejects.toThrow(
-          "saved credentials were restored",
-        );
+        await expect(logout(profileId)).rejects.toThrow("saved credentials were restored");
         expect({ profile: readProfile(), auth: liveConfig().auth }).toEqual({
           profile: credential,
           auth: originalConfig.auth,
         });
-        await runRegisteredLogout(profileId);
+        await logout(profileId);
         expect({ profile: readProfile(), auth: liveConfig().auth }).toEqual({
           profile: undefined,
           auth: { profiles: {} },

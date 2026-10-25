@@ -27,6 +27,7 @@ vi.mock("./shared.js", async (importOriginal) => ({
 
 const { modelsScanCommand } = await import("./scan.js");
 const modelRef = (name = "acme") => `openrouter/${name}/free:free`;
+const metadataError = "Cannot apply metadata-only OpenRouter scan results";
 
 function scanResult(overrides: Partial<ModelScanResult> = {}) {
   return {
@@ -128,30 +129,25 @@ describe("models scan command", () => {
     });
   });
 
-  it.each([false, true])(
-    "rejects applying metadata-only results (auto-downgraded=%s)",
-    async (auto) => {
-      if (auto) {
+  it.each([
+    [{ probe: false, setDefault: true }, metadataError, false],
+    [{ setDefault: true }, metadataError, true],
+    [{ maxAgeDays: "30d", probe: false, setDefault: true }, "--max-age-days", false],
+    [{ timeout: "1000ms", probe: false, setDefault: true }, "--timeout", false],
+    [{ concurrency: "2x", probe: false, setDefault: true }, "--concurrency", false],
+  ] as const)(
+    "rejects invalid scan options %j before scanning",
+    async (opts, message, resolveAuth) => {
+      if (resolveAuth) {
         withoutStoredKey();
       }
-      await expect(scan({ probe: auto ? undefined : false, setDefault: true })).rejects.toThrow(
-        /Cannot apply metadata-only OpenRouter scan results/,
-      );
-
+      await expect(scan(opts)).rejects.toThrow(message);
+      if (!resolveAuth) {
+        expectNoAuthLookup();
+      }
       expect(mocks.scanOpenRouterModels).not.toHaveBeenCalled();
     },
   );
-
-  it.each([
-    ["maxAgeDays", "--max-age-days", "30d"],
-    ["timeout", "--timeout", "1000ms"],
-    ["concurrency", "--concurrency", "2x"],
-  ] as const)("rejects partial %s numeric strings before scanning", async (key, label, raw) => {
-    await expect(scan({ [key]: raw, probe: false, setDefault: true })).rejects.toThrow(label);
-
-    expectNoAuthLookup();
-    expect(mocks.scanOpenRouterModels).not.toHaveBeenCalled();
-  });
 
   it.each([
     [{}, "anthropic/primary"],
