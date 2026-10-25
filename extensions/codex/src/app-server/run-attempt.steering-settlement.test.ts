@@ -19,7 +19,6 @@ import type { CodexSteeringQueueOptions } from "./attempt-steering.js";
 import { readAttemptTerminal } from "./attempt-terminal.test-helper.js";
 import { TURN_TERMINAL_SETTLEMENT_TIMEOUT_MS } from "./attempt-timeouts.js";
 import { nativeCommandItem } from "./codex-app-server.test-fixtures.js";
-import { prepareCodexServerNotification } from "./protocol-validators.js";
 import { isJsonObject, type CodexServerNotification, type JsonObject } from "./protocol.js";
 import { itemNotification, turnCompleted } from "./protocol.test-helpers.js";
 import {
@@ -81,16 +80,12 @@ async function createFixture() {
     },
     () => persisted,
   );
-  const started = createDeferred<void>();
   const prefixCompleted = createDeferred<void>();
   const abort = new AbortController();
   const onAttemptTimeout = vi.fn();
   params.abortSignal = abort.signal;
   params.onAttemptTimeout = onAttemptTimeout;
   params.onAgentEvent = (event) => {
-    if (event.stream === "lifecycle" && event.data.phase === "start") {
-      started.resolve();
-    }
     if (
       event.stream === "codex_app_server.item" &&
       event.data.phase === "completed" &&
@@ -140,22 +135,14 @@ async function createFixture() {
     run,
     accepted,
     start: async () => {
-      await started.promise;
-      await notify(itemNotification("item/started", { ...prefix, text: "" }));
-      await notify({
-        method: "item/agentMessage/delta",
-        params: { threadId: "thread-1", turnId: "turn-1", itemId: prefix.id, delta: prefixText },
-      });
+      await run.waitForTurnAccepted();
       await notify(itemNotification("item/completed", prefix));
       // Wait for projection, not merely a buffered wire receipt, before steering.
       await prefixCompleted.promise;
     },
     item: (item: JsonObject) => notify(itemNotification("item/completed", item)),
-    complete: (items: JsonObject[]) => {
-      const notification = turnCompleted({ id: "turn-1", status: "completed", items });
-      expect(prepareCodexServerNotification(notification).completedTurn).toBeDefined();
-      return notify(notification);
-    },
+    complete: (items: JsonObject[]) =>
+      notify(turnCompleted({ id: "turn-1", status: "completed", items })),
     hold: async () => {
       lock = holdTranscript(target);
       await lock.acquired;

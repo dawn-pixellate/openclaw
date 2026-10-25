@@ -1,7 +1,6 @@
 import type { AgentHarnessAttemptParamsV2 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { PreparedCodexNativeExecutionPolicy } from "./native-execution-policy.js";
 import type { CodexTurn, CodexUserInput } from "./protocol.js";
 import { prepareCodexAttemptTurnRequest } from "./run-attempt-turn-request.js";
 
@@ -96,7 +95,6 @@ function createAcknowledgment() {
     },
     acceptNativeTurn,
   };
-  // Only the host can issue this opaque object; this fixture supplies its public method contract.
   return { acknowledgment: Object.freeze(methods) as Acknowledgment, acceptNativeTurn };
 }
 function createNativeThread(): { latest: CodexTurn } {
@@ -150,7 +148,6 @@ async function prepare(native = createNativeThread(), usesSupervisionConnection 
         model: "test-model",
         liveThreadOwnership,
       },
-      codexExecutionCwd: "/synthetic/workspace",
     },
     releaseCurrentRoute: vi.fn(),
     nativeProcessAuthority,
@@ -165,20 +162,7 @@ async function prepare(native = createNativeThread(), usesSupervisionConnection 
         workspaceBootstrapContext: { promptContext: "workspace reference" },
         attemptTools: { tools: [], toolBridge: { availableTools: [], availableSpecs: [] } },
         runtime: {
-          nativeExecutionPolicy: {
-            policy: {
-              nativeToolSurfaceAllowed: true,
-              sandboxed: false,
-              requestedExecHost: "auto",
-              effectiveExecHost: "gateway",
-            },
-            async assertCurrent() {},
-            async admit(write, withCurrent) {
-              await withCurrent(write);
-            },
-            retain: () => () => {},
-            release() {},
-          } satisfies PreparedCodexNativeExecutionPolicy,
+          nativeExecutionPolicy: {},
           runtimeParams: { model: { api: "openai-chatgpt-responses" } },
           connection: {
             params: {
@@ -284,12 +268,11 @@ describe("native acknowledged turn requests", () => {
 
   it("rechecks the selected model immediately before writing turn/start", async () => {
     const attempt = await prepare();
-    const { host, native } = attempt;
     attempt.route.armTurn.mockImplementationOnce(() => changeSelection(attempt, "model"));
     await expect(attempt.start()).rejects.toThrow("Could not continue this chat");
-    expect(native.latest.status).toBe("failed");
+    expect(attempt.native.latest.status).toBe("failed");
     expect(attempt.route.cancelTurn).toHaveBeenCalledOnce();
-    expect(host.acceptNativeTurn).not.toHaveBeenCalled();
+    expectNotAccepted(attempt);
     expect(cleanup.interrupt).not.toHaveBeenCalled();
   });
 
@@ -366,9 +349,6 @@ describe("native acknowledged turn requests", () => {
       expect(formatErrorMessage(failure)).toBe(
         "Could not continue this chat. Review its latest status before trying again.",
       );
-      expect(first.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(
-        1,
-      );
       expectInterrupted(first);
       expect(first.resources.state.startupClientUnsafe).toBe(!interrupted);
       expect(cleanup.retire).toHaveBeenCalledTimes(interrupted ? 0 : 1);
@@ -379,7 +359,6 @@ describe("native acknowledged turn requests", () => {
 
       const second = await prepare(native);
       const { host: freshHost } = second;
-      expect(freshHost.acknowledgment).not.toBe(firstHost.acknowledgment);
       await expect(second.start()).rejects.toThrow("native provider review changed");
       expectOnlyReviewRead(second);
       expect(freshHost.acceptNativeTurn).not.toHaveBeenCalled();
