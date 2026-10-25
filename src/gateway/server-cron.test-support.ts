@@ -122,44 +122,30 @@ vi.mock("../infra/system-events.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../infra/restart-coordinator.js", async () => {
-  const actual = await vi.importActual<typeof import("../infra/restart-coordinator.js")>(
-    "../infra/restart-coordinator.js",
-  );
-  return {
-    ...actual,
-    scheduleSafeGatewayRestart: requestSafeGatewayRestartMock,
-  };
-});
+vi.mock("../infra/restart-coordinator.js", async (original) => ({
+  ...(await original<typeof import("../infra/restart-coordinator.js")>()),
+  scheduleSafeGatewayRestart: requestSafeGatewayRestartMock,
+}));
 
-vi.mock("../config/config.js", async () => {
-  const actual = await vi.importActual<typeof import("../config/config.js")>("../config/config.js");
-  return {
-    ...actual,
-    getRuntimeConfig: () => loadConfigMock(),
-  };
-});
+vi.mock("../config/config.js", async (original) => ({
+  ...(await original<typeof import("../config/config.js")>()),
+  getRuntimeConfig: () => loadConfigMock(),
+}));
 
-vi.mock("../config/io.js", async () => {
-  const actual = await vi.importActual<typeof import("../config/io.js")>("../config/io.js");
-  return {
-    ...actual,
-    getRuntimeConfig: () => loadConfigMock(),
-  };
-});
+vi.mock("../config/io.js", async (original) => ({
+  ...(await original<typeof import("../config/io.js")>()),
+  getRuntimeConfig: () => loadConfigMock(),
+}));
 
 // mock-isolation: Webhook effects use the fixture transport and never open real network requests.
 vi.mock("../infra/net/fetch-guard.js", () => ({
   fetchWithSsrFGuard: fetchWithSsrFGuardMock,
 }));
 
-vi.mock("../cron/delivery.js", async () => {
-  const actual = await vi.importActual<typeof import("../cron/delivery.js")>("../cron/delivery.js");
-  return {
-    ...actual,
-    sendCronAnnouncePayloadStrict: sendCronAnnouncePayloadStrictMock,
-  };
-});
+vi.mock("../cron/delivery.js", async (original) => ({
+  ...(await original<typeof import("../cron/delivery.js")>()),
+  sendCronAnnouncePayloadStrict: sendCronAnnouncePayloadStrictMock,
+}));
 
 // mock-isolation: Model execution belongs to the fixture; loading the runner starts unrelated runtime owners.
 vi.mock("../cron/isolated-agent.js", () => ({
@@ -233,12 +219,8 @@ function buildGatewayCronService(
 export function createCronConfig(name: string): OpenClawConfig {
   const tmpDir = path.join(os.tmpdir(), `${name}-${Date.now()}`);
   return {
-    session: {
-      mainKey: "main",
-    },
-    cron: {
-      store: path.join(tmpDir, "cron.json"),
-    },
+    session: { mainKey: "main" },
+    cron: { store: path.join(tmpDir, "cron.json") },
     // SAFETY: the adapter above consumes legacy cron.store before runtime config is used.
   } as OpenClawConfig;
 }
@@ -265,12 +247,13 @@ export function loadCronService(cfg: OpenClawConfig, overrides: CronServiceOverr
 
 type CronJobOverrides = Partial<Omit<CronJobCreate, "name" | "payload">>;
 
-function cronJob(
+function addCronJob(
+  service: CronServiceFixture,
   name: string,
   payload: CronJobCreate["payload"],
   overrides: CronJobOverrides = {},
-): CronJobCreate {
-  return {
+) {
+  return service.cron.add({
     name,
     enabled: true,
     schedule: { kind: "at", at: new Date(1).toISOString() },
@@ -278,19 +261,10 @@ function cronJob(
     wakeMode: "next-heartbeat",
     payload,
     ...overrides,
-  };
+  });
 }
 
 type CronServiceFixture = ReturnType<typeof createCronService>;
-
-function addCronJob(
-  service: CronServiceFixture,
-  name: string,
-  payload: CronJobCreate["payload"],
-  overrides: CronJobOverrides = {},
-) {
-  return service.cron.add(cronJob(name, payload, overrides));
-}
 
 export function addSystemEventJob(
   service: CronServiceFixture,
@@ -366,13 +340,10 @@ export function resetGatewayCronMocks() {
     cancelScope: vi.fn(),
     acquireScopeCleanup: vi.fn(() => vi.fn(async () => {})),
   });
-  cronTriggerEvaluatorMock.mockReset();
-  cronTriggerEvaluatorMock.mockResolvedValue({ kind: "evaluated", fire: false });
-  cronScriptExecutorMock.mockReset();
+  cronTriggerEvaluatorMock.mockReset().mockResolvedValue({ kind: "evaluated", fire: false });
   isAgentDeletionBlockedMock.mockReset().mockReturnValue(false);
-  cronScriptExecutorMock.mockResolvedValue({ kind: "completed", stateChanged: false });
-  createCronScriptRuntimeMock.mockReset();
-  createCronScriptRuntimeMock.mockReturnValue({
+  cronScriptExecutorMock.mockReset().mockResolvedValue({ kind: "completed", stateChanged: false });
+  createCronScriptRuntimeMock.mockReset().mockReturnValue({
     evaluateTrigger: cronTriggerEvaluatorMock,
     executePayload: cronScriptExecutorMock,
   });
