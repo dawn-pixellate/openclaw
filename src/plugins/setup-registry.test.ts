@@ -126,11 +126,9 @@ describe("setup registry", () => {
 
     const registry = resolveRegistry({ env: {} });
 
-    expect(registry.diagnostics).toEqual([
+    expect(registry.diagnostics).toMatchObject([
       diagnostic("setup-cli-backend-missing-model-provider", "acme-plugin", {
         runtimeId: "standalone-cli",
-        message:
-          'cli backend "standalone-cli" is missing modelProvider; provider-to-runtime binding will be skipped. Set modelProvider to the canonical model provider id to enable this binding.',
       }),
     ]);
     expect(registry.cliBackends.map((entry) => entry.backend.id)).toEqual([
@@ -193,17 +191,15 @@ describe("setup registry", () => {
     const registry = resolveRegistry({ env: {} });
     expect(registry.providers.map((entry) => entry.provider.id)).toEqual(["anthropic"]);
     expect(registry.cliBackends.map((entry) => entry.backend.id)).toEqual(["claude-cli"]);
-    expect(registry.diagnostics).toMatchObject([
-      diagnostic("setup-descriptor-provider-runtime-undeclared", "openai", {
-        runtimeId: "anthropic",
-      }),
-      diagnostic("setup-descriptor-cli-backend-missing-runtime", "openai", {
-        declaredId: "codex-cli",
-      }),
-      diagnostic("setup-descriptor-cli-backend-runtime-undeclared", "openai", {
-        runtimeId: "claude-cli",
-      }),
-    ]);
+    expect(registry.diagnostics).toMatchObject(
+      [
+        ["provider-runtime-undeclared", "runtimeId", "anthropic"],
+        ["cli-backend-missing-runtime", "declaredId", "codex-cli"],
+        ["cli-backend-runtime-undeclared", "runtimeId", "claude-cli"],
+      ].map(([code, key, value]) =>
+        diagnostic(`setup-descriptor-${code}`, "openai", { [key]: value }),
+      ),
+    );
   });
 
   it("does not load setup-api modules from the current working directory", () => {

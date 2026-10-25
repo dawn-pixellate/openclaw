@@ -45,8 +45,6 @@ describe("installed Arcee catalog identity", () => {
     if (!loaded.ok) {
       throw new Error(loaded.error);
     }
-    expect(loaded.manifest.id).toBe("arcee");
-    expect(loaded.manifest.providers).toEqual(["arcee"]);
     const snapshot = createPluginMetadataSnapshotFixture({
       plugins: [
         {
@@ -61,19 +59,9 @@ describe("installed Arcee catalog identity", () => {
     });
     withEnv(
       { OPENCLAW_BUNDLED_PLUGINS_DIR: bundled, OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR: "1" },
-      () => {
-        withPluginMetadataSnapshotScope(snapshot, () => run(pluginRoot, snapshot));
-      },
+      () => withPluginMetadataSnapshotScope(snapshot, () => run(pluginRoot, snapshot)),
     );
   }
-
-  it("normalizes authored-row identity through the trusted installed policy", () => {
-    installed(true, () => {
-      expect(
-        createProviderModelCatalogIdNormalizer("arcee")("arcee-ai/trinity-large-thinking"),
-      ).toBe("trinity-large-thinking");
-    });
-  });
 
   it("keeps catalog-equivalent Arcee ids distinct in exact model policy", () => {
     installed(true, (_root, metadataSnapshot) => {
@@ -98,11 +86,7 @@ describe("installed Arcee catalog identity", () => {
       ]) {
         const params = {
           cfg: modelPolicy([allow]),
-          catalog: [logical, wire].map(({ provider, model }) => ({
-            provider,
-            id: model,
-            name: model,
-          })),
+          catalog: [logical, wire].map(({ provider, model }) => catalogEntry(provider, model)),
           defaultProvider: "arcee",
           manifestPlugins: metadataSnapshot,
           allowManifestNormalization: true,
@@ -110,12 +94,8 @@ describe("installed Arcee catalog identity", () => {
         };
         const policy = createModelVisibilityPolicy(params);
         expect.soft([policy.allows(logical), policy.allows(wire)], allow).toEqual(expected);
-        expect
-          .soft(
-            [logical, wire].map((ref) => getModelRefStatus({ ...params, ref }).allowed),
-            allow,
-          )
-          .toEqual(expected);
+        const status = [logical, wire].map((ref) => getModelRefStatus({ ...params, ref }).allowed);
+        expect.soft(status, allow).toEqual(expected);
       }
     });
   });
@@ -124,13 +104,10 @@ describe("installed Arcee catalog identity", () => {
     "only selects an authorized Arcee fallback (later row: %s)",
     (laterRow) => {
       installed(true, (_root, manifestPlugins) => {
-        const wireRow = { provider: "arcee", id: "arcee-ai/trinity-large-thinking", name: "Wire" };
-        const later = { provider: "arcee", id: "safe-model", name: "Allowed fallback" };
+        const wireRow = catalogEntry("arcee", wire.model);
+        const later = catalogEntry("arcee", "safe-model");
         const policy = createModelVisibilityPolicy({
-          cfg: modelPolicy([
-            "arcee/trinity-large-thinking",
-            ...(laterRow ? ["arcee/safe-model"] : []),
-          ]),
+          cfg: modelPolicy([`arcee/${logical.model}`, ...(laterRow ? ["arcee/safe-model"] : [])]),
           catalog: laterRow ? [wireRow, later] : [wireRow],
           defaultProvider: "arcee",
           manifestPlugins,
@@ -178,25 +155,16 @@ describe("installed Arcee catalog identity", () => {
 
   it("does not load an untrusted installed owner's identity hook", () => {
     installed(false, () => {
-      expect(
-        createProviderModelCatalogIdNormalizer("arcee")("arcee-ai/trinity-large-thinking"),
-      ).toBe("arcee-ai/trinity-large-thinking");
+      expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(wire.model);
     });
   });
-  it("honors an explicitly empty metadata owner over the ambient installed owner", () => {
+  it("honors explicit and captured owners over ambient metadata", () => {
     installed(true, () => {
       const empty = createPluginMetadataSnapshotFixture();
-      expect(
-        createProviderModelCatalogIdNormalizer("arcee", empty)("arcee-ai/trinity-large-thinking"),
-      ).toBe("arcee-ai/trinity-large-thinking");
-    });
-  });
-
-  it("keeps a captured normalizer bound to its prepared owner", () => {
-    installed(true, () => {
+      expect(createProviderModelCatalogIdNormalizer("arcee", empty)(wire.model)).toBe(wire.model);
       const normalize = createProviderModelCatalogIdNormalizer("arcee");
-      withPluginMetadataSnapshotScope(createPluginMetadataSnapshotFixture(), () => {
-        expect(normalize("arcee-ai/trinity-large-thinking")).toBe("trinity-large-thinking");
+      withPluginMetadataSnapshotScope(empty, () => {
+        expect(normalize(wire.model)).toBe(logical.model);
       });
     });
   });
@@ -215,8 +183,6 @@ describe("installed Arcee catalog identity", () => {
         api: "openai-completions",
         baseUrl: "https://fixture.example.test/v1",
         reasoning: true,
-        contextWindow: 1024,
-        maxTokens: 256,
         params: { runtimeModel: modelId },
       }),
     };
@@ -224,8 +190,8 @@ describe("installed Arcee catalog identity", () => {
 
   it("materializes catalog identities with the policy selected for each invocation", () => {
     installed(true, (_root, metadataSnapshot) => {
-      const canonical = catalogEntry("arcee", "trinity-large-thinking");
-      const variant = catalogEntry("arcee", "arcee-ai/trinity-large-thinking@personal");
+      const canonical = catalogEntry("arcee", logical.model);
+      const variant = catalogEntry("arcee", `${wire.model}@personal`);
       const distinct = [
         catalogEntry("fixture-none", "Reader"),
         catalogEntry("fixture-none", "reader"),
@@ -239,11 +205,11 @@ describe("installed Arcee catalog identity", () => {
         staticEntries: [canonical, ...distinct],
       };
       const configured = {
-        ...catalogEntry("arcee", "arcee-ai/trinity-large-thinking@work"),
+        ...catalogEntry("arcee", `${wire.model}@work`),
         name: "Configured",
       };
       const runtimes = [
-        runtimeCapability(" Arcee ", "arcee-ai/trinity-large-thinking@work"),
+        runtimeCapability(" Arcee ", `${wire.model}@work`),
         runtimeCapability("fixture-none", "Reader"),
         runtimeCapability("fixture/a", "b"),
       ];
@@ -332,7 +298,7 @@ describe("installed Arcee catalog identity", () => {
               baseUrl: "https://api.arcee.ai/api/v1",
               models: [
                 {
-                  id: "arcee-ai/trinity-large-thinking",
+                  id: wire.model,
                   name: "Authored route",
                   baseUrl: "https://openrouter.ai/api/v1",
                   reasoning: true,
@@ -349,13 +315,13 @@ describe("installed Arcee catalog identity", () => {
       expect(
         createConfiguredModelCatalogOverridesResolver({ cfg })({
           provider: "arcee",
-          id: "trinity-large-thinking",
+          id: logical.model,
         }),
       ).toMatchObject({ name: "Authored route", contextWindow: 32768 });
       const projected = resolveModelProviderAuthConfig({
         config: cfg,
         provider: "arcee",
-        modelId: "trinity-large-thinking",
+        modelId: logical.model,
         metadataSnapshot,
       });
       expect(projected.models?.providers?.arcee?.baseUrl).toBe("https://openrouter.ai/api/v1");

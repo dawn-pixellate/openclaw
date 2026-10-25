@@ -65,17 +65,16 @@ function isInsideRoot(rootPath: string, filePath: string): boolean {
 function resolveRelativeSourceModule(importerPath: string, specifier: string): string | null {
   const targetPath = path.resolve(path.dirname(importerPath), specifier);
   const targetExtension = path.extname(targetPath);
-  const candidates: string[] = [];
-  if (
-    SOURCE_MODULE_EXTENSIONS.includes(targetExtension as (typeof SOURCE_MODULE_EXTENSIONS)[number])
-  ) {
-    const stem = targetPath.slice(0, -targetExtension.length);
-    candidates.push(...SOURCE_MODULE_EXTENSIONS.map((extension) => `${stem}${extension}`));
-  } else if (!targetExtension) {
-    for (const extension of SOURCE_MODULE_EXTENSIONS) {
-      candidates.push(`${targetPath}${extension}`, path.join(targetPath, `index${extension}`));
-    }
-  }
+  const candidates = SOURCE_MODULE_EXTENSIONS.some((extension) => extension === targetExtension)
+    ? SOURCE_MODULE_EXTENSIONS.map(
+        (extension) => `${targetPath.slice(0, -targetExtension.length)}${extension}`,
+      )
+    : !targetExtension
+      ? SOURCE_MODULE_EXTENSIONS.flatMap((extension) => [
+          `${targetPath}${extension}`,
+          path.join(targetPath, `index${extension}`),
+        ])
+      : [];
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
 }
 
@@ -135,29 +134,29 @@ function hasStaticValue(node: ts.Node): boolean {
   return ts.isImportEqualsDeclaration(node) && !node.isTypeOnly;
 }
 
-function collectStaticValueReferences(
-  filePath: string,
-  source: string,
-  acceptSpecifier = (specifier: string) =>
-    FORBIDDEN_SPECIFIER_RULES.has(specifier) || specifier.startsWith("."),
-): ModuleReference[] {
+function collectStaticValueReferences(filePath: string, source: string): ModuleReference[] {
   const sourceFile = parser.parseSourceFile(filePath, source);
   const references: ModuleReference[] = [];
   visitModuleSpecifiers(
     sourceFile,
     ({ kind, node, specifier, specifierNode }) => {
-      if (hasStaticValue(node) && acceptSpecifier(specifier)) {
+      if (hasStaticValue(node)) {
         references.push({ kind, line: toLine(sourceFile, specifierNode), specifier });
       }
     },
     { includeCommonJs: true },
   );
-  return references.toSorted(
-    (left, right) =>
-      left.line - right.line ||
-      left.kind.localeCompare(right.kind) ||
-      left.specifier.localeCompare(right.specifier),
-  );
+  return references;
+}
+
+const referencesByFile = new Map<string, ModuleReference[]>();
+function fileReferences(filePath: string) {
+  let references = referencesByFile.get(filePath);
+  if (!references) {
+    references = collectStaticValueReferences(filePath, fs.readFileSync(filePath, "utf8"));
+    referencesByFile.set(filePath, references);
+  }
+  return references;
 }
 
 function collectClosureEntries(): ClosureEntry[] {
@@ -217,9 +216,10 @@ function inspectRelativeClosure(
   entryPath: string,
   root: string,
   inspect: (filePath: string, reference: ModuleReference) => string | undefined,
+  followSdk = false,
+  visited = new Set<string>(),
 ): string[] {
   const violations: string[] = [];
-  const visited = new Set<string>();
   const pending = [entryPath];
 
   while (pending.length > 0) {
@@ -228,14 +228,22 @@ function inspectRelativeClosure(
       continue;
     }
     visited.add(filePath);
-    const source = fs.readFileSync(filePath, "utf8");
-    for (const reference of collectStaticValueReferences(filePath, source)) {
+    for (const reference of fileReferences(filePath)) {
       const violation = inspect(filePath, reference);
       if (violation) {
         violations.push(violation);
         continue;
       }
-      const resolvedPath = resolveRelativeSourceModule(filePath, reference.specifier);
+      const specifier = reference.specifier;
+      const sdk = "openclaw/plugin-sdk/";
+      const resolvedPath = specifier.startsWith(".")
+        ? resolveRelativeSourceModule(filePath, specifier)
+        : followSdk && specifier.startsWith(sdk)
+          ? resolveRelativeSourceModule(
+              path.join(REPO_ROOT, "src/plugin-sdk/entrypoint-anchor.ts"),
+              `./${specifier.slice(sdk.length)}`,
+            )
+          : null;
       if (resolvedPath && isInsideRoot(root, resolvedPath)) {
         pending.push(resolvedPath);
       }
@@ -269,76 +277,6 @@ function collectHeavyRuntimeDoctorMigrationImports(): string[] {
   });
 }
 
-const PLUGIN_SDK_SPECIFIER_PREFIX = "openclaw/plugin-sdk/";
-
-function isKyselySpecifier(specifier: string): boolean {
-  return specifier === "kysely" || specifier.startsWith("kysely/");
-}
-
-// The transitive walk follows relative imports (plugin-local, core src, and the
-// deep-relative package bridges) plus openclaw/plugin-sdk/* subpaths. Other bare
-// specifiers are node builtins or npm/workspace packages; only the repo root
-// depends on kysely, so every kysely edge is reachable through this resolution.
-function resolveTraversalModule(filePath: string, specifier: string): string | null {
-  if (specifier.startsWith(".")) {
-    return resolveRelativeSourceModule(filePath, specifier);
-  }
-  if (specifier.startsWith(PLUGIN_SDK_SPECIFIER_PREFIX)) {
-    const subpath = specifier.slice(PLUGIN_SDK_SPECIFIER_PREFIX.length);
-    return resolveRelativeSourceModule(
-      path.join(REPO_ROOT, "src/plugin-sdk", "entrypoint-anchor.ts"),
-      `./${subpath}`,
-    );
-  }
-  return null;
-}
-
-// Cached per file: null = kysely unreachable; otherwise the first found import
-// chain from this file to a kysely value import (repo-relative, entry first).
-const kyselyReachabilityByFile = new Map<string, string[] | null>();
-
-function findKyselyChain(filePath: string, inProgress: Set<string>): string[] | null {
-  const cached = kyselyReachabilityByFile.get(filePath);
-  if (cached !== undefined) {
-    return cached;
-  }
-  if (inProgress.has(filePath)) {
-    // Cycle back-edge: the ancestor still explores its remaining children, so
-    // skipping here cannot hide a kysely edge.
-    return null;
-  }
-  inProgress.add(filePath);
-  let chain: string[] | null = null;
-  const source = fs.readFileSync(filePath, "utf8");
-  for (const reference of collectStaticValueReferences(
-    filePath,
-    source,
-    (specifier) =>
-      isKyselySpecifier(specifier) ||
-      specifier.startsWith(".") ||
-      specifier.startsWith(PLUGIN_SDK_SPECIFIER_PREFIX),
-  )) {
-    if (isKyselySpecifier(reference.specifier)) {
-      chain = [`${formatRepoPath(filePath)}:${reference.line} imports ${reference.specifier}`];
-      break;
-    }
-    const resolvedPath = resolveTraversalModule(filePath, reference.specifier);
-    if (!resolvedPath || !isInsideRoot(REPO_ROOT, resolvedPath)) {
-      continue;
-    }
-    const childChain = findKyselyChain(resolvedPath, inProgress);
-    if (childChain) {
-      chain = [`${formatRepoPath(filePath)}:${reference.line} -> ${reference.specifier}`].concat(
-        childChain,
-      );
-      break;
-    }
-  }
-  inProgress.delete(filePath);
-  kyselyReachabilityByFile.set(filePath, chain);
-  return chain;
-}
-
 describe("doctor contract import closures", () => {
   it("classifies only static value module edges", () => {
     const source = [
@@ -367,18 +305,21 @@ describe("doctor contract import closures", () => {
     expect(collectHeavyRuntimeDoctorMigrationImports()).toStrictEqual([]);
   });
 
-  // The exhaustive backstop: no doctor-contract or legacy-setup closure may reach
-  // the kysely package through any static value import chain, regardless of which
-  // barrel introduces the edge. Type-only and dynamic imports stay allowed.
   it("keeps kysely statically unreachable from every plugin closure", () => {
-    const violations = collectClosureEntries()
-      .flatMap((entry) => {
-        const chain = findKyselyChain(entry.entryPath, new Set());
-        return chain
-          ? [`${entry.pluginId}: closure reaches kysely via\n    ${chain.join("\n    ")}`]
-          : [];
-      })
-      .toSorted();
+    // All roots share the same repository boundary, so inspect each module once.
+    const visited = new Set<string>();
+    const violations = collectClosureEntries().flatMap((entry) =>
+      inspectRelativeClosure(
+        entry.entryPath,
+        REPO_ROOT,
+        (filePath, { specifier, line }) =>
+          specifier === "kysely" || specifier.startsWith("kysely/")
+            ? `${entry.pluginId}: ${formatRepoPath(filePath)}:${line} imports ${specifier}`
+            : undefined,
+        true,
+        visited,
+      ),
+    );
     expect(violations).toStrictEqual([]);
   });
 });

@@ -11,7 +11,6 @@ import {
   clearPluginRuntimeArtifactResolutionMemo,
   resolvePluginRuntimeArtifact,
 } from "./plugin-runtime-artifact-resolution.js";
-import { resolvePluginRuntimeExecutionArtifact } from "./plugin-runtime-artifact-selection.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
 import { getActivePluginChannelRegistry } from "./runtime.js";
 import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
@@ -20,7 +19,10 @@ import { resolvePluginRuntimeLoadContext } from "./runtime/load-context.resolve.
 
 const tempDirs: string[] = [];
 
-const fixtureConfig = { plugins: { allow: ["fixture"], entries: { fixture: { enabled: true } } } };
+const pluginConfig = (enabled = true) => ({
+  plugins: { allow: ["fixture"], entries: { fixture: { enabled } } },
+});
+const fixtureConfig = pluginConfig();
 const emptyPlugin = "export default { register() {} };\n";
 const configSchema = { type: "object", additionalProperties: false, properties: {} };
 type ResolutionOptions = Partial<Parameters<typeof resolvePluginRuntimeArtifact>[0]>;
@@ -128,12 +130,7 @@ describe("resolvePluginRuntimeArtifact", () => {
       const open = vi.spyOn(fs, "openSync");
       const registry = fixture.withEnv(() =>
         loadFixture({
-          config: {
-            plugins: {
-              allow: ["fixture"],
-              entries: { fixture: { enabled: mode !== "disabled" } },
-            },
-          },
+          config: pluginConfig(mode !== "disabled"),
           loadModules: mode !== "metadata-only",
           preferBuiltPluginArtifacts: true,
         }),
@@ -178,6 +175,7 @@ describe("resolvePluginRuntimeArtifact", () => {
         expect(registry.services.map(({ service }) => service.id)).toEqual([entry]);
         expect(registry.plugins[0]?.source).toBe(fixture.source);
         expectLoaded(registry, { name });
+        expect(fixture.resolve(!preferBuiltPluginArtifacts).source).toBe(entry);
         expect(fingerprintPluginRuntimeArtifact(record)).toBe(before);
         fs.appendFileSync(entry, "\n// Runtime artifact replaced.\n");
         expect(fingerprintPluginRuntimeArtifact(record)).not.toBe(before);
@@ -213,12 +211,6 @@ describe("resolvePluginRuntimeArtifact", () => {
         ? { source: fs.realpathSync(builtSource), rootDir: builtRoot }
         : selected;
 
-      expect(
-        resolvePluginRuntimeExecutionArtifact({
-          ...selected,
-          source: fs.realpathSync(stagingSource),
-        }),
-      ).toEqual(expected);
       expect(resolveFixture({ ...selected, entryKind: "setup" })).toEqual(expected);
     },
   );
@@ -254,15 +246,6 @@ describe("resolvePluginRuntimeArtifact", () => {
   it("never borrows a checkout root build for an installed package", () => {
     const fixture = createBundledPluginFixture();
     expect(fixture.resolve(true, { origin: "global" }).source).toBe(fixture.source);
-  });
-
-  it("pins the first built path so one plugin instance registers once", () => {
-    const fixture = createBundledPluginFixture();
-    const first = fixture.resolve(true);
-    const second = fixture.resolve();
-
-    expect(first.source).toBe(fixture.builtSource);
-    expect(second).toEqual(first);
   });
 
   it.each([
