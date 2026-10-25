@@ -110,6 +110,22 @@ describe("transcript turn physical identity", () => {
       selectedSessionId: sessionId,
       selectedLifecycleRevision: "run",
     });
+    const originalBase = loadSessionEntryReadOnly(base);
+    for (const content of ["First shared-ID turn", "Second shared-ID turn"]) {
+      await expect(
+        persistSessionTranscriptTurn(base, {
+          messages: [{ message: { role: "user", content } }],
+          updateMode: "none",
+        }),
+      ).resolves.toMatchObject({
+        messages: [{ appended: true }],
+        sessionEntry: { sessionId, lifecycleRevision: "run" },
+      });
+    }
+    expect(loadSessionEntryReadOnly(base)).toEqual(originalBase);
+    expect(loadTranscriptEventsSync(run).filter((event) => event.type === "message")).toHaveLength(
+      2,
+    );
   });
 
   it("reuses a selected target until an owning registry write reassigns it", async () => {
