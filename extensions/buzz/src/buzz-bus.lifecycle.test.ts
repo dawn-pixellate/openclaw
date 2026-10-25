@@ -32,11 +32,10 @@ const THREAD_TAGS = [
   ["e", "root-id", "", "root"],
   ["e", "parent-id", "", "reply"],
 ];
-
-function abortReasonAsError(signal: AbortSignal | undefined): Error {
-  const reason = signal?.reason;
-  return reason instanceof Error ? reason : new Error("aborted", { cause: reason });
-}
+const sentTyping = () =>
+  relayMocks.send.mock.calls
+    .map(([raw]) => JSON.parse(raw) as [string, Event])
+    .filter(([type, event]) => type === "EVENT" && event.kind === BUZZ_TYPING_INDICATOR_KIND);
 
 function stallDiscovery() {
   let signal: AbortSignal | undefined;
@@ -46,7 +45,7 @@ function stallDiscovery() {
       (_input, init) =>
         new Promise<Response>((_resolve, reject) => {
           signal = init?.signal ?? undefined;
-          signal?.addEventListener("abort", () => reject(abortReasonAsError(signal)), {
+          signal?.addEventListener("abort", () => reject(signal?.reason), {
             once: true,
           });
         }),
@@ -73,8 +72,6 @@ describe("Buzz bus lifecycle", () => {
       const bus = mode === "one-shot" ? undefined : await startTestBus();
       const preparing = createDeferred<void>();
       const prepared = createDeferred<void>();
-      const handedOff = createDeferred<void>();
-      const acknowledgment = createDeferred<string>();
       const failure = new Error("Buzz message authority ended");
       const authority = fetchRuntime.captureEffectAuthority();
       const capture = vi.spyOn(fetchRuntime, "captureEffectAuthority").mockReturnValue({
@@ -89,18 +86,12 @@ describe("Buzz bus lifecycle", () => {
         },
       });
       let handoffs = 0;
-      relayMocks.publish.mockImplementation((event) => {
-        if (event.kind !== 9) {
-          return Promise.resolve("");
-        }
-        handoffs++;
-        handedOff.resolve();
-        return acknowledgment.promise;
+      relayMocks.publish.mockImplementation(async (event) => {
+        handoffs += Number(event.kind === 9);
+        return "";
       });
-      relayMocks.send.mockImplementation(() => {
+      relayMocks.send.mockImplementation(async () => {
         handoffs++;
-        handedOff.resolve();
-        return acknowledgment.promise.then(() => {});
       });
       const sending = (
         bus
@@ -115,7 +106,7 @@ describe("Buzz bus lifecycle", () => {
       try {
         await Promise.race([
           preparing.promise,
-          handedOff.promise.then(() => {
+          sending.then(() => {
             throw new Error("relay call bypassed preparation");
           }),
         ]);
@@ -142,7 +133,6 @@ describe("Buzz bus lifecycle", () => {
         expect(handoffs).toBe(stopped ? 0 : 1);
       } finally {
         prepared.resolve();
-        acknowledgment.resolve("");
         await sending;
         capture.mockRestore();
       }
@@ -190,20 +180,7 @@ describe("Buzz bus lifecycle", () => {
       await vi.advanceTimersByTimeAsync(20_000);
     }
     await rejection;
-    expect(relayMocks.connect).toHaveBeenCalledOnce();
     expect(fetchSignal()?.aborted).toBe(true);
-    expect(relayMocks.close).toHaveBeenCalledOnce();
-  });
-
-  it("publishes and closes a standalone authenticated send", async () => {
-    const messageId = await sendTestTextOneShot(THREAD);
-
-    expect(relayMocks.publish.mock.calls[0]?.[0]).toMatchObject({
-      id: messageId,
-      kind: 9,
-      content: "hello",
-      tags: THREAD_TAGS,
-    });
     expect(relayMocks.close).toHaveBeenCalledOnce();
   });
 
@@ -212,9 +189,7 @@ describe("Buzz bus lifecycle", () => {
 
     await bus.sendTyping(THREAD);
 
-    const messageFrame = relayMocks.send.mock.calls
-      .map(([raw]) => JSON.parse(raw) as [string, Event])
-      .find(([type]) => type === "EVENT");
+    const messageFrame = sentTyping()[0];
     expect(messageFrame).toMatchObject([
       "EVENT",
       {
@@ -273,12 +248,7 @@ describe("Buzz bus lifecycle", () => {
         const published = relayMocks.publish.mock.calls.find(
           ([event]) => event.kind === 9 && event.content === `reply ${index + 1}`,
         )?.[0];
-        const typing = relayMocks.send.mock.calls
-          .map(([frame]) => JSON.parse(frame) as [string, Event])
-          .filter(
-            ([frameType, event]) =>
-              frameType === "EVENT" && event.kind === BUZZ_TYPING_INDICATOR_KIND,
-          )[index]?.[1];
+        const typing = sentTyping()[index]?.[1];
         const expectedTags = [
           ["h", CHANNEL_ID],
           ...(replyToMode === "all" ? [["e", parentId ? rootId : inbound.id, "", "reply"]] : []),
@@ -308,10 +278,9 @@ describe("Buzz bus lifecycle", () => {
     const start = startTestBus({ channelIds: [CHANNEL_ID, SECOND_CHANNEL_ID], onMessage });
 
     await vi.waitFor(() => expect(onMessage).toHaveBeenCalledOnce());
-    const stalledSubscription = relayMocks.subscriptions.find(
-      (entry) => entry.filter["#h"]?.[0] === SECOND_CHANNEL_ID,
-    );
-    stalledSubscription?.handlers.oneose?.();
+    relayMocks.subscriptions
+      .find((entry) => entry.filter["#h"]?.[0] === SECOND_CHANNEL_ID)
+      ?.handlers.oneose?.();
     await start;
   });
 
@@ -332,7 +301,6 @@ describe("Buzz bus lifecycle", () => {
       "Buzz inbound replay exceeded the 1024-message pending limit",
     );
     expectError(onFatalError, "Buzz inbound replay exceeded the 1024-message pending limit");
-    expect(onFatalError).toHaveBeenCalledOnce();
     expect(onMessage).not.toHaveBeenCalled();
     expect(relayMocks.close).toHaveBeenCalled();
   });

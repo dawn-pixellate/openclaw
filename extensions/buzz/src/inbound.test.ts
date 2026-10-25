@@ -37,14 +37,25 @@ function receive(
   params: Partial<Parameters<typeof handleBuzzInboundWithHistory>[0]> = {},
   config: Partial<ResolvedBuzzAccount["config"]> = {},
 ) {
+  const signal = new AbortController().signal;
   return handleBuzzInboundWithHistory({
     account: params.account ?? createAccount(config),
     cfg: params.cfg ?? {},
     bus: params.bus ?? createBus(),
-    ...createLifecycle(),
+    signal,
+    assertCurrent: () => signal.throwIfAborted(),
     ...params,
     historyMap: params.historyMap ?? new Map(),
-    message: createMessage(message),
+    message: {
+      id: "event-1",
+      kind: BUZZ_NORMAL_MESSAGE_KIND,
+      senderPubkey: SENDER_PUBLIC_KEY,
+      text: "hello",
+      channelId: ROOM_ID,
+      createdAt: 1_777_000_000,
+      mentionedPubkeys: [],
+      ...message,
+    },
   });
 }
 
@@ -66,24 +77,6 @@ function createAccount(
       ...configOverrides,
     },
   };
-}
-
-function createMessage(overrides: Partial<BuzzInboundMessage> = {}): BuzzInboundMessage {
-  return {
-    id: "event-1",
-    kind: BUZZ_NORMAL_MESSAGE_KIND,
-    senderPubkey: SENDER_PUBLIC_KEY,
-    text: "hello",
-    channelId: ROOM_ID,
-    createdAt: 1_777_000_000,
-    mentionedPubkeys: [],
-    ...overrides,
-  };
-}
-
-function createLifecycle() {
-  const signal = new AbortController().signal;
-  return { signal, assertCurrent: () => signal.throwIfAborted() };
 }
 
 function createBus(): BuzzBus {
@@ -157,7 +150,6 @@ function createHistoryParams(historyLimit = 2, roles = new Map<string, string>()
     account: createAccount({ historyLimit }),
     cfg: {} satisfies OpenClawConfig,
     bus,
-    ...createLifecycle(),
     historyMap: new Map<string, HistoryEntry[]>(),
   };
   return Object.assign(params, {
@@ -166,14 +158,7 @@ function createHistoryParams(historyLimit = 2, roles = new Map<string, string>()
 }
 
 function labelDirectory(bus: BuzzBus) {
-  setMembership(
-    bus,
-    [BOT_PUBLIC_KEY, SENDER_PUBLIC_KEY],
-    new Map([
-      [BOT_PUBLIC_KEY, "bot"],
-      [SENDER_PUBLIC_KEY, "member"],
-    ]),
-  );
+  setMembership(bus, [BOT_PUBLIC_KEY, SENDER_PUBLIC_KEY]);
   const event = { created_at: 1_777_000_000, sig: "e".repeat(128), content: "", tags: [] };
   bus.directory.applyProfileEvent({
     ...event,
@@ -393,10 +378,10 @@ it.each([
         groups: { [ROOM_ID]: { requireMentionInBotThreads: false } },
       }),
       bus,
-      message: createMessage({
+      message: {
         mentionedPubkeys: mentioned ? [BOT_PUBLIC_KEY] : [],
         threadId: boundary === "thread ownership" ? "thread-root" : undefined,
-      }),
+      },
       signal: abort.signal,
       assertCurrent: () => {
         abort.signal.throwIfAborted();

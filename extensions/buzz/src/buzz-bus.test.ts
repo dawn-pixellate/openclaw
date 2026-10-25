@@ -32,6 +32,7 @@ const {
   findSubscription,
   inboundFixture,
   expectError,
+  roomMetadata,
 } = useBuzzBusLifecycleFixture();
 
 const BUZZ_RICH_MESSAGE_KIND = 40_002;
@@ -44,20 +45,27 @@ beforeEach(() => {
 
 describe("Buzz message events", () => {
   it("parses and formats Buzz structured diff events", () => {
-    const event = botMessage("@@ -1 +1 @@\n-old\n+new", {
+    const metadata: Array<[string[], string]> = [
+      [["repo", "https://example.com/repo"], "Repository: https://example.com/repo"],
+      [["commit", "abcdef1"], "Commit: abcdef1"],
+      [["parent-commit", "1234567"], "Parent commit: 1234567"],
+      [["file", "a.ts"], "File: a.ts"],
+      [["branch", "feature", "main"], "Branches: feature -> main"],
+      [["pr", "42"], "Pull request: #42"],
+      [["l", "typescript"], "Language: typescript"],
+      [
+        ["description", "Preserve\nstructured diff context"],
+        "Description: Preserve structured diff context",
+      ],
+      [["alt", "Buzz plugin diff"], "Alt text: Buzz plugin diff"],
+      [["truncated", "true"], "Truncated: yes"],
+    ];
+    const diff = "@@ -1 +1 @@\n-old\n+new";
+    const event = botMessage(diff, {
       kind: BUZZ_DIFF_MESSAGE_KIND,
       tags: [
         ROOM_TAG,
-        REPO_TAG,
-        ["commit", "abcdef1234567890"],
-        ["file", "extensions/buzz/src/message-event.ts"],
-        ["parent-commit", "1234567890abcdef"],
-        ["branch", "feature/buzz", "main"],
-        ["pr", "113419"],
-        ["l", "typescript"],
-        ["description", "Preserve\nstructured diff context"],
-        ["truncated", "true"],
-        ["alt", "Buzz plugin diff"],
+        ...metadata.map(([tag]) => tag),
         ["e", "root-id", "", "root"],
         ["e", "reply-id", "", "reply"],
       ],
@@ -68,26 +76,15 @@ describe("Buzz message events", () => {
       kind: BUZZ_DIFF_MESSAGE_KIND,
       threadId: "root-id",
       replyToId: "reply-id",
+      diff: { description: "Preserve\nstructured diff context" },
     });
-    expect(message?.diff?.description).toBe("Preserve\nstructured diff context");
     expect(message && formatBuzzMessageForAgent(message)).toBe(
       [
         "[Buzz structured diff]",
-        "Repository: https://github.com/openclaw/openclaw",
-        "Commit: abcdef1234567890",
-        "Parent commit: 1234567890abcdef",
-        "File: extensions/buzz/src/message-event.ts",
-        "Branches: feature/buzz -> main",
-        "Pull request: #113419",
-        "Language: typescript",
-        "Description: Preserve structured diff context",
-        "Alt text: Buzz plugin diff",
-        "Truncated: yes",
+        ...metadata.map(([, expected]) => expected),
         "",
         "Unified diff:",
-        "@@ -1 +1 @@",
-        "-old",
-        "+new",
+        diff,
       ].join("\n"),
     );
     const boundaryContext = formatBuzzMessageForAgent({
@@ -140,7 +137,8 @@ describe("Buzz message events", () => {
 });
 
 describe("Buzz mention delivery", () => {
-  it.each([true, false])("resolves standalone mentions (native=%s)", async (native) => {
+  it.each(["plain", "native", "explicit"] as const)("sends standalone %s text", async (mode) => {
+    const native = mode === "native";
     if (native) {
       relayMocks.profileEvents = [
         signSenderEvent({
@@ -151,10 +149,15 @@ describe("Buzz mention delivery", () => {
         }),
       ];
     }
-    const text = native ? "Hello @Alice" : `Hello nostr:${nip19.npubEncode(SENDER_PUBLIC_KEY)}`;
+    const text = {
+      plain: "hello",
+      native: "Hello @Alice",
+      explicit: `Hello nostr:${nip19.npubEncode(SENDER_PUBLIC_KEY)}`,
+    }[mode];
     const messageId = await sendTestTextOneShot({
       text,
-      ...(native ? { threadId: "root-id" } : {}),
+      threadId: mode === "explicit" ? undefined : "root-id",
+      replyToId: mode === "plain" ? "parent-id" : undefined,
     });
     expect(relayMocks.publish.mock.calls[0]?.[0]).toMatchObject({
       id: messageId,
@@ -162,11 +165,18 @@ describe("Buzz mention delivery", () => {
       content: text,
       tags: [
         ["h", CHANNEL_ID],
-        ...(native ? [["e", "root-id", "", "reply"]] : []),
-        ["p", SENDER_PUBLIC_KEY],
+        ...(mode === "plain"
+          ? [
+              ["e", "root-id", "", "root"],
+              ["e", "parent-id", "", "reply"],
+            ]
+          : native
+            ? [["e", "root-id", "", "reply"]]
+            : []),
+        ...(mode === "plain" ? [] : [["p", SENDER_PUBLIC_KEY]]),
       ],
     });
-    expect(hasSubscription(39002)).toBe(true);
+    expect(hasSubscription(39002)).toBe(mode !== "plain");
     expect(hasSubscription(0)).toBe(native);
     expect(relayMocks.close).toHaveBeenCalledOnce();
   });
@@ -204,15 +214,7 @@ describe("Buzz mention delivery", () => {
 });
 
 it("rebuilds room subscriptions when an archived room becomes active", async () => {
-  relayMocks.roomMetadataEvents = [
-    relayEvent(39_000, {
-      id: "room-metadata-archived",
-      tags: [
-        ["d", CHANNEL_ID],
-        ["archived", "true"],
-      ],
-    }),
-  ];
+  relayMocks.roomMetadataEvents = [roomMetadata("archived-room", "Archived", { archived: true })];
   const onFatalError = vi.fn();
   const bus = await startTestBus({ onFatalError });
   expect(hasSubscription(9)).toBe(false);
@@ -235,14 +237,10 @@ it("rebuilds room subscriptions when an archived room becomes active", async () 
 
 describe("Buzz profile lifecycle", () => {
   it("selects the lowest event ID when profiles share a timestamp", async () => {
-    const profiles = ["First profile", "Second profile"].map((displayName) =>
-      botMessage(JSON.stringify({ display_name: displayName }), { kind: 0, tags: [] }),
-    );
-    const [lowerIdProfile, higherIdProfile] = profiles.toSorted(compareEvents);
-    if (!lowerIdProfile || !higherIdProfile) {
-      throw new Error("Expected two signed profile fixtures");
-    }
-    relayMocks.profileEvents = [higherIdProfile, lowerIdProfile];
+    const profiles = ["First profile", "Second profile"]
+      .map((display_name) => botMessage(JSON.stringify({ display_name }), { kind: 0, tags: [] }))
+      .toSorted(compareEvents);
+    relayMocks.profileEvents = profiles.toReversed();
 
     await startTestBus({ profileName: "Configured Agent Name" });
 
@@ -252,9 +250,10 @@ describe("Buzz profile lifecycle", () => {
     const agentProfile = relayMocks.publish.mock.calls
       .map(([event]) => event)
       .find((event) => event.kind === 10_100);
+    const expectedName = JSON.parse(profiles[0]!.content).display_name;
     expect(JSON.parse(agentProfile?.content ?? "{}")).toMatchObject({
-      name: JSON.parse(lowerIdProfile.content).display_name,
-      display_name: JSON.parse(lowerIdProfile.content).display_name,
+      name: expectedName,
+      display_name: expectedName,
     });
   });
 
@@ -290,13 +289,12 @@ describe("Buzz profile lifecycle", () => {
         });
       }
       const onMessage = vi.fn(async () => await dispatchCleanup.promise);
-      const onProfilePublished = vi.fn();
-      const onProfileError = vi.fn();
+      const onProfileResult = vi.fn();
       const bus = await startTestBus({
         profileName: "OpenClaw",
         onMessage,
-        onProfilePublished,
-        onProfileError,
+        onProfilePublished: onProfileResult,
+        onProfileError: onProfileResult,
       });
       const profileKinds = () =>
         relayMocks.publish.mock.calls
@@ -308,14 +306,10 @@ describe("Buzz profile lifecycle", () => {
         if (gatedKind !== undefined) {
           await vi.waitFor(() => expect(profileKinds()).toContain(gatedKind));
         }
-        const messageSubscription = findSubscription(9);
-        expect(messageSubscription).toBeDefined();
-        messageSubscription?.handlers.onevent(senderMessage("hold admitted cleanup"));
+        findSubscription(9)?.handlers.onevent(senderMessage("hold admitted cleanup"));
         await vi.waitFor(() => expect(onMessage).toHaveBeenCalledOnce());
         if (phase === "query EOSE") {
-          const query = findSubscription(10_100);
-          expect(query?.handlers.oneose).toBeTypeOf("function");
-          query?.handlers.oneose?.();
+          findSubscription(10_100)?.handlers.oneose?.();
         }
         closing = bus.close().then(() => {
           closed = true;
@@ -327,8 +321,7 @@ describe("Buzz profile lifecycle", () => {
           setImmediate(resolve);
         });
         expect(profileKinds()).toEqual(publishedKinds);
-        expect(onProfilePublished).not.toHaveBeenCalled();
-        expect(onProfileError).not.toHaveBeenCalled();
+        expect(onProfileResult).not.toHaveBeenCalled();
         expect(closed).toBe(false);
         expect(relayMocks.close).not.toHaveBeenCalled();
         dispatchCleanup.resolve();
@@ -341,8 +334,7 @@ describe("Buzz profile lifecycle", () => {
         await vi.waitFor(() => expect(closed).toBe(true));
         await closing;
         expect(profileKinds()).toEqual(publishedKinds);
-        expect(onProfilePublished).not.toHaveBeenCalled();
-        expect(onProfileError).not.toHaveBeenCalled();
+        expect(onProfileResult).not.toHaveBeenCalled();
       } finally {
         dispatchCleanup.resolve();
         acknowledgement.resolve("cleanup");
@@ -396,9 +388,7 @@ describe("Buzz bot-owned thread mentions", () => {
   }) => {
     const { runtime, account, onMessage, receive } = inboundFixture({ groupPolicy: "open" });
     await startTestBus({ onMessage });
-    const roomSubscription = findSubscription(9);
-    expect(roomSubscription).toBeDefined();
-    const root = (content: string, tags: string[][] = [["h", CHANNEL_ID]]) =>
+    const root = (content: string, tags: string[][] = [ROOM_TAG]) =>
       structuredClone(botMessage(content, { tags }));
     const botRoot = root("bot root");
     const foreignRoot = senderMessage("human root");

@@ -71,10 +71,7 @@ import { setBuzzRuntime } from "./runtime.js";
 import { BUZZ_MAX_CONFIGURED_ROOMS } from "./subscription-budget.js";
 import { resolveBuzzAccount } from "./types.js";
 
-const BUZZ_MESSAGE_KIND = 9;
-const BUZZ_ROOM_MEMBERSHIP_KIND = 39_002;
 const ACCOUNT_ID = "default";
-const SECOND_ACCOUNT_ID = "second";
 const CHANNEL_ID = "7c4a6d2a-2ed9-4b4e-a5e2-4d705ee9b34c";
 const SECOND_CHANNEL_ID = "1b8f5c33-9a21-4d0e-8f77-2b6c1d4e5a90";
 const PRIVATE_KEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -92,10 +89,6 @@ let currentNowMs = START_SECONDS * 1_000;
 let handled: string[] = [];
 let gates = new Map<string, Promise<void>>();
 
-function nowSeconds(): number {
-  return Math.floor(currentNowMs / 1000);
-}
-
 function advanceSeconds(seconds: number): void {
   currentNowMs += seconds * 1_000;
 }
@@ -110,7 +103,7 @@ function postRoomMessage(text: string, createdAt: number, channelId = CHANNEL_ID
   history.storedEvents.push(
     finalizeEvent(
       {
-        kind: BUZZ_MESSAGE_KIND,
+        kind: 9,
         content: text,
         created_at: createdAt,
         tags: [["h", channelId]],
@@ -123,7 +116,7 @@ function postRoomMessage(text: string, createdAt: number, channelId = CHANNEL_ID
 function publishRoomMembership(channelId: string): void {
   history.storedEvents.push({
     id: `membership-${channelId}`,
-    kind: BUZZ_ROOM_MEMBERSHIP_KIND,
+    kind: 39_002,
     pubkey: RELAY_PUBLIC_KEY,
     created_at: START_SECONDS - 3_600,
     content: "",
@@ -136,8 +129,8 @@ function publishRoomMembership(channelId: string): void {
   });
 }
 
-function buildConfig(channelIds: string[]): OpenClawConfig {
-  return {
+function startGatewayProcess(channelIds: string[] = [CHANNEL_ID]) {
+  const cfg: OpenClawConfig = {
     channels: {
       buzz: {
         relayUrl: "wss://buzz.example.com",
@@ -145,21 +138,20 @@ function buildConfig(channelIds: string[]): OpenClawConfig {
         groups: Object.fromEntries(channelIds.map((channelId) => [channelId, {}])),
       },
     },
-  } as OpenClawConfig;
-}
-
-function startGatewayProcess(channelIds: string[] = [CHANNEL_ID]): {
-  abort: AbortController;
-  lifecycle: Promise<void>;
-} {
-  const cfg = buildConfig(channelIds);
+  };
   const account = resolveBuzzAccount({ cfg });
   const abort = new AbortController();
-  const ctx = {
+  const lifecycle = startBuzzGatewayAccount({
     ...createStartAccountContext({ account, cfg, abortSignal: abort.signal }),
     scheduler: createTestPluginServiceScheduler(),
+  });
+  return {
+    lifecycle,
+    stop: async () => {
+      abort.abort();
+      await lifecycle;
+    },
   };
-  return { abort, lifecycle: startBuzzGatewayAccount(ctx) };
 }
 
 async function waitForSettled(predicate: () => boolean | Promise<boolean>): Promise<void> {
@@ -185,8 +177,7 @@ async function runGatewayProcess(
       await waitForSettled(params.until);
     }
   } finally {
-    gatewayProcess.abort.abort();
-    await gatewayProcess.lifecycle;
+    await gatewayProcess.stop();
   }
 }
 
@@ -316,7 +307,7 @@ describe("Buzz gateway cold-start recovery", () => {
     };
 
     const first = await saturate(ACCOUNT_ID);
-    const second = await saturate(SECOND_ACCOUNT_ID);
+    const second = await saturate("second");
 
     expect(first.sinceByRoom.size).toBe(BUZZ_MAX_CONFIGURED_ROOMS);
     expect(second.sinceByRoom.size).toBe(BUZZ_MAX_CONFIGURED_ROOMS);
@@ -335,7 +326,7 @@ describe("Buzz gateway cold-start recovery", () => {
     postRoomMessage("before-second-room-setup", START_SECONDS + 60, SECOND_CHANNEL_ID);
     advanceSeconds(600);
     await runGatewayProcess({ channelIds: [CHANNEL_ID, SECOND_CHANNEL_ID] });
-    expect(roomSubscriptionSince(SECOND_CHANNEL_ID)).toBe(nowSeconds());
+    expect(roomSubscriptionSince(SECOND_CHANNEL_ID)).toBe(START_SECONDS + 600);
     expect(handled).not.toContain("before-second-room-setup");
     expect(roomSubscriptionSince(CHANNEL_ID)).toBe(START_SECONDS);
   });
@@ -360,8 +351,7 @@ describe("Buzz gateway cold-start recovery", () => {
     for (const settler of settlers) {
       settler.settle();
     }
-    gatewayProcess.abort.abort();
-    await gatewayProcess.lifecycle;
+    await gatewayProcess.stop();
     expect(await readWatermark()).toBe(START_SECONDS);
 
     openProcessBoundary();
@@ -421,8 +411,7 @@ describe("Buzz gateway cold-start recovery", () => {
     await waitForSettled(() => handled.includes("fail-msg") && handled.includes("ok-msg"));
     failing.fail(new Error("agent dispatch failed"));
     succeeding.settle();
-    gatewayProcess.abort.abort();
-    await gatewayProcess.lifecycle;
+    await gatewayProcess.stop();
 
     openProcessBoundary();
     advanceSeconds(600);
