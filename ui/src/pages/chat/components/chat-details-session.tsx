@@ -295,7 +295,7 @@ export const ChatDetailsSession = defineSolidBridge<Props>(
             <Show when={props.props}>
               <section
                 class="chat-details-session"
-                data-initial-pending={!revealed() ? "" : undefined}
+                data-held={!revealed() ? "" : undefined}
                 data-details-desktop={props.desktop ? "" : undefined}
               >
                 <Show

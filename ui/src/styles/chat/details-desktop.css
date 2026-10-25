@@ -42,7 +42,7 @@
   scrollbar-color: var(--details-scrollbar-thumb) transparent;
 }
 
-.chat-details-desktop-body:has(.chat-details-session[data-initial-pending]) {
+.chat-details-desktop-body:has([data-held]) {
   visibility: hidden;
 }
 

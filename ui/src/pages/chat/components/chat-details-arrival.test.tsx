@@ -74,11 +74,11 @@ it("retains cached Details while its descriptor arrives and replaces a new incar
     onOpenSubagents() {},
   });
   const section = view.container.querySelector(".chat-details-session")!;
-  expect(section.hasAttribute("data-initial-pending")).toBe(true);
+  expect(section.hasAttribute("data-held")).toBe(true);
   view.update({ cachePending: false });
-  expect(section.hasAttribute("data-initial-pending")).toBe(false);
+  expect(section.hasAttribute("data-held")).toBe(false);
   view.update({ subagentSessionsSettled: false });
-  expect(section.hasAttribute("data-initial-pending")).toBe(false);
+  expect(section.hasAttribute("data-held")).toBe(false);
   const environment = view.group("environment");
   expect(environment).not.toBeNull();
   view.update({
