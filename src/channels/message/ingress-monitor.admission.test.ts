@@ -5,7 +5,6 @@ import { SqliteWorkerError } from "../../infra/sqlite-worker-contract.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import {
   createChannelIngressMonitor,
-  type ChannelIngressMonitorPayloadCodec,
   type CreateChannelIngressMonitorOptions,
 } from "./ingress-monitor.js";
 import { createChannelIngressQueue, type ChannelIngressQueue } from "./ingress-queue.js";
@@ -35,27 +34,18 @@ function createMonitor(
   return createChannelIngressMonitor<RawEvent, string, StoredEvent>({
     queue,
     inspect: (raw) => ({ eventId: raw.id, laneKey: raw.lane ?? "lane:a" }),
-    payload: createRawEventPayload<RawEvent>(),
+    payload: {
+      storage: "raw-event",
+      version: 1,
+      serialize: (raw) => JSON.stringify(raw),
+      deserialize: (body) => JSON.parse(body) as RawEvent,
+      createClaimError: (kind) => new Error(kind),
+    },
     deliver: vi.fn(),
     pollIntervalMs: 60_000,
     retention: { pruneIntervalMs: 60_000 },
     ...options,
   });
-}
-
-function createRawEventPayload<TRaw>(): ChannelIngressMonitorPayloadCodec<
-  TRaw,
-  string,
-  StoredEvent,
-  unknown
-> {
-  return {
-    storage: "raw-event",
-    version: 1,
-    serialize: (raw) => JSON.stringify(raw),
-    deserialize: (body) => JSON.parse(body) as TRaw,
-    createClaimError: (kind) => new Error(kind),
-  };
 }
 
 function holdClaimInspection() {
@@ -401,31 +391,13 @@ describe("channel ingress monitor start capacity", () => {
   }
 
   it.each([
-    {
-      name: "released deferral budget",
-      startLimit: 2,
-      releaseLane: true,
-      settled: false,
-      capacity: 4,
-    },
-    {
-      name: "returned deferral slots",
-      startLimit: 2,
-      releaseLane: true,
-      settled: true,
-      capacity: 2,
-    },
-    { name: "held lane", startLimit: 1, releaseLane: false, settled: false, capacity: 1 },
-    {
-      name: "default held limit",
-      startLimit: undefined,
-      releaseLane: false,
-      settled: false,
-      capacity: 32,
-    },
-  ])(
-    "bounds deliveries across pumps at $name and recovers",
-    async ({ startLimit, releaseLane, settled, capacity }) => {
+    ["released deferral budget", 2, true, false, 4],
+    ["returned deferral slots", 2, true, true, 2],
+    ["held lane", 1, false, false, 1],
+    ["default held limit", undefined, false, false, 32],
+  ] as const)(
+    "bounds deliveries across pumps at %s and recovers",
+    async (_name, startLimit, releaseLane, settled, capacity) => {
       const started: string[] = [];
       const parked = createDeferred();
       const monitor = createCapacityMonitor(
