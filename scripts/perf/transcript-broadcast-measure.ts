@@ -1,3 +1,9 @@
+// Add --list-filter-churn to --scenario memory-soak --mixed-rpc to rotate sidebar/search filters.
+// --gateway-preload <file> imports benchmark instrumentation after tsx for source or dist entries;
+// result.json records its resolved path and SHA-256. Use the same instrumentation on both arms.
+// Add --worktree-tool-churn to memory-soak --stress-tools --mixed-rpc to give each
+// foreground session its own managed worktree, read/grep its README, and cycle list searches.
+// This mode keeps a fixed viewer set instead of adding reconnect churn.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createCipheriv, createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -88,12 +94,14 @@ const { values } = parseArgs({
     "worker-baseline-dir": { type: "string" },
     "baseline-owners": { type: "boolean", default: false },
     "stress-tools": { type: "boolean", default: false },
+    "worktree-tool-churn": { type: "boolean", default: false },
     "attempt-setup-image": { type: "string" },
     "cold-session-rounds": { type: "string", default: "0" },
     "stress-session-store": { type: "boolean", default: false },
     "transcript-hydration-counts": { type: "boolean", default: false },
     "operator-access-policy": { type: "boolean", default: false },
     "session-event-wake": { type: "boolean", default: false },
+    "cron-operator-turn": { type: "boolean", default: false },
     "authority-counts": { type: "boolean", default: false },
     "config-capture-counts": { type: "boolean", default: false },
     "config-capture-source": { type: "string" },
@@ -114,6 +122,7 @@ const { values } = parseArgs({
     "startup-temperature": { type: "string", default: "warm" },
     "startup-targets": { type: "string" },
     "startup-source-preload": { type: "string" },
+    "gateway-preload": { type: "string" },
     revision: { type: "string" },
     operations: { type: "string" },
     "warmup-operations": { type: "string" },
@@ -259,9 +268,21 @@ const startupSourcePreload = values["startup-source-preload"]
         .digest("hex"),
     }
   : undefined;
+const gatewayPreload = values["gateway-preload"]
+  ? {
+      path: realpathSync(path.resolve(values["gateway-preload"])),
+      sha256: createHash("sha256").update(readFileSync(values["gateway-preload"])).digest("hex"),
+    }
+  : undefined;
 const retentionScenario = scenario === "attempt-retention";
-if (values["list-filter-churn"] && scenario !== "sessions.list") {
-  throw new Error("--list-filter-churn requires --scenario sessions.list");
+if (
+  values["list-filter-churn"] &&
+  scenario !== "sessions.list" &&
+  !(scenario === "memory-soak" && values["mixed-rpc"])
+) {
+  throw new Error(
+    "--list-filter-churn requires --scenario sessions.list or memory-soak --mixed-rpc",
+  );
 }
 const idleScenario = scenario === "session-idle-retention";
 const soakScenario = scenario === "memory-soak";
@@ -312,12 +333,18 @@ if (
 }
 const toolScenario = scenario === "chat.send" || reasoningScenario;
 const chatActiveHoldMs = integer(values["chat-active-hold-ms"], "--chat-active-hold-ms", 0);
-if (chatActiveHoldMs && (scenario !== "chat.send" || values["session-event-wake"])) {
+if (
+  chatActiveHoldMs &&
+  (scenario !== "chat.send" || values["session-event-wake"] || values["cron-operator-turn"])
+) {
   throw new Error("--chat-active-hold-ms requires direct --scenario chat.send");
 }
 const chatAttachmentBytes =
   integer(values["chat-attachment-kib"], "--chat-attachment-kib", 0) * 1024;
-if (chatAttachmentBytes && (scenario !== "chat.send" || values["session-event-wake"])) {
+if (
+  chatAttachmentBytes &&
+  (scenario !== "chat.send" || values["session-event-wake"] || values["cron-operator-turn"])
+) {
   throw new Error("--chat-attachment-kib requires direct --scenario chat.send");
 }
 const chatAttachmentContent = chatAttachmentBytes
@@ -519,6 +546,9 @@ if (
 const chunkCount = integer(values.chunks, "--chunks");
 const chunkIntervalMs = integer(values["chunk-interval-ms"], "--chunk-interval-ms", 0);
 const listIntervalMs = integer(values["list-interval-ms"], "--list-interval-ms", 0);
+if (soakScenario && values["list-filter-churn"] && !listIntervalMs) {
+  throw new Error("memory-soak --list-filter-churn requires --list-interval-ms");
+}
 if (connectionScenario && listIntervalMs) {
   throw new Error("connection scenarios use their own sidebar refresh; omit --list-interval-ms");
 }
@@ -529,6 +559,14 @@ if (values["stress-tools"] && !toolScenario) {
 }
 if (values["stress-session-store"] && !values["stress-tools"]) {
   throw new Error("--stress-session-store requires --stress-tools");
+}
+if (
+  values["worktree-tool-churn"] &&
+  (!soakScenario || !values["stress-tools"] || !values["mixed-rpc"] || historyTurns > 0)
+) {
+  throw new Error(
+    "--worktree-tool-churn requires memory-soak --stress-tools --mixed-rpc without seeded history",
+  );
 }
 if (
   values["operator-access-policy"] &&
@@ -571,6 +609,17 @@ if (
 ) {
   throw new Error(
     "--config-capture-counts requires --scenario chat.send --entry src/entry.ts in a separate counting pass without profiling or diagnostics",
+  );
+}
+if (
+  values["cron-operator-turn"] &&
+  (!values["operator-access-policy"] ||
+    values["session-event-wake"] ||
+    sessionCount !== 1 ||
+    resetEveryRounds !== 0)
+) {
+  throw new Error(
+    "--cron-operator-turn requires --operator-access-policy --sessions 1 --reset-every-rounds 0 and no session-event wake",
   );
 }
 if (
@@ -934,6 +983,8 @@ if (values["mixed-rpc"] && fixtureSessionCount < 1) {
   throw new Error("--mixed-rpc requires retained fixture sessions for chat.history");
 }
 let stressWorktree: string | undefined;
+const worktreeToolRoots = new Map<number, string>();
+const worktreeToolSearches = new Map<string, number>();
 let diffControlOriginal: string | undefined;
 if (values["stress-tools"] || values["mixed-rpc"] || values["attempt-setup-image"]) {
   if (!isRecord(project) || typeof project.path !== "string") {
@@ -1015,6 +1066,9 @@ cfg.tools = {
   codeMode: values["stress-tools"],
   ...(values["stress-tools"] ? { exec: { host: "gateway", mode: "full" } } : {}),
 };
+if (values["cron-operator-turn"]) {
+  cfg.cron = { ...cfg.cron, enabled: true };
+}
 if (stressWorktree) {
   cfg.agents.entries.main.workspace = stressWorktree;
 }
@@ -1773,6 +1827,12 @@ function createPollRandom(round: number, client: number) {
 const sessionEventRuns = new Map<string, { resolve: (runId: string) => void }>();
 const queuedChatInputs = new Map<string, () => void>();
 const terminalChatInputs = new Map<string, (state: string) => void>();
+const cronOperatorSetupPrompt = "Create the synthetic scheduled operator continuation fixtures.";
+const cronOperatorSetupCallId = "call_cron_operator_setup";
+const cronOperatorJobs: Array<{ id?: string; cohortId: string }> = values["cron-operator-turn"]
+  ? [{ cohortId: randomUUID() }]
+  : [];
+let cronOperatorSetupCompleted = false;
 let cohort:
   | {
       id: string;
@@ -1868,6 +1928,51 @@ const mock = createServer((req, res) => {
           .map(readMockUserText)
           .find((text) => text !== undefined)
       : undefined;
+    if (values["cron-operator-turn"] && lastUser?.includes(cronOperatorSetupPrompt)) {
+      const setupOutput =
+        facts.hasToolOutput && Array.isArray(input)
+          ? input.findLast((item) => isRecord(item) && item.type === "function_call_output")
+          : undefined;
+      let setupEvents;
+      if (setupOutput) {
+        if (!contentText(setupOutput.output).includes("synthetic-cron-operator-created")) {
+          throw new Error(`Cron operator setup failed: ${contentText(setupOutput.output)}`);
+        }
+        cronOperatorSetupCompleted = true;
+        setupEvents = responseEvents(["Synthetic scheduled operator continuations created."]);
+      } else {
+        const jobs = cronOperatorJobs.map(({ cohortId }) => ({
+          name: `Synthetic operator continuation ${cohortId}`,
+          enabled: false,
+          schedule: { kind: "every", everyMs: 3_600_000 },
+          sessionTarget: `session:${keys[0]}`,
+          wakeMode: "now",
+          payload: {
+            kind: "agentTurn",
+            message: `Reply with benchmark stream 1. Transcript-broadcast cohort ${cohortId}.`,
+            toolsAllow: ["*"],
+            timeoutSeconds: 120,
+          },
+          delivery: { mode: "none" },
+          failureAlert: false,
+        }));
+        setupEvents = functionCallEvents(
+          "exec",
+          {
+            title: "Create synthetic scheduled continuations",
+            awaitResults: true,
+            code: `for (const job of ${JSON.stringify(jobs)}) json(await automations({ action: "add", job })); return "synthetic-cron-operator-created";`,
+          },
+          cronOperatorSetupCallId,
+        );
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      for (const event of setupEvents) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+      res.end();
+      return;
+    }
     const index = facts.turnIndex;
     const toolOutputs =
       Array.isArray(input) &&
@@ -1882,7 +1987,7 @@ const mock = createServer((req, res) => {
     const toolOutput = toolOutputs.at(-1);
     const continuation = toolScenario && toolOutput !== undefined;
     const primaryMessage = cohort
-      ? `Reply with benchmark stream ${index}. Transcript-broadcast cohort ${cohort.id}.`
+      ? `Reply with benchmark stream ${index}. Transcript-broadcast cohort ${cronOperatorJobs[0]?.cohortId ?? cohort.id}.`
       : undefined;
     const primary =
       primaryMessage !== undefined &&
@@ -1893,7 +1998,7 @@ const mock = createServer((req, res) => {
       index >= 1 &&
       index <= runCount &&
       lastUser !== undefined &&
-      (values["session-event-wake"]
+      (values["session-event-wake"] || values["cron-operator-turn"]
         ? lastUser.includes(primaryMessage)
         : chatAttachmentContent
           ? lastUser
@@ -1955,7 +2060,7 @@ const mock = createServer((req, res) => {
           (toolResult) =>
             typeof toolResult.output !== "string" ||
             !toolResult.output.includes(
-              values["attempt-setup-image"]
+              values["attempt-setup-image"] || values["worktree-tool-churn"]
                 ? "# Synthetic project "
                 : "Synthetic allocation benchmark tool result.",
             ) ||
@@ -2061,6 +2166,12 @@ const mock = createServer((req, res) => {
       let reasoningReplayKey = toolOutput?.call_id;
       if (primary && toolScenario && cohort) {
         const currentCohort = cohort;
+        const toolWorktree = values["worktree-tool-churn"]
+          ? worktreeToolRoots.get(index)
+          : stressWorktree;
+        if (values["worktree-tool-churn"] && !toolWorktree) {
+          throw new Error("Synthetic foreground turn has no owned worktree");
+        }
         const items = toolPaths.map((toolPath, toolIndex) => {
           const callId = `call_allocation_${currentCohort.id}_${index}_${toolIndex}`;
           currentCohort.toolCallIds.add(callId);
@@ -2085,9 +2196,13 @@ const mock = createServer((req, res) => {
                     awaitResults: true,
                     code:
                       storeCode +
-                      `json(await read({ path: ${JSON.stringify(toolPath)} }));\n` +
-                      `const shell = await exec({ command: "pwd", workdir: ${JSON.stringify(stressWorktree)} });\n` +
-                      `if (shell.exitCode !== 0 || shell.aggregated.trim() !== ${JSON.stringify(stressWorktree)}) throw new Error("Synthetic exec worktree mismatch");\n` +
+                      `json(await read({ path: ${JSON.stringify(values["worktree-tool-churn"] && toolWorktree ? path.join(toolWorktree, "README.md") : toolPath)} }));\n` +
+                      `const shell = await exec({ command: "pwd", workdir: ${JSON.stringify(toolWorktree)} });\n` +
+                      `if (shell.exitCode !== 0 || shell.aggregated.trim() !== ${JSON.stringify(toolWorktree)}) throw new Error("Synthetic exec worktree mismatch");\n` +
+                      (values["worktree-tool-churn"]
+                        ? `const match = await exec({ command: "grep -n 'Synthetic project' README.md", workdir: ${JSON.stringify(toolWorktree)} });\n` +
+                          'if (match.exitCode !== 0 || !match.aggregated.includes("Synthetic project")) throw new Error("Synthetic worktree grep failed");\n'
+                        : "") +
                       'return "synthetic-code-exec-verified";',
                   }
                 : { path: toolPath },
@@ -2578,7 +2693,7 @@ if (values["dashboard-rpc"] && Array.isArray(fixture.projectWorktrees)) {
     });
   }
 }
-function bindConnectedOptionsWorktree(target: (typeof diffTargets)[number], created: unknown) {
+function readManagedWorktree(created: unknown): string {
   if (
     !isRecord(created) ||
     !isRecord(created.entry) ||
@@ -2586,15 +2701,19 @@ function bindConnectedOptionsWorktree(target: (typeof diffTargets)[number], crea
     typeof created.entry.worktree.id !== "string" ||
     typeof created.entry.sessionRoot !== "string"
   ) {
-    throw new Error("Connected GitHub options require a session-owned managed worktree");
+    throw new Error("Synthetic session requires a session-owned managed worktree");
   }
   const worktree = realpathSync(created.entry.sessionRoot);
   if (
     !worktree.startsWith(`${realpathSync(root)}${path.sep}`) ||
     !readFileSync(path.join(worktree, ".git"), "utf8").startsWith("gitdir: ")
   ) {
-    throw new Error("Connected GitHub worktree must be linked and inside the synthetic fixture");
+    throw new Error("Managed worktree must be linked and inside the synthetic fixture");
   }
+  return worktree;
+}
+function bindConnectedOptionsWorktree(target: (typeof diffTargets)[number], created: unknown) {
+  const worktree = readManagedWorktree(created);
   target.worktree = worktree;
   target.original = readFileSync(path.join(worktree, "README.md"), "utf8");
 }
@@ -2618,7 +2737,7 @@ const mixedRpcMethods = [
   "sessions.list",
   "chat.history",
   "sessions.diff",
-  "connect",
+  ...(values["worktree-tool-churn"] ? [] : ["connect"]),
   ...dashboardRpcShapes.map(({ method }) => method),
 ];
 const stressParentKey = "agent:main:transcript-broadcast-measure-native-parent";
@@ -3394,6 +3513,10 @@ async function runRound(
   measuredRound?: number,
   roundKeys = keys,
 ) {
+  const cronOperatorJob = values["cron-operator-turn"] ? cronOperatorJobs[0] : undefined;
+  if (values["cron-operator-turn"] && !cronOperatorJob?.id) {
+    throw new Error("Cron operator fixture is not ready");
+  }
   if (
     retentionScenario ||
     (soakScenario &&
@@ -3615,6 +3738,40 @@ async function runRound(
           (retentionScenario || idleScenario
             ? `\nSynthetic prompt payload: ${promptContent.update(Buffer.alloc(promptBytes / 2)).toString("hex")}`
             : "");
+        if (cronOperatorJob) {
+          const started = Promise.withResolvers<string>();
+          const timer = setTimeout(
+            () => started.reject(new Error("Cron operator turn did not start")),
+            45_000,
+          );
+          sessionEventRuns.set(sessionKey, started);
+          try {
+            const [, result] = await Promise.all([
+              started.promise.then((id) => {
+                runId = id;
+                current.turns.get(index + 1)!.runId = id;
+              }),
+              rpc(client, "cron.run", {
+                id: cronOperatorJob.id,
+                mode: "force",
+                waitTimeoutMs: 170_000,
+              }),
+            ]);
+            if (
+              !isRecord(result) ||
+              !isRecord(result.run) ||
+              result.run.status !== "ok" ||
+              result.run.sessionKey !== sessionKey
+            ) {
+              throw new Error(`Scheduled operator continuation failed: ${JSON.stringify(result)}`);
+            }
+          } finally {
+            clearTimeout(timer);
+            sessionEventRuns.delete(sessionKey);
+          }
+          turnLatencies.push(performance.now() - turnStarted);
+          return;
+        }
         if (values["session-event-wake"]) {
           const started = Promise.withResolvers<string>();
           const timer = setTimeout(
@@ -4187,9 +4344,12 @@ function cleanup() {
   return (cleanupPromise ??= (async () => {
     closing = true;
     cohort?.release();
-    if (stressCronJobId) {
+    for (const id of [
+      ...(stressCronJobId ? [stressCronJobId] : []),
+      ...cronOperatorJobs.flatMap((job) => (job.id ? [job.id] : [])),
+    ]) {
       try {
-        const result = await clients[0]?.request("cron.remove", { id: stressCronJobId }, 5000);
+        const result = await clients[0]?.request("cron.remove", { id }, 5000);
         if (!result?.ok) {
           throw new Error("cron.remove did not succeed");
         }
@@ -4240,6 +4400,7 @@ try {
         : []),
       "--import",
       "./scripts/tsx.mjs",
+      ...(gatewayPreload ? ["--import", gatewayPreload.path] : []),
       ...(configCaptureSource ? ["--import", configCaptureSourcePreload] : []),
       ...(authoritySourcePreload ? ["--import", authoritySourcePreload.path] : []),
       ...(startupSourcePreload ? ["--import", startupSourcePreload.path] : []),
@@ -4320,23 +4481,32 @@ try {
           displayName: "Synthetic native subagent parent",
         });
       }
-      for (const key of keys) {
+      for (const [keyIndex, key] of keys.entries()) {
         if (historyTurns) {
           continue;
         }
-        await rpc(client, "sessions.create", {
+        const created = await rpc(client, "sessions.create", {
           key,
           ...(stressWorktree ? { cwd: stressWorktree } : {}),
-          ...(values["activity-summaries"] || sessionEventAncestors === 0
+          ...(values["activity-summaries"] ||
+          values["cron-operator-turn"] ||
+          sessionEventAncestors === 0
             ? {}
             : { parentSessionKey: parentKey, spawnDepth: 1 }),
           fork: false,
-          ...(values["attempt-setup-image"]
+          ...(values["attempt-setup-image"] || values["worktree-tool-churn"]
             ? { worktree: true, worktreeBaseRef: "refs/heads/main" }
             : {}),
           visibility: "shared",
           displayName: "Synthetic broadcast child",
         });
+        if (values["worktree-tool-churn"]) {
+          const worktree = readManagedWorktree(created);
+          if ([...worktreeToolRoots.values()].includes(worktree)) {
+            throw new Error("Synthetic foreground sessions must own distinct worktrees");
+          }
+          worktreeToolRoots.set(keyIndex + 1, worktree);
+        }
         await rpc(client, "sessions.reset", { key });
       }
     }
@@ -4845,6 +5015,41 @@ try {
     }
     return undefined;
   };
+  if (values["cron-operator-turn"]) {
+    const runId = randomUUID();
+    await rpc(sender, "chat.send", {
+      sessionKey: keys[0],
+      message: cronOperatorSetupPrompt,
+      deliver: false,
+      idempotencyKey: runId,
+    });
+    const result = await rpc(sender, "agent.wait", { runId, timeoutMs: 170_000 });
+    if (!isRecord(result) || result.status !== "ok" || !cronOperatorSetupCompleted) {
+      throw new Error("Scheduled operator fixture creation failed");
+    }
+    const listed = await rpc(sender, "cron.list", {
+      includeDisabled: true,
+      includeDeliveryPreviews: false,
+    });
+    if (!isRecord(listed) || !Array.isArray(listed.jobs)) {
+      throw new Error("Scheduled operator jobs were not listed");
+    }
+    for (const fixtureJob of cronOperatorJobs) {
+      const job = listed.jobs.find(
+        (item) =>
+          isRecord(item) && item.name === `Synthetic operator continuation ${fixtureJob.cohortId}`,
+      );
+      if (
+        !isRecord(job) ||
+        typeof job.id !== "string" ||
+        job.sessionTarget !== `session:${keys[0]}`
+      ) {
+        throw new Error("Scheduled operator job did not bind its creator conversation");
+      }
+      fixtureJob.id = job.id;
+    }
+    await drainEvents();
+  }
   const warmupStartedAt = performance.now();
   if (scenario === "chat.startup" && startupTemperature === "warm") {
     for (const target of startupTargets) {
@@ -5299,13 +5504,27 @@ try {
                       target.worktree,
                     );
                   } else {
+                    const search = values["worktree-tool-churn"]
+                      ? Math.floor(poll / mixedRpcMethods.length) % 2 === 0
+                        ? "Synthetic"
+                        : "investigation"
+                      : undefined;
+                    // Worktree churn keeps its fixed search fixtures when both presets are selected.
+                    const listFilter = search
+                      ? { archived: "all", search }
+                      : values["list-filter-churn"]
+                        ? listFilterShapes[
+                            (round + clientIndex + Math.floor(poll / mixedRpcMethods.length)) %
+                              listFilterShapes.length
+                          ]
+                        : undefined;
                     const page = await rpc(
                       client,
                       method,
                       {
                         rowMode,
                         limit,
-                        archived: "all",
+                        ...(listFilter ?? { archived: "all" }),
                         ...(values["list-profile-reference"]
                           ? { involvingProfileId: values["list-profile-reference"] }
                           : {}),
@@ -5318,9 +5537,16 @@ try {
                       page.count !== Math.min(limit, page.totalCount) ||
                       !Array.isArray(page.sessions) ||
                       page.sessions.length !== page.count ||
-                      (page.count === 0 && !values["list-profile-reference"])
+                      (page.count === 0 &&
+                        !values["list-profile-reference"] &&
+                        (search !== undefined ||
+                          !listFilter ||
+                          Object.keys(listFilter).length === 0))
                     ) {
                       throw new Error("concurrent sessions.list did not return the requested page");
+                    }
+                    if (search) {
+                      worktreeToolSearches.set(search, (worktreeToolSearches.get(search) ?? 0) + 1);
                     }
                   }
                   const ended = performance.now();
@@ -5434,6 +5660,22 @@ try {
     const authorityCounts = values["operator-access-policy"]
       ? await controlAuthorityCounters(gateway, "stop")
       : undefined;
+    if (
+      values["cron-operator-turn"] &&
+      (!authorityCounts?.resume ||
+        (values["authority-counts"] &&
+          (!authorityCounts.host?.counts["cron-operator-source.assertCurrent"] ||
+            !authorityCounts.host?.counts["server-cron.isAgentAvailable"])))
+    ) {
+      throw new Error(
+        `Scheduled turn did not restore its captured operator source: ${JSON.stringify({
+          round,
+          resumes: authorityCounts?.resume,
+          sourceAssertions: authorityCounts?.host?.counts["cron-operator-source.assertCurrent"],
+          availabilityChecks: authorityCounts?.host?.counts["server-cron.isAgentAvailable"],
+        })}`,
+      );
+    }
     if (
       authorityCounts &&
       (!authorityCounts.assert || !authorityCounts.tools || !authorityCounts.messageAppends)
@@ -6088,6 +6330,7 @@ try {
   }
   const result = {
     output,
+    gatewayPreload,
     gatewayReadyMs,
     syntheticPlugins: Math.max(pluginCount, reloadPluginId || scopePluginId ? 1 : 0),
     ...(values["plugin-update"]
@@ -6202,9 +6445,22 @@ try {
         }
       : {}),
     stressTools: values["stress-tools"],
+    worktreeToolChurn: values["worktree-tool-churn"],
+    ...(values["worktree-tool-churn"]
+      ? {
+          worktreeTools: {
+            sessions: [...worktreeToolRoots].map(([index, worktree]) => ({
+              sessionKey: keys[index - 1],
+              worktree,
+            })),
+            successfulListSearches: Object.fromEntries(worktreeToolSearches),
+          },
+        }
+      : {}),
     stressSessionStore: values["stress-session-store"],
     transcriptHydrationCounts: values["transcript-hydration-counts"],
     operatorAccessPolicy: values["operator-access-policy"],
+    cronOperatorTurn: values["cron-operator-turn"],
     sessionEventWake: values["session-event-wake"],
     authorityCounts: values["authority-counts"],
     configCaptureCounts: values["config-capture-counts"],
