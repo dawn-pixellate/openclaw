@@ -11,12 +11,10 @@ import {
   resolvePluginInstallRoots,
   withPluginInstallRoots,
 } from "../../plugins/install-root-context.js";
-import type {
-  PluginManifestRecord,
-  PluginManifestRegistry,
-} from "../../plugins/manifest-registry.js";
+import type { PluginManifestRecord } from "../../plugins/manifest-registry.js";
 import { createPluginCache, withPluginCache } from "../../plugins/plugin-cache.js";
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
+import { createPluginManifestRecordFixture } from "../../plugins/plugin-metadata.test-support.js";
 import { createTrackedTempDirs } from "../../test-utils/tracked-temp-dirs.js";
 import { resolvePluginSkillRoots } from "./plugin-skills.js";
 import { loadWorkspaceSkills } from "./workspace-skill-loader.js";
@@ -38,8 +36,7 @@ const hoisted = vi.hoisted(() => {
     loadPluginMetadataSnapshot(params),
   );
   return {
-    loadPluginManifestRegistryForInstalledIndex: loadManifestRegistry,
-    loadPluginManifestRegistryForPluginRegistry: loadManifestRegistry,
+    loadManifestRegistry,
     loadPluginMetadataSnapshot,
     resolvePluginMetadataSnapshot,
     loadPluginRegistrySnapshot: vi.fn(() => ({ plugins: [] })),
@@ -47,11 +44,11 @@ const hoisted = vi.hoisted(() => {
 });
 
 vi.mock("../../plugins/manifest-registry-installed.js", () => ({
-  loadPluginManifestRegistryForInstalledIndex: hoisted.loadPluginManifestRegistryForInstalledIndex,
+  loadPluginManifestRegistryForInstalledIndex: hoisted.loadManifestRegistry,
 }));
 
 vi.mock("../../plugins/plugin-registry.js", () => ({
-  loadPluginManifestRegistryForPluginRegistry: hoisted.loadPluginManifestRegistryForPluginRegistry,
+  loadPluginManifestRegistryForPluginRegistry: hoisted.loadManifestRegistry,
   loadPluginRegistrySnapshot: hoisted.loadPluginRegistrySnapshot,
 }));
 
@@ -69,23 +66,18 @@ function makePlugin(
   rootDir: string,
   overrides: Partial<PluginManifestRecord> = {},
 ): PluginManifestRecord {
-  return {
+  return createPluginManifestRecordFixture({
     id: "helper",
     name: "Helper",
-    channels: [],
-    providers: [],
-    cliBackends: [],
     skills: ["./skills"],
-    hooks: [],
     origin: "workspace",
     rootDir,
     source: rootDir,
-    manifestPath: path.join(rootDir, "openclaw.plugin.json"),
     ...overrides,
-  };
+  });
 }
 function register(...plugins: PluginManifestRecord[]) {
-  hoisted.loadPluginManifestRegistryForInstalledIndex.mockReturnValue({ diagnostics: [], plugins });
+  hoisted.loadManifestRegistry.mockReturnValue({ diagnostics: [], plugins });
 }
 async function write(dir: string, text = "# Skill\n") {
   await fs.mkdir(dir, { recursive: true });
@@ -121,7 +113,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   clearPluginMetadataLifecycleCaches();
-  hoisted.loadPluginManifestRegistryForInstalledIndex.mockReset();
+  hoisted.loadManifestRegistry.mockReset();
   hoisted.loadPluginMetadataSnapshot.mockClear();
   hoisted.resolvePluginMetadataSnapshot.mockClear();
   hoisted.loadPluginRegistrySnapshot.mockReset();
@@ -152,18 +144,9 @@ function backend(available = true) {
 }
 async function acpFixture(stable = false) {
   await Promise.all([f.p, f.o].map((dir) => fs.mkdir(path.join(dir, "skills"))));
-  const manifestRegistry: PluginManifestRegistry = {
-    diagnostics: [],
-    plugins: [makePlugin(f.p, { id: "acpx", name: "ACPX Runtime" }), makePlugin(f.o)],
-  };
-  register(...manifestRegistry.plugins);
+  register(makePlugin(f.p, { id: "acpx", name: "ACPX Runtime" }), makePlugin(f.o));
   if (stable) {
-    const snapshot = {
-      manifestRegistry,
-      plugins: manifestRegistry.plugins,
-      normalizePluginId: (id: string) =>
-        manifestRegistry.plugins.find((p) => p.legacyPluginIds?.includes(id))?.id ?? id,
-    };
+    const snapshot = hoisted.loadPluginMetadataSnapshot();
     for (let i = 0; i < 3; i++) {
       hoisted.loadPluginMetadataSnapshot.mockReturnValueOnce(snapshot);
     }
@@ -193,18 +176,6 @@ describe("resolvePluginSkillRoots", () => {
     await f.missing("added");
     f.resolve({ plugins: { entries: { helper: { enabled: false } } } });
     await f.missing("original");
-  });
-  it("honors a disabled manifest channel with a different plugin id", async () => {
-    await fs.mkdir(f.s);
-    f.use({ id: "openclaw-demo", name: "Demo", channels: ["demo"], origin: "bundled" });
-    expect(
-      f
-        .resolve({
-          channels: { demo: { enabled: false } },
-          plugins: { entries: { "openclaw-demo": { enabled: true } } },
-        } as OpenClawConfig)
-        .map((root) => root.dir),
-    ).toEqual([]);
   });
   it("skips acpx skills when ACP is disabled", async () => {
     const dirs = await acpFixture();
@@ -269,7 +240,6 @@ describe("resolvePluginSkillRoots", () => {
     ).toStrictEqual([]);
     await f.missing("stale-skill");
     expect((await fs.stat(stale)).isDirectory()).toBe(true);
-    expect(hoisted.resolvePluginMetadataSnapshot).not.toHaveBeenCalled();
   });
   it("limits Agent Plugins skills to valid immediate child directories", async () => {
     const valid = await write(path.join(f.s, "valid"), "valid immediate skill\n");

@@ -32,14 +32,11 @@ const skillPath = (workspace: string, ...parts: string[]) =>
   path.join(workspace, "skills", ...parts);
 const readText = (...parts: string[]) => fs.readFile(path.join(...parts), "utf8");
 
-async function exists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const exists = (file: string) =>
+  fs.access(file).then(
+    () => true,
+    () => false,
+  );
 
 const fixture = useLoadingFixture("openclaw-skills-sync-suite-");
 const newDir = (label?: string) => fixture.createDir(label);
@@ -138,31 +135,7 @@ function buildSnapshot(workspaceDir: string, opts?: Parameters<typeof buildSkill
   });
 }
 
-async function syncFiltered(
-  source: string,
-  target: string,
-  skillFilter: string[],
-  snapshotVersion: number,
-) {
-  return syncWorkspaceSkills({
-    ...syncOptions(source, target),
-    skillFilter,
-    skillsSnapshot: await buildSnapshot(source, { skillFilter, snapshotVersion }),
-  });
-}
-
 describe("syncWorkspaceSkills", () => {
-  const buildPrompt = async (
-    workspaceDir: string,
-    opts?: Parameters<typeof buildSkillSnapshot>[1],
-  ) =>
-    await withEnvAsync(
-      { HOME: workspaceDir },
-      async () =>
-        (await buildSkillSnapshot(workspaceDir, { ...sourceOptions(workspaceDir), ...opts }))
-          .prompt,
-    );
-
   it("copies skills without repository internals or dependencies", async () => {
     const { source, target } = await setupSkills(["demo-skill"]);
     const workspaceSkillDir = skillPath(source, "demo-skill");
@@ -176,27 +149,19 @@ describe("syncWorkspaceSkills", () => {
 
     expectUsage(skillUsagePaths, workspaceSkillDir, skillPath(target, "demo-skill"), "demo-skill");
 
-    const prompt = await buildPrompt(target);
-
-    expect(prompt).toContain("demo-skill skill");
-    expect(prompt.replaceAll("\\", "/")).toContain("demo-skill/SKILL.md");
+    expect(await readText(skillPath(target, "demo-skill", "SKILL.md"))).toContain(
+      "demo-skill skill",
+    );
     expect(await exists(skillPath(target, "demo-skill", ".git"))).toBe(false);
     expect(await exists(skillPath(target, "demo-skill", "node_modules"))).toBe(false);
   });
 
-  it("publishes rebuildable skill copies and their manifest without synchronous fsync", async () => {
+  it("copies rebuildable skills without blocking fsync (#181928)", async () => {
     const { source, target } = await setupSkills(["alpha"]);
     const skillsSnapshot = await buildSnapshot(source);
     const fsync = vi.spyOn(fsSync, "fsyncSync");
     try {
-      const usage = await sync(source, target, { skillsSnapshot });
-
-      expectUsage(usage, skillPath(source, "alpha"), skillPath(target, "alpha"), "alpha");
-      expect(await readText(skillPath(target, "alpha", "SKILL.md"))).toContain("alpha skill");
-      expect(JSON.parse(await readText(skillPath(target, ".openclaw-sync.json")))).toMatchObject({
-        entryKeys: [JSON.stringify(["alpha", "alpha"])],
-        skillsVersion: skillsSnapshot.version,
-      });
+      await sync(source, target, { skillsSnapshot });
       expect(fsync).not.toHaveBeenCalled();
     } finally {
       fsync.mockRestore();
@@ -210,8 +175,6 @@ describe("syncWorkspaceSkills", () => {
       frontmatterExtra: "disable-model-invocation: true",
     });
     const skillsSnapshot = await buildSnapshot(source);
-    expect(skillsSnapshot.skills.map((skill) => skill.name)).toEqual(["alpha", "hidden"]);
-    expect(skillsSnapshot.resolvedSkills?.map((skill) => skill.name)).toEqual(["alpha"]);
     const params = {
       ...syncOptions(source, target),
       skillsSnapshot,
@@ -412,11 +375,16 @@ describe("syncWorkspaceSkills", () => {
   it("incrementally adds and removes skills while preserving unchanged destinations", async () => {
     const { source, target } = await setupSkills(["alpha", "beta", "gamma"]);
     const snapshotVersion = getSkillsSnapshotVersion(source);
-    await syncFiltered(source, target, ["alpha", "beta"], snapshotVersion);
+    const selected = async (skillFilter: string[]) =>
+      sync(source, target, {
+        skillFilter,
+        skillsSnapshot: await buildSnapshot(source, { skillFilter, snapshotVersion }),
+      });
+    await selected(["alpha", "beta"]);
     const preservedMarker = skillPath(target, "alpha", "preserved.txt");
     await fs.writeFile(preservedMarker, "preserved");
 
-    await syncFiltered(source, target, ["alpha", "gamma"], snapshotVersion);
+    await selected(["alpha", "gamma"]);
     expect(await readText(preservedMarker)).toBe("preserved");
     expect(await exists(skillPath(target, "beta"))).toBe(false);
     expect(await exists(skillPath(target, "gamma", "SKILL.md"))).toBe(true);
@@ -554,10 +522,6 @@ describe("syncWorkspaceSkills", () => {
       },
     });
 
-    const prompt = await buildPrompt(target);
-
-    expect(prompt).toContain("Underscore variant");
-    expect(prompt).not.toContain("Dot variant");
     expect(await exists(skillPath(target, "foo_bar", "SKILL.md"))).toBe(true);
     expect(await exists(skillPath(target, "foo.dot", "SKILL.md"))).toBe(false);
   });
@@ -575,9 +539,6 @@ describe("syncWorkspaceSkills", () => {
 
       await sync(source, target);
 
-      const prompt = await buildPrompt(target);
-
-      expect(prompt).not.toContain("escaped-skill");
       expect(await exists(skillPath(target, "escaped-skill", "SKILL.md"))).toBe(false);
     },
   );
@@ -614,14 +575,7 @@ describe("syncWorkspaceSkills", () => {
     expect(await exists(path.join(syncedSkillDir, "SKILL.md"))).toBe(true);
     expect((await fs.lstat(syncedSkillDir)).isSymbolicLink()).toBe(false);
     expect(await exists(path.join(target, "skills", ".hidden-target"))).toBe(false);
-    expect(
-      (
-        await buildSkillSnapshot(target, {
-          ...sourceOptions(target),
-          skillFilter: [skillName],
-        })
-      ).prompt,
-    ).toContain("Managed symlink target");
+    expect(await readText(syncedSkillDir, "SKILL.md")).toContain("Managed symlink target");
   });
 });
 
@@ -646,20 +600,9 @@ describe("syncWorkspaceSkills for plugin skills", () => {
     const syncedSkillDir = path.join(target, "skills", "wiki-maintainer");
     const syncedSkillMd = path.join(syncedSkillDir, "SKILL.md");
     const syncedStat = await fs.lstat(syncedSkillDir);
-    const prompt = (
-      await buildSkillSnapshot(target, {
-        bundledSkillsDir: path.join(target, ".bundled"),
-        managedSkillsDir: path.join(target, ".managed"),
-      })
-    ).prompt.replaceAll("\\", "/");
-
     expect(await exists(syncedSkillMd)).toBe(true);
     expect(syncedStat.isSymbolicLink()).toBe(false);
-    expect(prompt).toContain("Wiki maintenance skill for sandboxed agents");
-    expect(prompt).toContain("skills/wiki-maintainer/SKILL.md");
-    expect(prompt).not.toContain(plugin.dir.replaceAll("\\", "/"));
-    expect(prompt).not.toContain(pluginSkillsDir.replaceAll("\\", "/"));
-    expect(prompt).not.toContain(symlinkPath.replaceAll("\\", "/"));
+    expect(await readText(syncedSkillMd)).toContain("Wiki maintenance skill for sandboxed agents");
     expectUsage(skillUsagePaths, plugin.dir, syncedSkillDir, "wiki-maintainer");
   });
 

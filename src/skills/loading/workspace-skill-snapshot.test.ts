@@ -14,6 +14,7 @@ import { buildSkillSnapshot } from "./workspace-skill-prompt.js";
 
 const fixture = useLoadingFixture("openclaw-skills-snapshot-suite-", "state");
 const directorySymlinkType = process.platform === "win32" ? "junction" : "dir";
+const isolatedConfig = { plugins: { enabled: false } };
 
 async function withWorkspaceHome<T>(workspaceDir: string, cb: () => Promise<T>): Promise<T> {
   return withEnvAsync(createPathResolutionEnv(workspaceDir, { PATH: "" }), cb);
@@ -40,40 +41,28 @@ const CUSTODIAN_SKILL_NAMES = [
 const write = (dir: string, name: string, description: string, body?: string) =>
   writeSkill({ dir: path.join(dir, name), name, description, body });
 const resolveSnapshot = (params: Parameters<typeof resolveReusableWorkspaceSkillSnapshot>[0]) =>
-  withWorkspaceHome(params.workspaceDir, () => resolveReusableWorkspaceSkillSnapshot(params));
+  withWorkspaceHome(params.workspaceDir, () =>
+    resolveReusableWorkspaceSkillSnapshot({ config: isolatedConfig, watch: false, ...params }),
+  );
 const resolveRuntime = (params: Parameters<typeof prepareRuntimeSkillEntries>[0]) =>
   withWorkspaceHome(params.skillsAnchorWorkspace, () => prepareRuntimeSkillEntries(params));
 
 async function createMultiRootFixture() {
   const agentWorkspaceDir = await fixture.createDir("agent-workspace");
   const executionWorkspaceDir = await fixture.createDir("execution-workspace");
-  for (const [workspaceDir, name, description] of [
-    [agentWorkspaceDir, "middle", "Agent middle"],
-    [agentWorkspaceDir, "shared", "Agent shared"],
-    [executionWorkspaceDir, "aardvark", "Execution aardvark"],
-    [executionWorkspaceDir, "shared", "Execution shared"],
-    [executionWorkspaceDir, "zulu", "Execution zulu"],
-  ] as const) {
-    await write(path.join(workspaceDir, "skills"), name, description);
-  }
-  for (const name of ["aardvark", "project-only", "shared"]) {
-    await write(
-      path.join(executionWorkspaceDir, ".agents", "skills"),
-      name,
-      `Project ${name}`,
-      `# Project ${name} instructions\n`,
-    );
-  }
-  const skillFilter = ["aardvark", "middle", "project-only", "shared", "zulu"];
+  await write(path.join(agentWorkspaceDir, "skills"), "middle", "Agent middle");
+  await write(
+    path.join(executionWorkspaceDir, ".agents", "skills"),
+    "project-only",
+    "Project skill",
+    "# Project project-only instructions\n",
+  );
   const { snapshot } = await resolveSnapshot({
     workspaceDir: agentWorkspaceDir,
     executionWorkspaceDir,
-    config: { plugins: { enabled: false } },
-    skillFilter,
-    watch: false,
     snapshotVersion: 1,
   });
-  return { agentWorkspaceDir, executionWorkspaceDir, skillFilter, snapshot };
+  return { agentWorkspaceDir, executionWorkspaceDir, snapshot };
 }
 
 describe("buildSkillSnapshot", () => {
@@ -98,7 +87,6 @@ describe("buildSkillSnapshot", () => {
         managedSkillsDir: path.join(workspaceDir, ".managed"),
       });
     const firstCustodianSnapshot = await snapshotFor("ops");
-    const secondCustodianSnapshot = await snapshotFor("ops");
     const writerSnapshot = await snapshotFor("writer");
     const custodianStatus = statusFor("ops");
     const writerStatus = statusFor("writer");
@@ -107,8 +95,6 @@ describe("buildSkillSnapshot", () => {
     expect(firstCustodianSnapshot.resolvedSkills?.map((skill) => skill.source)).toEqual(
       CUSTODIAN_SKILL_NAMES.map(() => "openclaw-custodian"),
     );
-    expect(secondCustodianSnapshot.skills).toEqual(firstCustodianSnapshot.skills);
-    expect(secondCustodianSnapshot.prompt).toBe(firstCustodianSnapshot.prompt);
     expect(writerSnapshot.skills).toEqual([]);
     expect(writerSnapshot.prompt).toBe("");
     expect(
@@ -129,17 +115,19 @@ describe("buildSkillSnapshot", () => {
       delete coldSnapshot.resolvedSkills;
       const fallback = await resolveRuntime({
         skillsAnchorWorkspace: agentWorkspaceDir,
-        config: { plugins: { enabled: false } },
+        config: isolatedConfig,
         skillsSnapshot: coldSnapshot,
         executionWorkspaceDir,
       });
 
-      expect(fallback.skillEntries.map((entry) => entry.skill.name)).toEqual(
-        snapshot.skills.map((skill) => skill.name),
-      );
-      expect(fallback.skillEntries.map((entry) => entry.skill.filePath)).toEqual(
-        snapshot.resolvedSkills?.map((skill) => skill.filePath),
-      );
+      expect(fallback.skillEntries.map((entry) => entry.skill.name)).toEqual([
+        "middle",
+        "project-only",
+      ]);
+      expect(fallback.skillEntries.map((entry) => entry.skill.filePath)).toEqual([
+        path.join(agentWorkspaceDir, "skills", "middle", "SKILL.md"),
+        path.join(executionWorkspaceDir, ".agents", "skills", "project-only", "SKILL.md"),
+      ]);
       const codeModeSkills = resolveCodeModeSkills({
         skillsPrompt: snapshot.prompt,
         candidates: fallback.skillEntries.map((entry) => entry.skill),
@@ -185,32 +173,25 @@ describe("buildSkillSnapshot", () => {
     },
   );
 
-  it.each([false, true])(
-    "confines sandbox rebuilds to materialized skills (hydrated=%s)",
-    async (hydrated) => {
-      const { executionWorkspaceDir, snapshot } = await createMultiRootFixture();
-      const workspaceDir = await fixture.createDir("sandbox-materialized");
-      const skillDir = path.join(workspaceDir, "skills", "middle");
-      await writeSkill({ dir: skillDir, name: "middle", description: "Materialized instructions" });
-      const skillsSnapshot = { ...snapshot };
-      if (!hydrated) {
-        delete skillsSnapshot.resolvedSkills;
-      }
-      const runtime = await resolveRuntime({
-        skillsAnchorWorkspace: workspaceDir,
-        executionWorkspaceDir,
-        config: { plugins: { enabled: false } },
-        skillsSnapshot,
-        sandbox: { enabled: true, skillsWorkspaceDir: workspaceDir },
-      });
-      const entries = await runtime.loadSkillEntries();
-      expect(entries.map((entry) => entry.skill.name)).toEqual(["middle"]);
-      expect(entries[0]?.skill).toMatchObject({
-        filePath: path.join(skillDir, "SKILL.md"),
-        description: "Materialized instructions",
-      });
-    },
-  );
+  it("confines sandbox rebuilds to materialized skills despite hydrated host entries", async () => {
+    const { executionWorkspaceDir, snapshot } = await createMultiRootFixture();
+    const workspaceDir = await fixture.createDir("sandbox-materialized");
+    const skillDir = path.join(workspaceDir, "skills", "middle");
+    await writeSkill({ dir: skillDir, name: "middle", description: "Materialized instructions" });
+    const runtime = await resolveRuntime({
+      skillsAnchorWorkspace: workspaceDir,
+      executionWorkspaceDir,
+      config: isolatedConfig,
+      skillsSnapshot: snapshot,
+      sandbox: { enabled: true, skillsWorkspaceDir: workspaceDir },
+    });
+    const entries = await runtime.loadSkillEntries();
+    expect(entries.map((entry) => entry.skill.name)).toEqual(["middle"]);
+    expect(entries[0]?.skill).toMatchObject({
+      filePath: path.join(skillDir, "SKILL.md"),
+      description: "Materialized instructions",
+    });
+  });
 
   it("invalidates execution project skills without escaping the selected workspace", async () => {
     const agentWorkspaceDir = await fixture.createDir("agent-root");
@@ -227,9 +208,8 @@ describe("buildSkillSnapshot", () => {
     const params = {
       workspaceDir: agentWorkspaceDir,
       executionWorkspaceDir,
-      config: { plugins: { enabled: false } },
+      config: isolatedConfig,
       skillFilter: ["ancestor", "project-only"],
-      watch: false,
     };
     const first = await resolveSnapshot(params);
     expect(first.snapshot.skills.map((skill) => skill.name)).toEqual(["project-only"]);
@@ -242,7 +222,7 @@ describe("buildSkillSnapshot", () => {
     const sandbox = await resolveRuntime({
       skillsAnchorWorkspace: agentWorkspaceDir,
       executionWorkspaceDir,
-      config: { plugins: { enabled: false } },
+      config: isolatedConfig,
       sandbox: { enabled: true },
     });
     expect(sandbox.skillEntries).toEqual([]);

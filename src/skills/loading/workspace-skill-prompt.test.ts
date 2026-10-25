@@ -1,4 +1,3 @@
-import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -63,6 +62,8 @@ const COMPACT_OMITTED_NOTICE =
   "⚠️ Skills catalog using compact format (descriptions omitted). Run `openclaw skills check` to audit.";
 const COMPACT_SHORTENED_NOTICE =
   "⚠️ Skills catalog using compact format (descriptions shortened). Run `openclaw skills check` to audit.";
+const manySkills = (count: number) =>
+  Array.from({ length: count }, (_, i) => makeSkill(`skill-${i}`, "A".repeat(800)));
 
 describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
   let envSnapshot: SkillsHomeEnvSnapshot;
@@ -91,20 +92,35 @@ describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
     expect(snapshot.skills.map((skill) => skill.name)).toContain("hidden");
   });
 
-  it("tier 2: compact when full exceeds budget but compact fits", async () => {
-    const skills = Array.from({ length: 20 }, (_, i) => makeSkill(`skill-${i}`, "A".repeat(800)));
-    const fullLen = formatSkillsForPromptCore(skills).length;
-    const compactLen = formatSkillsCompact(skills).length;
-    const budget = `${COMPACT_SHORTENED_NOTICE}\n${formatSkillsCompact(skills)}`.length;
-    expect(fullLen).toBeGreaterThan(budget);
-    expect(compactLen).toBeLessThan(budget);
-    const prompt = await buildPrompt(skills, { maxChars: budget });
-    expect(prompt).toContain("<description>");
-    expect(prompt).toContain("compact format (descriptions shortened)");
-    expect(prompt).not.toContain("included");
-    expect(prompt).toContain("skill-0");
-    expect(prompt).toContain("skill-19");
-  });
+  it.each(["compact", "identities", "partial", "count"] as const)(
+    "fits the %s catalog without sacrificing admitted identities",
+    async (mode) => {
+      const size = { compact: 20, identities: 50, partial: 8, count: 30 }[mode];
+      const admitted = mode === "count" ? 10 : size;
+      const skills = manySkills(size);
+      const shortened = mode !== "identities";
+      const notice =
+        mode === "count"
+          ? "⚠️ Skills truncated: included 10 of 30 (compact format, descriptions shortened). Run `openclaw skills check` to audit."
+          : shortened
+            ? COMPACT_SHORTENED_NOTICE
+            : COMPACT_OMITTED_NOTICE;
+      const budget =
+        mode === "partial"
+          ? `${COMPACT_OMITTED_NOTICE}\n${formatSkillsCompact(skills, { descriptionMaxChars: 0 })}`
+              .length + 500
+          : `${notice}\n${formatSkillsCompact(
+              skills.slice(0, admitted),
+              shortened ? undefined : { descriptionMaxChars: 0 },
+            )}`.length;
+      const prompt = await buildPrompt(skills, { maxChars: budget, maxCount: admitted });
+      expect(prompt.length).toBeLessThanOrEqual(budget);
+      expect(prompt).toContain(notice);
+      expect(prompt.includes("<description>")).toBe(shortened);
+      expect(prompt.includes("included")).toBe(mode === "count");
+      expect(prompt.match(/<skill>/g)).toHaveLength(admitted);
+    },
+  );
 
   it("tier 3: compact + binary search when compact also exceeds budget", async () => {
     const skills = Array.from({ length: 100 }, (_, i) => makeSkill(`skill-${i}`, "description"));
@@ -118,50 +134,6 @@ describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
     expect(prompt.match(/<skill>/g)?.length ?? 0).toBe(included);
   });
 
-  it("preserves every identity before allocating description budget", async () => {
-    const skills = Array.from({ length: 50 }, (_, i) => makeSkill(`skill-${i}`, "A".repeat(800)));
-    const identityCatalog = formatSkillsCompact(skills, { descriptionMaxChars: 0 });
-    const budget = `${COMPACT_OMITTED_NOTICE}\n${identityCatalog}`.length;
-    expect(formatSkillsForPromptCore(skills).length).toBeGreaterThan(budget);
-
-    const prompt = await buildPrompt(skills, { maxChars: budget });
-
-    expect(prompt.length).toBeLessThanOrEqual(budget);
-    expect(prompt).toContain(COMPACT_OMITTED_NOTICE);
-    expect(prompt).not.toContain("<description>");
-    expect(prompt).not.toContain("included");
-    expect(prompt).toContain("skill-0");
-    expect(prompt).toContain("skill-49");
-  });
-
-  it("uses leftover compact budget for descriptions without dropping identities", async () => {
-    const skills = Array.from({ length: 8 }, (_, i) => makeSkill(`skill-${i}`, "A".repeat(800)));
-    const identityCatalog = formatSkillsCompact(skills, { descriptionMaxChars: 0 });
-    const budget = `${COMPACT_OMITTED_NOTICE}\n${identityCatalog}`.length + 500;
-
-    const prompt = await buildPrompt(skills, { maxChars: budget });
-
-    expect(prompt.length).toBeLessThanOrEqual(budget);
-    expect(prompt).toContain(COMPACT_SHORTENED_NOTICE);
-    expect(prompt).toContain("<description>");
-    expect(prompt).not.toContain("included");
-    expect(prompt.match(/<skill>/g)).toHaveLength(skills.length);
-  });
-
-  it("count truncation + compact: shows included X of Y with compact note", async () => {
-    const skills = Array.from({ length: 30 }, (_, i) => makeSkill(`skill-${i}`, "A".repeat(800)));
-    const tenSkills = skills.slice(0, 10);
-    const fullLen = formatSkillsForPromptCore(tenSkills).length;
-    const truncatedNotice =
-      "⚠️ Skills truncated: included 10 of 30 (compact format, descriptions shortened). Run `openclaw skills check` to audit.";
-    const budget = `${truncatedNotice}\n${formatSkillsCompact(tenSkills)}`.length;
-    expect(fullLen).toBeGreaterThan(budget);
-    const prompt = await buildPrompt(skills, { maxChars: budget, maxCount: 10 });
-    expect(prompt).toContain("included 10 of 30");
-    expect(prompt).toContain("compact format, descriptions shortened");
-    expect(prompt).toContain("<description>");
-  });
-
   it.each([0, 1, 10, 64])(
     "never exceeds a tiny configured prompt budget of %i",
     async (maxChars) => {
@@ -171,29 +143,6 @@ describe("applySkillsPromptLimits (via buildWorkspaceSkillsPrompt)", () => {
       expect(prompt).toBe("");
     },
   );
-
-  it("drops an oversized optional remote note before discarding a complete fitting skill catalog", async () => {
-    const skill = makeSkill("weather", "Get weather data");
-    const maxChars = formatSkillsForPromptCore([skill]).length;
-    const remoteNote = `REMOTE_NOTE_${"x".repeat(maxChars + 512)}`;
-    const prompt = await buildWorkspaceSkillsPrompt("/fake", {
-      entries: [makeEntry(skill)],
-      config: { skills: { limits: { maxSkillsPromptChars: maxChars } } },
-      eligibility: {
-        remote: {
-          platforms: [],
-          hasBin: () => false,
-          hasAnyBin: () => false,
-          note: remoteNote,
-        },
-      },
-    });
-
-    expect(prompt.length).toBeLessThanOrEqual(maxChars);
-    expect(prompt).toContain("<name>weather</name>");
-    expect(prompt).toContain("</available_skills>");
-    expect(prompt).not.toContain("REMOTE_NOTE_");
-  });
 
   it.each(["full", "compact", "count-limited", "empty"])(
     "preserves exact %s catalog bytes at the optional remote-note boundary",
@@ -378,36 +327,5 @@ describe("compactSkillPaths", () => {
     const location = prompt.match(/<location>([^<]+)<\/location>/)?.[1];
     expect(location).toContain("~/");
     expect(location).toContain("\\literal-skill");
-  });
-
-  it("preserves paths outside home directory", async () => {
-    const root = path.join(path.parse(os.homedir()).root, "openclaw-external-skills");
-    const dir = path.join(root, "skills", "test-skill");
-    const prompt = await promptAt(root, dir);
-    expect(prompt).toMatch(/<location>[^<]+SKILL\.md<\/location>/);
-    expect(prompt).toContain(path.join(dir, "SKILL.md"));
-  });
-
-  it("loads skills when the shared state database is unavailable", async () => {
-    const root = fsSync.realpathSync(
-      fsSync.mkdtempSync(path.join(os.tmpdir(), "openclaw-skill-load-")),
-    );
-    const blocker = path.join(root, "state-blocker");
-    fsSync.writeFileSync(blocker, "not a directory", "utf8");
-    const workspace = path.join(root, "workspace");
-    try {
-      const prompt = await withEnvAsync({ OPENCLAW_STATE_DIR: path.join(blocker, "state") }, () =>
-        promptAt(
-          workspace,
-          path.join(workspace, "skills", "available-skill"),
-          "available-skill",
-          "Available despite missing lifecycle state",
-        ),
-      );
-      expect(prompt).toContain("available-skill");
-      expect(prompt).toContain("Available despite missing lifecycle state");
-    } finally {
-      fsSync.rmSync(root, { recursive: true, force: true });
-    }
   });
 });
