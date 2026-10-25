@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 273520,
-  "reason": "Route readiness: 20 interleaved remote pairs reduce Settings median readiness 1703 to 1433 ms (-15.8%), script CPU 6.1% and task CPU 8.3%; Cron readiness improves 4.6%. Chat and Sessions readiness and task CPU hold. Accept startup JS 273129 to 273520 B (+391 B), plus 737 B gzip HTML for route-matched static frames, with unchanged requests and CSS. Ratchet to the measured head.",
+  "startupJsGzipBytes": 273532,
+  "reason": "Route readiness: original-base timing measured Settings readiness -15.8% and task CPU -8.3%; production patch is unchanged after merging main. Refreshed asset comparison is 273107 to 273532 B startup gzip (+425 B), with seven JS requests and one CSS request unchanged. Set the baseline to the measured head.",
   "updatedAt": "2026-10-25"
 }
