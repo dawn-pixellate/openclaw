@@ -238,6 +238,11 @@ describe("migration provider runtime", () => {
       const scanDir = tempDirs.make("openclaw-migration-artifact-");
       const rootDir = path.join(scanDir, "fixture-dir");
       const executedPath = path.join(scanDir, "artifact-executed");
+      const manifest = {
+        id: "fixture",
+        contracts: { migrationProviders: ["fixture-import"] },
+        configSchema: { type: "object", additionalProperties: false, properties: {} },
+      };
       fs.mkdirSync(rootDir);
       writeJson(rootDir, "package.json", {
         name: "@openclaw/fixture",
@@ -245,11 +250,7 @@ describe("migration provider runtime", () => {
         type: "module",
         openclaw: { extensions: ["./index.js"] },
       });
-      writeJson(rootDir, "openclaw.plugin.json", {
-        id: "fixture",
-        contracts: { migrationProviders: ["fixture-import"] },
-        configSchema: { type: "object", additionalProperties: false, properties: {} },
-      });
+      writeJson(rootDir, "openclaw.plugin.json", manifest);
       fs.writeFileSync(
         path.join(rootDir, "index.js"),
         'throw new Error("Heavy plugin runtime loaded");',
@@ -275,14 +276,7 @@ describe("migration provider runtime", () => {
       if (origin === "global") {
         mocks.metadata.mockReturnValue({
           index: { plugins: [{ pluginId: "fixture", origin, enabled: true }] },
-          plugins: [
-            {
-              id: "fixture",
-              origin,
-              rootDir,
-              contracts: { migrationProviders: ["fixture-import"] },
-            },
-          ],
+          plugins: [{ ...manifest, origin, rootDir }],
         });
       }
       vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", scanDir);

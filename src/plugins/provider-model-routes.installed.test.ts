@@ -28,7 +28,7 @@ const modelPolicy = (allow: string[]): OpenClawConfig => ({
 describe("installed Arcee catalog identity", () => {
   function installed(
     trustedOfficialInstall: boolean,
-    run: (root: string, snapshot: PluginMetadataSnapshot) => void,
+    run: (snapshot: PluginMetadataSnapshot) => void,
   ) {
     const root = temporary.make("arcee-installed-policy-");
     const bundled = path.join(root, "bundled");
@@ -59,51 +59,53 @@ describe("installed Arcee catalog identity", () => {
     });
     withEnv(
       { OPENCLAW_BUNDLED_PLUGINS_DIR: bundled, OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR: "1" },
-      () => withPluginMetadataSnapshotScope(snapshot, () => run(pluginRoot, snapshot)),
+      () => withPluginMetadataSnapshotScope(snapshot, () => run(snapshot)),
     );
   }
 
-  it("keeps catalog-equivalent Arcee ids distinct in exact model policy", () => {
-    installed(true, (_root, metadataSnapshot) => {
-      expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(logical.model);
-      for (const ref of [logical, wire]) {
-        expect(
-          resolveModelRefFromString({
-            cfg: {},
-            raw: `${ref.provider}/${ref.model}`,
-            defaultProvider: "arcee",
-            manifestPlugins: metadataSnapshot,
-            allowManifestNormalization: true,
-            allowPluginNormalization: false,
-          })?.ref,
-        ).toEqual(ref);
-      }
+  function installedTest(name: string, run: (snapshot: PluginMetadataSnapshot) => void) {
+    it(name, () => installed(true, run));
+  }
 
-      for (const { allow, expected } of [
-        { allow: `arcee/${logical.model}`, expected: [true, false] },
-        { allow: `arcee/${wire.model}`, expected: [false, true] },
-        { allow: "arcee/*", expected: [true, true] },
-      ]) {
-        const params = {
-          cfg: modelPolicy([allow]),
-          catalog: [logical, wire].map(({ provider, model }) => catalogEntry(provider, model)),
+  installedTest("keeps exact grants distinct from catalog identity", (metadataSnapshot) => {
+    expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(logical.model);
+    for (const ref of [logical, wire]) {
+      expect(
+        resolveModelRefFromString({
+          cfg: {},
+          raw: `${ref.provider}/${ref.model}`,
           defaultProvider: "arcee",
           manifestPlugins: metadataSnapshot,
           allowManifestNormalization: true,
           allowPluginNormalization: false,
-        };
-        const policy = createModelVisibilityPolicy(params);
-        expect.soft([policy.allows(logical), policy.allows(wire)], allow).toEqual(expected);
-        const status = [logical, wire].map((ref) => getModelRefStatus({ ...params, ref }).allowed);
-        expect.soft(status, allow).toEqual(expected);
-      }
-    });
+        })?.ref,
+      ).toEqual(ref);
+    }
+
+    for (const { allow, expected } of [
+      { allow: `arcee/${logical.model}`, expected: [true, false] },
+      { allow: `arcee/${wire.model}`, expected: [false, true] },
+      { allow: "arcee/*", expected: [true, true] },
+    ]) {
+      const params = {
+        cfg: modelPolicy([allow]),
+        catalog: [logical, wire].map(({ provider, model }) => catalogEntry(provider, model)),
+        defaultProvider: "arcee",
+        manifestPlugins: metadataSnapshot,
+        allowManifestNormalization: true,
+        allowPluginNormalization: false,
+      };
+      const policy = createModelVisibilityPolicy(params);
+      expect.soft([policy.allows(logical), policy.allows(wire)], allow).toEqual(expected);
+      const status = [logical, wire].map((ref) => getModelRefStatus({ ...params, ref }).allowed);
+      expect.soft(status, allow).toEqual(expected);
+    }
   });
 
   it.each([false, true])(
     "only selects an authorized Arcee fallback (later row: %s)",
     (laterRow) => {
-      installed(true, (_root, manifestPlugins) => {
+      installed(true, (manifestPlugins) => {
         const wireRow = catalogEntry("arcee", wire.model);
         const later = catalogEntry("arcee", "safe-model");
         const policy = createModelVisibilityPolicy({
@@ -122,35 +124,33 @@ describe("installed Arcee catalog identity", () => {
     },
   );
 
-  it("keeps captured exact grants stable when the current catalog policy changes", () => {
-    installed(true, () => {
-      const empty = createPluginMetadataSnapshotFixture();
-      const captured = withPluginMetadataSnapshotScope(empty, () => {
-        expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(wire.model);
-        return [
-          { allowed: logical, denied: wire },
-          { allowed: wire, denied: logical },
-        ].map(({ allowed, denied }) => {
-          const policy = createModelVisibilityPolicy({
-            cfg: modelPolicy([`arcee/${allowed.model}`]),
-            catalog: [],
-            defaultProvider: "arcee",
-            manifestPlugins: empty,
-            allowManifestNormalization: true,
-            allowPluginNormalization: false,
-          });
-          expect(policy.allows(allowed)).toBe(true);
-          expect(policy.allows(denied)).toBe(false);
-          return { policy, allowed, denied };
+  installedTest("keeps captured grants stable across catalog policy changes", () => {
+    const empty = createPluginMetadataSnapshotFixture();
+    const captured = withPluginMetadataSnapshotScope(empty, () => {
+      expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(wire.model);
+      return [
+        { allowed: logical, denied: wire },
+        { allowed: wire, denied: logical },
+      ].map(({ allowed, denied }) => {
+        const policy = createModelVisibilityPolicy({
+          cfg: modelPolicy([`arcee/${allowed.model}`]),
+          catalog: [],
+          defaultProvider: "arcee",
+          manifestPlugins: empty,
+          allowManifestNormalization: true,
+          allowPluginNormalization: false,
         });
+        expect(policy.allows(allowed)).toBe(true);
+        expect(policy.allows(denied)).toBe(false);
+        return { policy, allowed, denied };
       });
-
-      expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(logical.model);
-      for (const { policy, allowed, denied } of captured) {
-        expect.soft(policy.allows(allowed)).toBe(true);
-        expect.soft(policy.allows(denied)).toBe(false);
-      }
     });
+
+    expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(logical.model);
+    for (const { policy, allowed, denied } of captured) {
+      expect.soft(policy.allows(allowed)).toBe(true);
+      expect.soft(policy.allows(denied)).toBe(false);
+    }
   });
 
   it("does not load an untrusted installed owner's identity hook", () => {
@@ -158,14 +158,12 @@ describe("installed Arcee catalog identity", () => {
       expect(createProviderModelCatalogIdNormalizer("arcee")(wire.model)).toBe(wire.model);
     });
   });
-  it("honors explicit and captured owners over ambient metadata", () => {
-    installed(true, () => {
-      const empty = createPluginMetadataSnapshotFixture();
-      expect(createProviderModelCatalogIdNormalizer("arcee", empty)(wire.model)).toBe(wire.model);
-      const normalize = createProviderModelCatalogIdNormalizer("arcee");
-      withPluginMetadataSnapshotScope(empty, () => {
-        expect(normalize(wire.model)).toBe(logical.model);
-      });
+  installedTest("honors explicit and captured owners over ambient metadata", () => {
+    const empty = createPluginMetadataSnapshotFixture();
+    expect(createProviderModelCatalogIdNormalizer("arcee", empty)(wire.model)).toBe(wire.model);
+    const normalize = createProviderModelCatalogIdNormalizer("arcee");
+    withPluginMetadataSnapshotScope(empty, () => {
+      expect(normalize(wire.model)).toBe(logical.model);
     });
   });
 
@@ -188,144 +186,138 @@ describe("installed Arcee catalog identity", () => {
     };
   }
 
-  it("materializes catalog identities with the policy selected for each invocation", () => {
-    installed(true, (_root, metadataSnapshot) => {
-      const canonical = catalogEntry("arcee", logical.model);
-      const variant = catalogEntry("arcee", `${wire.model}@personal`);
-      const distinct = [
-        catalogEntry("fixture-none", "Reader"),
-        catalogEntry("fixture-none", "reader"),
-        catalogEntry("fixture-none", "Reader@variant"),
-        catalogEntry("fixture/a", "b"),
-        catalogEntry("fixture", "a/b"),
-      ];
-      const catalog: ModelCatalogSnapshot = {
-        entries: [canonical, ...distinct],
-        routeVariants: [variant],
-        staticEntries: [canonical, ...distinct],
-      };
-      const configured = {
-        ...catalogEntry("arcee", `${wire.model}@work`),
-        name: "Configured",
-      };
-      const runtimes = [
-        runtimeCapability(" Arcee ", `${wire.model}@work`),
-        runtimeCapability("fixture-none", "Reader"),
-        runtimeCapability("fixture/a", "b"),
-      ];
-      const materialize = (metadata: PluginMetadataSnapshot) =>
-        withPluginMetadataSnapshotScope(metadata, () =>
-          materializePreparedModelCatalog(catalog, runtimes, [configured]),
-        );
-      const empty = createPluginMetadataSnapshotFixture();
-      const before = materialize(empty);
-      expect(before.entries[0]).toBe(canonical);
-      expect(before.routeVariants[0]).toBe(variant);
-      expect(before.staticEntries).toHaveLength(7);
+  installedTest("materializes identities with the invocation's policy", (metadataSnapshot) => {
+    const canonical = catalogEntry("arcee", logical.model);
+    const variant = catalogEntry("arcee", `${wire.model}@personal`);
+    const distinct = [
+      catalogEntry("fixture-none", "Reader"),
+      catalogEntry("fixture-none", "reader"),
+      catalogEntry("fixture-none", "Reader@variant"),
+      catalogEntry("fixture/a", "b"),
+      catalogEntry("fixture", "a/b"),
+    ];
+    const catalog: ModelCatalogSnapshot = {
+      entries: [canonical, ...distinct],
+      routeVariants: [variant],
+      staticEntries: [canonical, ...distinct],
+    };
+    const configured = {
+      ...catalogEntry("arcee", `${wire.model}@work`),
+      name: "Configured",
+    };
+    const runtimes = [
+      runtimeCapability(" Arcee ", `${wire.model}@work`),
+      runtimeCapability("fixture-none", "Reader"),
+      runtimeCapability("fixture/a", "b"),
+    ];
+    const materialize = (metadata: PluginMetadataSnapshot) =>
+      withPluginMetadataSnapshotScope(metadata, () =>
+        materializePreparedModelCatalog(catalog, runtimes, [configured]),
+      );
+    const empty = createPluginMetadataSnapshotFixture();
+    const before = materialize(empty);
+    expect(before.entries[0]).toBe(canonical);
+    expect(before.routeVariants[0]).toBe(variant);
+    expect(before.staticEntries).toHaveLength(7);
 
-      const prepared = materialize(metadataSnapshot);
-      expect(prepared.entries.map(({ id, reasoning }) => [id, reasoning])).toEqual([
-        ["trinity-large-thinking", true],
-        ["Reader", true],
-        ["reader", false],
-        ["Reader@variant", false],
-        ["b", true],
-        ["a/b", false],
-      ]);
-      expect(prepared.routeVariants[0]).toMatchObject({
-        id: "arcee-ai/trinity-large-thinking@personal",
-        reasoning: true,
-        thinkingPolicyProvider: "fixture-runtime",
-      });
-      expect(prepared.staticEntries).toHaveLength(6);
-      expect(prepared.staticEntries?.[0]).toMatchObject({
-        id: "arcee-ai/trinity-large-thinking@work",
-        name: "Configured",
-        reasoning: true,
-      });
-      expect(materialize(empty)).toEqual(before);
+    const prepared = materialize(metadataSnapshot);
+    expect(prepared.entries.map(({ id, reasoning }) => [id, reasoning])).toEqual([
+      ["trinity-large-thinking", true],
+      ["Reader", true],
+      ["reader", false],
+      ["Reader@variant", false],
+      ["b", true],
+      ["a/b", false],
+    ]);
+    expect(prepared.routeVariants[0]).toMatchObject({
+      id: "arcee-ai/trinity-large-thinking@personal",
+      reasoning: true,
+      thinkingPolicyProvider: "fixture-runtime",
+    });
+    expect(prepared.staticEntries).toHaveLength(6);
+    expect(prepared.staticEntries?.[0]).toMatchObject({
+      id: "arcee-ai/trinity-large-thinking@work",
+      name: "Configured",
+      reasoning: true,
+    });
+    expect(materialize(empty)).toEqual(before);
+  });
+
+  installedTest("captures rows before capabilities, then rereads identities", () => {
+    let prepared = false;
+    const shared = catalogEntry("fixture-none", "Before");
+    const catalog: ModelCatalogSnapshot = {
+      get entries() {
+        return prepared ? [catalogEntry("fixture-none", "Decoy")] : [shared];
+      },
+      get routeVariants() {
+        if (prepared) {
+          shared.id = "After";
+        }
+        return [shared];
+      },
+    };
+    const before = runtimeCapability("fixture-none", "Before");
+    const first: PreparedRuntimeCapabilityModel = {
+      provider: before.provider,
+      modelId: before.modelId,
+      get model() {
+        prepared = true;
+        return before.model;
+      },
+    };
+
+    const result = materializePreparedModelCatalog(catalog, [
+      first,
+      runtimeCapability("fixture-none", "After"),
+    ]);
+
+    expect(result.entries[0]).toMatchObject({
+      id: "Before",
+      params: { runtimeModel: "Before" },
+    });
+    expect(result.routeVariants[0]).toMatchObject({
+      id: "After",
+      params: { runtimeModel: "After" },
     });
   });
 
-  it("captures catalog rows before capabilities and rereads changed row identities", () => {
-    installed(true, () => {
-      let prepared = false;
-      const shared = catalogEntry("fixture-none", "Before");
-      const catalog: ModelCatalogSnapshot = {
-        get entries() {
-          return prepared ? [catalogEntry("fixture-none", "Decoy")] : [shared];
-        },
-        get routeVariants() {
-          if (prepared) {
-            shared.id = "After";
-          }
-          return [shared];
-        },
-      };
-      const before = runtimeCapability("fixture-none", "Before");
-      const first: PreparedRuntimeCapabilityModel = {
-        provider: before.provider,
-        modelId: before.modelId,
-        get model() {
-          prepared = true;
-          return before.model;
-        },
-      };
-
-      const result = materializePreparedModelCatalog(catalog, [
-        first,
-        runtimeCapability("fixture-none", "After"),
-      ]);
-
-      expect(result.entries[0]).toMatchObject({
-        id: "Before",
-        params: { runtimeModel: "Before" },
-      });
-      expect(result.routeVariants[0]).toMatchObject({
-        id: "After",
-        params: { runtimeModel: "After" },
-      });
-    });
-  });
-
-  it("uses installed identity for authored catalog and endpoint auth", () => {
-    installed(true, (_root, metadataSnapshot) => {
-      const cfg: OpenClawConfig = {
-        models: {
-          providers: {
-            arcee: {
-              api: "openai-completions",
-              baseUrl: "https://api.arcee.ai/api/v1",
-              models: [
-                {
-                  id: wire.model,
-                  name: "Authored route",
-                  baseUrl: "https://openrouter.ai/api/v1",
-                  reasoning: true,
-                  input: ["text"],
-                  contextWindow: 32768,
-                  maxTokens: 2048,
-                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                },
-              ],
-            },
+  installedTest("resolves installed authored metadata and endpoint auth", (metadataSnapshot) => {
+    const cfg: OpenClawConfig = {
+      models: {
+        providers: {
+          arcee: {
+            api: "openai-completions",
+            baseUrl: "https://api.arcee.ai/api/v1",
+            models: [
+              {
+                id: wire.model,
+                name: "Authored route",
+                baseUrl: "https://openrouter.ai/api/v1",
+                reasoning: true,
+                input: ["text"],
+                contextWindow: 32768,
+                maxTokens: 2048,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              },
+            ],
           },
         },
-      };
-      expect(
-        createConfiguredModelCatalogOverridesResolver({ cfg })({
-          provider: "arcee",
-          id: logical.model,
-        }),
-      ).toMatchObject({ name: "Authored route", contextWindow: 32768 });
-      const projected = resolveModelProviderAuthConfig({
-        config: cfg,
+      },
+    };
+    expect(
+      createConfiguredModelCatalogOverridesResolver({ cfg })({
         provider: "arcee",
-        modelId: logical.model,
-        metadataSnapshot,
-      });
-      expect(projected.models?.providers?.arcee?.baseUrl).toBe("https://openrouter.ai/api/v1");
-      expect(cfg.models?.providers?.arcee?.baseUrl).toBe("https://api.arcee.ai/api/v1");
+        id: logical.model,
+      }),
+    ).toMatchObject({ name: "Authored route", contextWindow: 32768 });
+    const projected = resolveModelProviderAuthConfig({
+      config: cfg,
+      provider: "arcee",
+      modelId: logical.model,
+      metadataSnapshot,
     });
+    expect(projected.models?.providers?.arcee?.baseUrl).toBe("https://openrouter.ai/api/v1");
+    expect(cfg.models?.providers?.arcee?.baseUrl).toBe("https://api.arcee.ai/api/v1");
   });
 });

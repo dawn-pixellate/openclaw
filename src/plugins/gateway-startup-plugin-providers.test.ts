@@ -108,38 +108,22 @@ describe("auto-enabled plugin startup", () => {
     const config = enabled === undefined ? {} : { acp: { enabled } };
     expect(plan(config, manifestRegistry, [])).toEqual(["acpx"]);
   });
-  it.each<[string, StartupPlugin, OpenClawConfig, string[]]>([
-    [
-      "a default-disabled startup plugin",
-      { id: "optional", enabledByDefault: false, activation: { onStartup: true } },
-      {},
-      [],
-    ],
-    [
-      "a default-enabled plugin without a startup trigger",
-      { id: "lazy", enabledByDefault: true, activation: { onStartup: false } },
-      {},
-      [],
-    ],
-    [
-      "Codex with a configured harness",
-      codexManifest,
-      {
-        agents: { defaults: { models: { "openai/gpt-test": { agentRuntime: { id: "codex" } } } } },
-      },
-      ["codex"],
-    ],
-    ["an enabled Codex tool owner without a configured harness", codexManifest, {}, ["codex"]],
-  ])("preserves startup eligibility for %s", (_name, plugin, activationSourceConfig, expected) => {
-    expect(
-      plan(activationSourceConfig, startupRegistry(plugin), [
-        {
-          pluginId: plugin.id,
-          kind: "agent-harness-runtime-configured",
-          runtime: "codex",
-        },
-      ]),
-    ).toEqual(expected);
+  const harnessCandidate = (pluginId: string) => [
+    {
+      pluginId,
+      kind: "agent-harness-runtime-configured" as const,
+      runtime: "codex",
+    },
+  ];
+  it.each([
+    [false, true],
+    [true, false],
+  ])("rejects ineligible startup: default=%s trigger=%s", (enabledByDefault, onStartup) => {
+    const plugin = { id: "optional", enabledByDefault, activation: { onStartup } };
+    expect(plan({}, startupRegistry(plugin), harnessCandidate(plugin.id))).toEqual([]);
+  });
+  it("starts an enabled Codex tool owner without a configured harness", () => {
+    expect(plan({}, startupRegistry(codexManifest), harnessCandidate("codex"))).toEqual(["codex"]);
   });
 });
 

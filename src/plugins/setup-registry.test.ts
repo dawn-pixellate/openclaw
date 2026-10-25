@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPluginMetadataSnapshotFixture } from "./plugin-metadata.test-support.js";
+import { createEmptyPluginSetupRegistry } from "./setup-registry.test-support.js";
 import { cleanupTrackedTempDirs, makeTrackedTempDir } from "./test-helpers/fs-fixtures.js";
 import {
   getRegistryJitiMocks,
@@ -62,13 +63,7 @@ function backend(id: string, modelProvider: string | undefined, command: string)
   return { id, ...(modelProvider ? { modelProvider } : {}), config: { command } };
 }
 
-const emptyRegistry = {
-  providers: [],
-  cliBackends: [],
-  configMigrations: [],
-  autoEnableProbes: [],
-  diagnostics: [],
-};
+const emptyRegistry = createEmptyPluginSetupRegistry();
 
 function diagnostic(code: string, pluginId: string, details: Record<string, unknown> = {}) {
   return { pluginId, code, ...details };

@@ -4,13 +4,17 @@ import path from "node:path";
 import * as ts from "typescript/ast";
 import { afterAll, describe, expect, it } from "vitest";
 import { createNativeTypeScriptParser } from "../../scripts/lib/native-typescript.mts";
-import { toLine, visitModuleSpecifiers } from "../../scripts/lib/ts-guard-utils.mts";
+import { createRuntimeImportGraph } from "../../scripts/lib/runtime-import-closure.mts";
 import { resolvePluginDoctorContractArtifact } from "./doctor-contract-artifact.js";
 import { loadBundledPluginManifestRegistry } from "./manifest-registry-build.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const parser = createNativeTypeScriptParser();
-afterAll(() => parser.close());
+let graph: ReturnType<typeof createRuntimeImportGraph> | undefined;
+afterAll(() => {
+  parser.close();
+  graph?.close();
+});
 const SOURCE_MODULE_EXTENSIONS = [".ts", ".mts", ".cts", ".js", ".mjs", ".cjs"] as const;
 const FORBIDDEN_SPECIFIER = "openclaw/plugin-sdk/agent-runtime";
 type ClosureKind = "doctor-contract" | "legacy-setup";
@@ -51,7 +55,9 @@ type ClosureEntry = {
   kind: ClosureKind;
 };
 
-type ModuleReference = { kind: string; line: number; specifier: string };
+type ModuleReference = ReturnType<
+  ReturnType<typeof createRuntimeImportGraph>["dependencies"]
+>[number];
 
 function formatRepoPath(filePath: string): string {
   return path.relative(REPO_ROOT, filePath).split(path.sep).join("/");
@@ -109,54 +115,12 @@ function collectLegacySetupSpecifiers(setupEntryPath: string): string[] {
   return [...specifiers].toSorted();
 }
 
-function hasStaticValue(node: ts.Node): boolean {
-  if (ts.isImportDeclaration(node)) {
-    const clause = node.importClause;
-    const bindings = clause?.namedBindings;
-    return Boolean(
-      !clause ||
-      (clause.phaseModifier !== ts.SyntaxKind.TypeKeyword &&
-        (clause.name ||
-          (bindings &&
-            (ts.isNamespaceImport(bindings) ||
-              bindings.elements.some((element) => !element.isTypeOnly))))),
-    );
-  }
-  if (ts.isExportDeclaration(node)) {
-    const clause = node.exportClause;
-    return (
-      !node.isTypeOnly &&
-      (!clause ||
-        ts.isNamespaceExport(clause) ||
-        clause.elements.some((element) => !element.isTypeOnly))
-    );
-  }
-  return ts.isImportEqualsDeclaration(node) && !node.isTypeOnly;
-}
-
-function collectStaticValueReferences(filePath: string, source: string): ModuleReference[] {
-  const sourceFile = parser.parseSourceFile(filePath, source);
-  const references: ModuleReference[] = [];
-  visitModuleSpecifiers(
-    sourceFile,
-    ({ kind, node, specifier, specifierNode }) => {
-      if (hasStaticValue(node)) {
-        references.push({ kind, line: toLine(sourceFile, specifierNode), specifier });
-      }
-    },
-    { includeCommonJs: true },
-  );
-  return references;
-}
-
-const referencesByFile = new Map<string, ModuleReference[]>();
 function fileReferences(filePath: string) {
-  let references = referencesByFile.get(filePath);
-  if (!references) {
-    references = collectStaticValueReferences(filePath, fs.readFileSync(filePath, "utf8"));
-    referencesByFile.set(filePath, references);
-  }
-  return references;
+  graph ??= createRuntimeImportGraph(REPO_ROOT, [filePath], {
+    sourceImports: true,
+    includeCommonJs: true,
+  });
+  return graph.dependencies(filePath);
 }
 
 function collectClosureEntries(): ClosureEntry[] {
@@ -190,18 +154,10 @@ function collectClosureEntries(): ClosureEntry[] {
     if (record.channels.length === 0) {
       continue;
     }
-    const packageJsonPath = path.join(pluginRoot, "package.json");
-    if (!fs.existsSync(packageJsonPath)) {
+    const setupEntryPath = record.setupSource;
+    if (!setupEntryPath) {
       continue;
     }
-    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as {
-      openclaw?: { setupEntry?: unknown };
-    };
-    const setupEntry = packageJson.openclaw?.setupEntry;
-    if (typeof setupEntry !== "string") {
-      continue;
-    }
-    const setupEntryPath = path.resolve(pluginRoot, setupEntry);
     for (const specifier of collectLegacySetupSpecifiers(setupEntryPath)) {
       const entryPath = resolveRelativeSourceModule(setupEntryPath, specifier);
       if (entryPath && isInsideRoot(pluginRoot, entryPath)) {
@@ -236,14 +192,10 @@ function inspectRelativeClosure(
       }
       const specifier = reference.specifier;
       const sdk = "openclaw/plugin-sdk/";
-      const resolvedPath = specifier.startsWith(".")
-        ? resolveRelativeSourceModule(filePath, specifier)
-        : followSdk && specifier.startsWith(sdk)
-          ? resolveRelativeSourceModule(
-              path.join(REPO_ROOT, "src/plugin-sdk/entrypoint-anchor.ts"),
-              `./${specifier.slice(sdk.length)}`,
-            )
-          : null;
+      const resolvedPath =
+        specifier.startsWith(".") || (followSdk && specifier.startsWith(sdk))
+          ? reference.resolvedFileName
+          : undefined;
       if (resolvedPath && isInsideRoot(root, resolvedPath)) {
         pending.push(resolvedPath);
       }
@@ -257,7 +209,7 @@ function collectForbiddenClosureImports(entry: ClosureEntry): string[] {
   return inspectRelativeClosure(entry.entryPath, entry.pluginRoot, (filePath, reference) => {
     const legacyToo = FORBIDDEN_SPECIFIER_RULES.get(reference.specifier);
     return legacyToo !== undefined && (entry.kind === "doctor-contract" || legacyToo)
-      ? `${entry.pluginId}: ${formatRepoPath(filePath)}:${reference.line} imports ${reference.specifier}; use a focused subpath or defer the import until migration`
+      ? `${entry.pluginId}: ${formatRepoPath(filePath)} imports ${reference.specifier}; use a focused subpath or defer the import until migration`
       : undefined;
   });
 }
@@ -266,36 +218,20 @@ function collectHeavyRuntimeDoctorMigrationImports(): string[] {
   const entryPath = path.join(REPO_ROOT, "src/plugin-sdk/runtime-doctor-migrations.ts");
   const forbiddenPrefixes = ["src/plugin-state/plugin-state-store", "src/state/openclaw-state-db"];
   return inspectRelativeClosure(entryPath, REPO_ROOT, (filePath, reference) => {
-    const resolvedPath = resolveRelativeSourceModule(filePath, reference.specifier);
+    const resolvedPath = reference.specifier.startsWith(".")
+      ? reference.resolvedFileName
+      : undefined;
     const repoPath =
       resolvedPath && isInsideRoot(REPO_ROOT, resolvedPath)
         ? formatRepoPath(resolvedPath)
         : undefined;
     return repoPath && forbiddenPrefixes.some((prefix) => repoPath.startsWith(prefix))
-      ? `${formatRepoPath(filePath)}:${reference.line} reaches heavy doctor dependency ${repoPath}`
+      ? `${formatRepoPath(filePath)} reaches heavy doctor dependency ${repoPath}`
       : undefined;
   });
 }
 
 describe("doctor contract import closures", () => {
-  it("classifies only static value module edges", () => {
-    const source = [
-      `import type { A } from "${FORBIDDEN_SPECIFIER}";`,
-      `import { type B } from "${FORBIDDEN_SPECIFIER}";`,
-      `export type { C } from "${FORBIDDEN_SPECIFIER}";`,
-      `export { type D } from "${FORBIDDEN_SPECIFIER}";`,
-      `type E = import("${FORBIDDEN_SPECIFIER}").E;`,
-      `const lazy = () => import("${FORBIDDEN_SPECIFIER}");`,
-      `import { type F, value } from "${FORBIDDEN_SPECIFIER}";`,
-      `export { type G, otherValue } from "${FORBIDDEN_SPECIFIER}";`,
-    ].join("\n");
-
-    expect(collectStaticValueReferences("fixture.ts", source)).toEqual([
-      { kind: "import", line: 7, specifier: FORBIDDEN_SPECIFIER },
-      { kind: "export", line: 8, specifier: FORBIDDEN_SPECIFIER },
-    ]);
-  });
-
   it("keeps broad agent runtime and heavy doctor barrels off doctor enumeration paths", () => {
     const violations = collectClosureEntries().flatMap(collectForbiddenClosureImports).toSorted();
     expect(violations).toStrictEqual([]);
@@ -312,9 +248,9 @@ describe("doctor contract import closures", () => {
       inspectRelativeClosure(
         entry.entryPath,
         REPO_ROOT,
-        (filePath, { specifier, line }) =>
+        (filePath, { specifier }) =>
           specifier === "kysely" || specifier.startsWith("kysely/")
-            ? `${entry.pluginId}: ${formatRepoPath(filePath)}:${line} imports ${specifier}`
+            ? `${entry.pluginId}: ${formatRepoPath(filePath)} imports ${specifier}`
             : undefined,
         true,
         visited,

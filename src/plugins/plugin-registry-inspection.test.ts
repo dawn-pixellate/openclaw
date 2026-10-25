@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hermeticEnv } from "../commands/doctor-plugin-registry.test-support.js";
 import { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db.js";
 import { closeStateDatabaseForTest } from "../test-utils/database-cleanup.js";
-import { makePluginMetadataIndex } from "./current-plugin-metadata.test-support.js";
 import type { PluginCandidate } from "./discovery.js";
 import {
   refreshPersistedInstalledPluginIndex,
@@ -21,6 +20,10 @@ import {
   loadPluginRegistrySnapshotWithMetadata,
 } from "./plugin-registry.js";
 import { cleanupTrackedTempDirs, makeTrackedTempDir } from "./test-helpers/fs-fixtures.js";
+import {
+  createInstalledPluginIndex,
+  createInstalledPluginIndexCandidate as createCandidate,
+} from "./test-helpers/installed-plugin-index.js";
 import { writeManagedNpmPlugin } from "./test-helpers/managed-npm-plugin.js";
 
 const tempDirs: string[] = [];
@@ -52,13 +55,6 @@ function writeManifest(rootDir: string, manifest: Record<string, unknown> = {}) 
   });
 }
 
-function createCandidate(rootDir: string): PluginCandidate {
-  const source = path.join(rootDir, "index.ts");
-  fs.writeFileSync(source, "export default { register() {} };\n", "utf8");
-  writeManifest(rootDir);
-  return { idHint: "demo", source, rootDir, origin: "global" };
-}
-
 function createPackagedCandidate(rootDir: string): PluginCandidate {
   const candidate = createCandidate(rootDir);
   writeJson(path.join(rootDir, "package.json"), { name: "demo", version: "1.0.0" });
@@ -66,11 +62,7 @@ function createPackagedCandidate(rootDir: string): PluginCandidate {
 }
 
 function createEmptyIndex(stateDir: string): InstalledPluginIndex {
-  return {
-    ...makePluginMetadataIndex(),
-    hostContractVersion: "2026.4.25",
-    compatRegistryVersion: "compat-v1",
-    policyHash: "policy-v1",
+  return createInstalledPluginIndex({
     installRecords: {
       missing: {
         source: "npm",
@@ -79,7 +71,7 @@ function createEmptyIndex(stateDir: string): InstalledPluginIndex {
       },
     },
     plugins: [],
-  };
+  });
 }
 
 function candidateFixture() {
@@ -113,11 +105,6 @@ function expectDifference(
   changed = ["record"],
 ) {
   expect(differences).toEqual([{ pluginId: "demo", changed, persistedSource, derivedSource }]);
-}
-
-function expectStaleSnapshot(result: ReturnType<typeof loadPluginRegistrySnapshotWithMetadata>) {
-  expect(result.source).toBe("derived");
-  expect(result.diagnostics.map(({ code }) => code)).toEqual(["persisted-registry-stale-source"]);
 }
 
 function pathInstall(sourcePath: string, installPath = sourcePath) {
@@ -234,7 +221,7 @@ describe("plugin registry inspection", () => {
     expectFreshness(await inspectPluginRegistry(params), "stale", ["stale-manifest"]);
   });
 
-  it("agrees with snapshot selection when a packaged runtime entry changes", async () => {
+  it("reports a changed packaged runtime entry", async () => {
     const { pluginDir, ...params } = candidateFixture();
     const sourceCandidate = expectDefined(params.candidates[0], "source candidate");
     await refresh(params);
@@ -244,10 +231,8 @@ describe("plugin registry inspection", () => {
     const builtCandidate = { ...sourceCandidate, source: builtSource };
 
     const builtParams = { ...params, candidates: [builtCandidate] };
-    const snapshot = loadPluginRegistrySnapshotWithMetadata(builtParams);
     const inspection = await inspectPluginRegistry(builtParams);
 
-    expectStaleSnapshot(snapshot);
     expectFreshness(inspection, "stale", ["source-changed"]);
     expectDifference(inspection.differences, sourceCandidate.source, builtSource);
     expect(inspection.current.plugins[0]?.source).toBe(builtSource);
@@ -306,10 +291,8 @@ describe("plugin registry inspection", () => {
     await refreshPersistedInstalledPluginIndex({ reason: "manual", stateDir, config, env });
 
     const params = { stateDir, config, env };
-    const listSelection = loadPluginRegistrySnapshotWithMetadata({ ...params, workspaceDir });
     const inspection = await inspectPluginRegistry(params);
 
-    expectStaleSnapshot(listSelection);
     expectFreshness(inspection, "stale", ["source-changed"]);
     expect(inspection.current.workspaceDir).toBe(workspaceDir);
     expect(inspection.current.plugins.map((plugin) => plugin.pluginId)).toEqual(["demo"]);

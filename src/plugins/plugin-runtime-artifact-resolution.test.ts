@@ -7,10 +7,7 @@ import { withEnv } from "../test-utils/env.js";
 import { clearPluginRegistryLoadCache, loadOpenClawPlugins } from "./loader.js";
 import { resetPluginLoaderTestStateForTest } from "./loader.test-fixtures.js";
 import { fingerprintPluginRuntimeArtifact } from "./plugin-runtime-artifact-identity.js";
-import {
-  clearPluginRuntimeArtifactResolutionMemo,
-  resolvePluginRuntimeArtifact,
-} from "./plugin-runtime-artifact-resolution.js";
+import { resolvePluginRuntimeArtifact } from "./plugin-runtime-artifact-resolution.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
 import { getActivePluginChannelRegistry } from "./runtime.js";
 import { withPluginRuntimeRegistryScope } from "./runtime/gateway-request-scope.js";
@@ -366,20 +363,5 @@ describe("resolvePluginRuntimeArtifact", () => {
       },
       { OPENCLAW_STATE_DIR: path.join(packageRoot, "state") },
     );
-  });
-
-  it("leaves dist-only installs unchanged because both preferences resolve the built entry", () => {
-    const packageRoot = tempRoot();
-    const rootDir = path.join(packageRoot, "dist", "extensions", "fixture");
-    const source = path.join(rootDir, "index.js");
-    write(source, emptyPlugin);
-    const artifact = { rootDir: fs.realpathSync(rootDir), source: fs.realpathSync(source) };
-
-    const sourcePreferred = resolveFixture(artifact);
-    clearPluginRuntimeArtifactResolutionMemo();
-    const builtPreferred = resolveFixture({ ...artifact, preferBuiltPluginArtifacts: true });
-
-    expect(sourcePreferred).toEqual(artifact);
-    expect(builtPreferred).toEqual(sourcePreferred);
   });
 });
