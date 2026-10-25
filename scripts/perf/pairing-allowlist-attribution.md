@@ -16,6 +16,24 @@ boot, the 40-second Reef settle window, steady state and shutdown separate.
 Profile the real Gateway with `--cpu-prof` per thread. Report statements per
 poll, per minute and per 15 minutes; record errors and unexpected relay calls.
 
+Use `scripts/perf/pairing-channel-attribution.mts --channel <channel> --seconds 60
+--ingress --profile` for Discord, Telegram, Slack, Signal, Matrix, Mattermost,
+WhatsApp and Zalo through the existing synthetic Crabline transport. Keep boot,
+60-second idle, a status RPC, ingress and shutdown separate. Configure pairing
+with an empty allowlist before ingress; record setup failures separately from
+zero reads. Injection alone is attribution, not proof of refused admission.
+
+The same driver accepts `--channel msteams` through the existing local Bot
+Framework QA adapter and private runtime preload, with the same phases and
+pairing policy. The driver also accepts IRC (loopback TCP), Nostr (signed and
+encrypted WebSocket events), Nextcloud Talk (signed webhook plus authenticated
+local room API), and Feishu (HTTPS discovery plus native WebSocket with fixture
+CA). LINE and SMS use signed ingress with an empty **allowlist** policy; this
+narrower path avoids their fixed external challenge-reply endpoints. All use
+synthetic identities and retain provider listeners until Gateway shutdown.
+Google Chat and Zalo User have authentication boundaries that the credential-free
+fixture cannot cross; report those gaps without weakening verification.
+
 Inventory every bundled pairing consumer by channel, caller and trigger before
 proposing a change. Distinguish source-only attribution and owner tests from
 real-Gateway transport evidence; an unexercised channel is an explicit gap.
@@ -34,3 +52,7 @@ or CPU-speed claim needs the timing lock, load below 24 and at least five
 interleaved samples per arm, with cold/warm median, p95 and range separate.
 Every user-facing metric must hold or improve; any adverse 20% cell stops the
 change. Runtime MAIN must remain zero and total work must not increase.
+
+After design approval, the Reef count target is two pairing SELECTs/requests
+per 30-second tick becoming one (four/minute to two/minute). No production
+change or measured saving is claimed by this preregistration.
