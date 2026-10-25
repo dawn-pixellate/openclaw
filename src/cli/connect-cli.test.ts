@@ -114,27 +114,19 @@ describe("connect cli", () => {
     mocks.runtime.exit.mockImplementation(() => {});
   });
 
-  it.each([
-    ["Application/JSON; charset=utf-8", true],
-    ["text/html", false],
-    ["application/json-seq", false],
-  ])("recognizes the join response media type %s", async (contentType, accepted) => {
-    const release = joinResponse(contentType);
-
-    await runConnect([`https://gateway.example/j/${"a".repeat(22)}`]);
-
-    if (accepted) {
-      expect(mocks.runNodeHost).toHaveBeenCalledOnce();
-      expect(mocks.runtime.error).not.toHaveBeenCalled();
-    } else {
+  it.each(["text/html", "application/json-seq"])(
+    "rejects join media type %s",
+    async (contentType) => {
+      const release = joinResponse(contentType);
+      await runConnect([`https://gateway.example/j/${"a".repeat(22)}`]);
       expectFailure("Gateway join code was not found or has expired.");
-    }
-    expect(release).toHaveBeenCalledOnce();
-  });
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
 
   it("maps an HTTPS join URL into the existing node foreground runtime", async () => {
     const target = `https://gateway.example/openclaw-gw/j/${"a".repeat(22)}`;
-    joinResponse("application/json; charset=utf-8", target);
+    const release = joinResponse("Application/JSON; charset=utf-8", target);
 
     await runConnect([target, "--display-name", "Build Node"]);
 
@@ -158,7 +150,8 @@ describe("connect cli", () => {
       preferGatewayBootstrapToken: true,
       displayName: "Build Node",
     });
-    expect(mocks.fetchWithSsrFGuard).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledOnce();
+    expect(mocks.runtime.error).not.toHaveBeenCalled();
     expect(mocks.fetchWithSsrFGuard.mock.calls[0]?.[0]).not.toHaveProperty("init");
     expect(mocks.runNodeDaemonInstall).not.toHaveBeenCalled();
   });
