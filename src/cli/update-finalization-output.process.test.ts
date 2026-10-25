@@ -124,7 +124,7 @@ describe.each(["repair", "finalize"])("update %s process output", (command) => {
         "dev",
         ...(scenario === "human-recovery-plugin-error" ? [] : ["--yes"]),
         "--no-restart",
-        // The fixture overrides the blocked phase to 1s; recovery keeps a separate explicit budget.
+        // The fixture overrides the blocked phase budget; recovery keeps a separate explicit budget.
         "--timeout",
         scenario === "borrowed-phase" ? "1" : "9",
         ...(json && scenario !== "inherited-json" ? ["--json"] : []),
