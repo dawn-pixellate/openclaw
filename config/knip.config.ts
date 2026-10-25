@@ -118,6 +118,7 @@ const repositoryScriptEntries = [
   "scripts/perf/orphan-recovery-observer.mjs!",
   "scripts/perf/session-actor-residency-snapshot.mjs!",
   "scripts/perf/session-actor-retention-seed.ts!",
+  "scripts/perf/session-event-plan-share.ts!",
   "scripts/perf/session-row-materialization-measure.ts!",
   "scripts/perf/ws-counter-stress-preload.ts!",
   "scripts/perf/ws-counter-stress.ts!",
