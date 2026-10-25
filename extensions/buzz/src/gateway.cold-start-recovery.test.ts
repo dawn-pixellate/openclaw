@@ -89,10 +89,6 @@ let currentNowMs = START_SECONDS * 1_000;
 let handled: string[] = [];
 let gates = new Map<string, Promise<void>>();
 
-function advanceSeconds(seconds: number): void {
-  currentNowMs += seconds * 1_000;
-}
-
 function gateHandler(text: string): { settle: () => void; fail: (error: Error) => void } {
   const { promise, resolve: settle, reject: fail } = Promise.withResolvers<void>();
   gates.set(text, promise);
@@ -154,17 +150,8 @@ function startGatewayProcess(channelIds: string[] = [CHANNEL_ID]) {
   };
 }
 
-async function waitForSettled(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  for (let attempt = 0; attempt < 400; attempt += 1) {
-    if (await predicate()) {
-      return;
-    }
-    await new Promise((resolve) => {
-      setTimeout(resolve, 10);
-    });
-  }
-  throw new Error("timed out waiting for the Buzz gateway to settle");
-}
+const waitForSettled = (predicate: () => boolean | Promise<boolean>) =>
+  vi.waitUntil(predicate, { interval: 10, timeout: 4_000 });
 
 async function runGatewayProcess(
   params: { until?: () => boolean | Promise<boolean>; channelIds?: string[] } = {},
@@ -189,15 +176,11 @@ function roomSubscriptionSince(channelId = CHANNEL_ID): number {
   return filter?.since as number;
 }
 
-async function readWatermark(channelId = CHANNEL_ID): Promise<number | undefined> {
-  const store = openBuzzRecoveryWatermarkStore({ accountId: ACCOUNT_ID });
-  return (await store.lookup(`room:${channelId}`))?.seconds;
-}
-
-function openProcessBoundary(): void {
+function nextProcess(seconds = 600): void {
   history.messageFilters.length = 0;
   handled = [];
   gates = new Map();
+  currentNowMs += seconds * 1_000;
 }
 
 beforeEach(() => {
@@ -258,14 +241,12 @@ describe("Buzz gateway cold-start recovery", () => {
     await runGatewayProcess();
     expect(roomSubscriptionSince()).toBe(START_SECONDS);
 
-    openProcessBoundary();
+    nextProcess();
     postRoomMessage("live-msg", START_SECONDS + 200);
-    advanceSeconds(600);
     await runGatewayProcess({ until: () => handled.includes("live-msg") });
 
-    openProcessBoundary();
+    nextProcess(7_200);
     postRoomMessage("outage-msg", START_SECONDS + 100);
-    advanceSeconds(7_200);
     await runGatewayProcess({ until: () => handled.includes("outage-msg") });
     expect(roomSubscriptionSince()).toBe(START_SECONDS);
     expect(handled).toContain("outage-msg");
@@ -322,9 +303,8 @@ describe("Buzz gateway cold-start recovery", () => {
   it("keeps a room configured after the first start at the current time", async () => {
     await runGatewayProcess();
 
-    openProcessBoundary();
+    nextProcess();
     postRoomMessage("before-second-room-setup", START_SECONDS + 60, SECOND_CHANNEL_ID);
-    advanceSeconds(600);
     await runGatewayProcess({ channelIds: [CHANNEL_ID, SECOND_CHANNEL_ID] });
     expect(roomSubscriptionSince(SECOND_CHANNEL_ID)).toBe(START_SECONDS + 600);
     expect(handled).not.toContain("before-second-room-setup");
@@ -334,7 +314,7 @@ describe("Buzz gateway cold-start recovery", () => {
   it("recovers a replay message still queued when the process stops", async () => {
     await runGatewayProcess();
 
-    openProcessBoundary();
+    nextProcess();
     const queuedText = "queued-msg";
     postRoomMessage(queuedText, START_SECONDS + 100);
     gateHandler(queuedText);
@@ -344,7 +324,6 @@ describe("Buzz gateway cold-start recovery", () => {
       postRoomMessage(text, START_SECONDS + 200 + index);
       settlers.push(gateHandler(text));
     }
-    advanceSeconds(600);
     const gatewayProcess = startGatewayProcess();
     await waitForSettled(() => handled.length === 8);
     expect(handled).not.toContain(queuedText);
@@ -352,10 +331,10 @@ describe("Buzz gateway cold-start recovery", () => {
       settler.settle();
     }
     await gatewayProcess.stop();
-    expect(await readWatermark()).toBe(START_SECONDS);
+    const store = openBuzzRecoveryWatermarkStore({ accountId: ACCOUNT_ID });
+    expect(await store.lookup(`room:${CHANNEL_ID}`)).toEqual({ seconds: START_SECONDS });
 
-    openProcessBoundary();
-    advanceSeconds(600);
+    nextProcess();
     await runGatewayProcess({ until: () => handled.includes(queuedText) });
     expect(handled).toContain(queuedText);
   });
@@ -401,20 +380,18 @@ describe("Buzz gateway cold-start recovery", () => {
   it("retries a previously failed room message after a process restart", async () => {
     await runGatewayProcess();
 
-    openProcessBoundary();
+    nextProcess();
     postRoomMessage("fail-msg", START_SECONDS + 100);
     postRoomMessage("ok-msg", START_SECONDS + 200);
     const failing = gateHandler("fail-msg");
     const succeeding = gateHandler("ok-msg");
-    advanceSeconds(600);
     const gatewayProcess = startGatewayProcess();
     await waitForSettled(() => handled.includes("fail-msg") && handled.includes("ok-msg"));
     failing.fail(new Error("agent dispatch failed"));
     succeeding.settle();
     await gatewayProcess.stop();
 
-    openProcessBoundary();
-    advanceSeconds(600);
+    nextProcess();
     await runGatewayProcess({ until: () => handled.includes("fail-msg") });
     expect(roomSubscriptionSince()).toBe(START_SECONDS);
     expect(handled).toContain("fail-msg");

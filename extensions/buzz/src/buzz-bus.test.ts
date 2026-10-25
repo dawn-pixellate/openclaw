@@ -12,7 +12,6 @@ import { relayMocks } from "./buzz-bus.test-helpers.js";
 import {
   BUZZ_DIFF_MESSAGE_KIND,
   BUZZ_NORMAL_MESSAGE_KIND,
-  formatBuzzMessageForAgent,
   parseBuzzMessageEvent,
 } from "./message-event.js";
 import { parseBuzzAuthTag } from "./relay-auth.js";
@@ -44,59 +43,6 @@ beforeEach(() => {
 });
 
 describe("Buzz message events", () => {
-  it("parses and formats Buzz structured diff events", () => {
-    const metadata: Array<[string[], string]> = [
-      [["repo", "https://example.com/repo"], "Repository: https://example.com/repo"],
-      [["commit", "abcdef1"], "Commit: abcdef1"],
-      [["parent-commit", "1234567"], "Parent commit: 1234567"],
-      [["file", "a.ts"], "File: a.ts"],
-      [["branch", "feature", "main"], "Branches: feature -> main"],
-      [["pr", "42"], "Pull request: #42"],
-      [["l", "typescript"], "Language: typescript"],
-      [
-        ["description", "Preserve\nstructured diff context"],
-        "Description: Preserve structured diff context",
-      ],
-      [["alt", "Buzz plugin diff"], "Alt text: Buzz plugin diff"],
-      [["truncated", "true"], "Truncated: yes"],
-    ];
-    const diff = "@@ -1 +1 @@\n-old\n+new";
-    const event = botMessage(diff, {
-      kind: BUZZ_DIFF_MESSAGE_KIND,
-      tags: [
-        ROOM_TAG,
-        ...metadata.map(([tag]) => tag),
-        ["e", "root-id", "", "root"],
-        ["e", "reply-id", "", "reply"],
-      ],
-    });
-
-    const message = parseBuzzMessageEvent(event);
-    expect(message).toMatchObject({
-      kind: BUZZ_DIFF_MESSAGE_KIND,
-      threadId: "root-id",
-      replyToId: "reply-id",
-      diff: { description: "Preserve\nstructured diff context" },
-    });
-    expect(message && formatBuzzMessageForAgent(message)).toBe(
-      [
-        "[Buzz structured diff]",
-        ...metadata.map(([, expected]) => expected),
-        "",
-        "Unified diff:",
-        diff,
-      ].join("\n"),
-    );
-    const boundaryContext = formatBuzzMessageForAgent({
-      ...message!,
-      diff: {
-        ...message!.diff!,
-        description: `${"a".repeat(252)}😀tail`,
-      },
-    });
-    expect(Buffer.from(boundaryContext, "utf8").toString("utf8")).toBe(boundaryContext);
-  });
-
   it.each([
     ["missing room", 9, "hello", []],
     ["unsupported kind", 1, "hello", [ROOM_TAG]],

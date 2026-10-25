@@ -1,3 +1,4 @@
+import { finalizeEvent } from "nostr-tools";
 import { runPreparedInboundReply } from "openclaw/plugin-sdk/channel-inbound";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -10,6 +11,7 @@ import { handleBuzzInbound as handleBuzzInboundWithHistory } from "./inbound.js"
 import {
   BUZZ_DIFF_MESSAGE_KIND,
   BUZZ_NORMAL_MESSAGE_KIND,
+  parseBuzzMessageEvent,
   type BuzzInboundMessage,
 } from "./message-event.js";
 import { setBuzzRuntime } from "./runtime.js";
@@ -463,26 +465,53 @@ it.each([true, false])(
   },
 );
 
-it.each([false, true])(
-  "never interprets structured diff text; requireMention=%s",
-  async (requireMention) => {
+it.each([
+  { requireMention: true, long: false },
+  { requireMention: false, long: false },
+  { requireMention: false, long: true },
+])(
+  "parses diff context without interpreting commands or mentions ($requireMention, $long)",
+  async ({ requireMention, long }) => {
     vi.mocked(runtime.channel.commands.shouldComputeCommandAuthorized).mockReturnValue(true);
     vi.mocked(runtime.channel.mentions.matchesMentionPatterns).mockReturnValue(true);
-    const diffText = `/status\n@@ -1 +1 @@\n-old\n+${"new".repeat(4_000)}\n+const owner = '@OpenClaw';`;
-    await receive(
-      {
-        kind: BUZZ_DIFF_MESSAGE_KIND,
-        text: diffText,
-        diff: {
-          repoUrl: "https://github.com/openclaw/openclaw",
-          commitSha: "abcdef1",
-          description: `line one\n${"x".repeat(1_100)}`,
-          truncated: true,
+    const diffText = `/status\n@@ -1 +1 @@\n-old\n+${long ? "new".repeat(4_000) : "new"}\n+const owner = '@OpenClaw';`;
+    const description = long
+      ? `line one\n${"a".repeat(243)}😀tail`
+      : "Preserve\nstructured diff context";
+    const metadata: Array<[string[], string]> = [
+      [["repo", "https://example.com/repo"], "Repository: https://example.com/repo"],
+      [["commit", "abcdef1"], "Commit: abcdef1"],
+      [["parent-commit", "1234567"], "Parent commit: 1234567"],
+      [["file", "a.ts"], "File: a.ts"],
+      [["branch", "feature", "main"], "Branches: feature -> main"],
+      [["pr", "42"], "Pull request: #42"],
+      [["l", "typescript"], "Language: typescript"],
+      [["description", description], "Description: Preserve structured diff context"],
+      [["alt", "Buzz plugin diff"], "Alt text: Buzz plugin diff"],
+      [["truncated", "true"], "Truncated: yes"],
+    ];
+    const message = parseBuzzMessageEvent(
+      finalizeEvent(
+        {
+          kind: BUZZ_DIFF_MESSAGE_KIND,
+          content: diffText,
+          created_at: 1_777_000_000,
+          tags: [
+            ["h", ROOM_ID],
+            ...metadata.map(([tag]) => tag),
+            ["e", "root-id", "", "root"],
+            ["e", "reply-id", "", "reply"],
+          ],
         },
-      },
-      {},
-      { groups: { [ROOM_ID]: { requireMention } } },
+        new Uint8Array(32).fill(1),
+      ),
     );
+    expect(message).toMatchObject({
+      threadId: "root-id",
+      replyToId: "reply-id",
+      diff: { description },
+    });
+    await receive(message!, {}, { groups: { [ROOM_ID]: { requireMention } } });
     expect(runtime.channel.commands.shouldComputeCommandAuthorized).not.toHaveBeenCalled();
     expect(runtime.channel.mentions.matchesMentionPatterns).not.toHaveBeenCalled();
     if (requireMention) {
@@ -497,12 +526,22 @@ it.each([false, true])(
       BodyForCommands: "",
     });
     const bodyForAgent = context.BodyForAgent ?? "";
-    expect(bodyForAgent).toContain("[Buzz structured diff]");
-    expect(bodyForAgent).toContain("Repository: https://github.com/openclaw/openclaw");
-    expect(bodyForAgent).toContain("Description: line one ");
-    expect(bodyForAgent).toContain("Truncated: yes");
-    expect(bodyForAgent).toContain("Unified diff:\n/status\n@@ -1 +1 @@\n-old\n+new");
-    expect(bodyForAgent.endsWith("...[Buzz diff truncated for model context]")).toBe(true);
-    expect(bodyForAgent.length).toBeLessThanOrEqual(4_000);
+    if (long) {
+      expect(bodyForAgent).toContain("Description: line one ");
+      expect(bodyForAgent).toContain("Unified diff:\n/status\n@@ -1 +1 @@\n-old\n+new");
+      expect(bodyForAgent.endsWith("...[Buzz diff truncated for model context]")).toBe(true);
+      expect(bodyForAgent.length).toBeLessThanOrEqual(4_000);
+      expect(Buffer.from(bodyForAgent, "utf8").toString("utf8")).toBe(bodyForAgent);
+    } else {
+      expect(bodyForAgent).toBe(
+        [
+          "[Buzz structured diff]",
+          ...metadata.map(([, expected]) => expected),
+          "",
+          "Unified diff:",
+          diffText,
+        ].join("\n"),
+      );
+    }
   },
 );
