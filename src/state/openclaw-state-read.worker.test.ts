@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Worker } from "node:worker_threads";
+import { MessagePort } from "node:worker_threads";
 import type {
   WorkerTaskChannel,
   WorkerTaskControl,
@@ -10,6 +10,8 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { PostgresPhysicalFacts } from "../infra/database-engine/physical-facts.js";
 import type { DatabaseEngineSelection } from "../infra/database-engine/types.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
+import { closePostgresPool } from "../infra/postgres-sync/pool.js";
+import type { BridgeWorkerData } from "../infra/postgres-sync/protocol.js";
 import {
   publishSqliteDatabaseAdmission,
   retireSqliteDatabaseAdmissionForPath,
@@ -40,7 +42,7 @@ const mock = vi.hoisted(() => {
     settle: vi.fn<(operation: (source: { db: object }) => unknown) => unknown>(),
     unrelatedHandlerLoaded: false,
     database: undefined as object | undefined,
-    bridges: [] as { worker: Worker; control: Int32Array; online: Promise<void> }[],
+    bridges: [] as { online: Promise<void> }[],
     bootstrapLoading: Promise.withResolvers<void>(),
     bootstrapRelease: Promise.withResolvers<void>(),
   };
@@ -53,11 +55,10 @@ vi.mock("node:worker_threads", async (importOriginal) => {
       constructor(...args: ConstructorParameters<typeof actual.Worker>) {
         super(...args);
         if (String(args[0]).includes("postgres-sync/bridge.worker")) {
-          const data = args[1]?.workerData as { signal: SharedArrayBuffer };
           const online = new Promise<void>((resolve) => {
             this.once("online", () => resolve());
           });
-          mock.bridges.push({ worker: this, control: new Int32Array(data.signal), online });
+          mock.bridges.push({ online });
         }
       }
     },
@@ -129,7 +130,8 @@ const request: OpenClawStateReadRequest = {
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 afterEach(async () => {
-  await Promise.all(mock.bridges.splice(0).map(({ worker }) => worker.terminate()));
+  await closePostgresPool();
+  mock.bridges.length = 0;
 });
 
 beforeEach(() => {
@@ -223,6 +225,19 @@ it("starts its PG bridge while the first command module is still loading", async
     },
     postgres: { connection: "postgresql://[unused", schemaPrefix: "fixture" },
   };
+  const connections: Int32Array[] = [];
+  // oxlint-disable-next-line typescript/unbound-method
+  const post = MessagePort.prototype.postMessage;
+  const postMessage = vi.spyOn(MessagePort.prototype, "postMessage").mockImplementation(function (
+    this: MessagePort,
+    ...args
+  ) {
+    const data = args[0] as { connection?: BridgeWorkerData };
+    if (data.connection) {
+      connections.push(new Int32Array(data.connection.signal));
+    }
+    return Reflect.apply(post, this, args);
+  });
   const reading = mock.handler({
     ...request,
     databasePath,
@@ -235,15 +250,18 @@ it("starts its PG bridge while the first command module is still loading", async
   });
   try {
     await mock.bootstrapLoading.promise;
-    expect(mock.bridges).toHaveLength(1);
-    await mock.bridges[0]!.online;
-    expect(Atomics.load(mock.bridges[0]!.control, 0)).toBe(0);
+    expect(mock.bridges).toHaveLength(4);
+    await Promise.all(mock.bridges.map(({ online }) => online));
+    expect(connections).toHaveLength(1);
+    expect(Atomics.load(connections[0]!, 0)).toBe(0);
     mock.bootstrapRelease.resolve();
     await expect(reading).resolves.toMatchObject({ ok: true, type: "stateBootstrap.inspect" });
-    expect(mock.bridges).toHaveLength(1);
+    expect(connections).toHaveLength(1);
+    expect(mock.bridges).toHaveLength(4);
   } finally {
     mock.bootstrapRelease.resolve();
     await reading;
+    postMessage.mockRestore();
     anchor.close();
     retireSqliteDatabaseAdmissionForPath(databasePath);
   }

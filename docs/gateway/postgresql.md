@@ -727,8 +727,14 @@ First boot, ports, rebuilds, and migrations can take longer on slow disks or a
 remote server. Connection waits allow 60 seconds. On runtime store connections,
 OpenClaw sets session-level `lock_timeout` to 60 seconds and `statement_timeout`
 to 90 seconds. These liveness bounds override role, database, and DSN startup
-settings; the synchronous bridge also has a 120-second deadline. These are not per-operation
-config options. Port and restore materialization allow a one-hour statement timeout.
+settings. The synchronous bridge has a 120-second deadline. If it expires, the
+process root terminates the whole I/O service, resetting every connection assigned
+to that service (roughly a quarter of the process's PostgreSQL connections) with
+an unknown outcome. Runtime statements time out after 90 seconds, so the bridge
+deadline covers a wedged service or a black-holed network. Port and restore
+materialization allow a one-hour statement timeout, but a statement running longer
+than 120 seconds still trips the bridge deadline and resets its I/O service.
+These are not per-operation config options.
 A timeout is a failure to investigate, not permission to delete recovery state.
 Inspect server load, locks, network, and storage, and retry only
 after resolving the reported cause.
