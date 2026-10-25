@@ -9,6 +9,10 @@ import { revokeSqliteDatabaseAdmissionsForPath } from "../infra/sqlite-database-
 import { SQLITE_IDLE_HANDLE_TTL_MS } from "../infra/sqlite-handle-lifecycle.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
+  agentDatabaseBorrowers,
+  getOpenClawAgentDatabaseIfOpen,
+} from "./openclaw-agent-db-borrower.js";
+import {
   assertNoOpenClawAgentDatabaseLeasesReadOnly,
   readActiveOpenClawAgentDatabaseLeasesReadOnly,
 } from "./openclaw-agent-db-lease.js";
@@ -19,7 +23,6 @@ import {
   clearOpenClawAgentDatabaseOpenFailure,
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabasesForTest,
-  getOpenClawAgentDatabaseIfOpen,
   listOpenClawRegisteredAgentDatabases,
   openOpenClawAgentDatabase,
   settleOpenClawAgentDatabaseWorkerClose,
@@ -415,6 +418,20 @@ describe("openclaw agent database handle cache", () => {
     expect(database.db.isOpen).toBe(true);
     expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env })).toHaveLength(1);
     vi.advanceTimersByTime(1);
+    expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env })).toEqual([]);
+  });
+
+  it("reinstalls idle eviction when a borrower reads a cached handle without a timer", () => {
+    const options = { agentId: "borrower-idle-rearm", env };
+    const database = openOpenClawAgentDatabase(options);
+    agentDatabaseBorrowers.idleTimers.get(database.db)?.[Symbol.dispose]();
+    agentDatabaseBorrowers.idleTimers.delete(database.db);
+
+    expect(getOpenClawAgentDatabaseIfOpen(options)).toBe(database);
+    vi.advanceTimersByTime(SQLITE_IDLE_HANDLE_TTL_MS - 1);
+    expect(database.db.isOpen).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(database.db.isOpen).toBe(false);
     expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env })).toEqual([]);
   });
 

@@ -23,7 +23,15 @@ import { observeOpenClawDatabaseMaintenanceResource } from "./openclaw-state-mai
 
 // The writable lifecycle alone publishes handles/failures and installs or disposes timers.
 // Readers share its pins and activity without importing opening, migration, or close machinery.
-export const agentDatabaseBorrowers = resolveGlobalSingleton(
+type AgentDatabaseBorrowers = {
+  databases: Map<string, OpenClawAgentDatabase>;
+  borrowers: WeakMap<EngineConnection, Set<object>>;
+  idleTimers: WeakMap<EngineConnection, Disposable & { refresh(): void }>;
+  failures: Map<string, unknown>;
+  refreshIdleTimer?: (database: OpenClawAgentDatabase) => void;
+};
+
+export const agentDatabaseBorrowers = resolveGlobalSingleton<AgentDatabaseBorrowers>(
   Symbol.for("openclaw.agentDatabaseBorrowers"),
   () => ({
     databases: new Map<string, OpenClawAgentDatabase>(),
@@ -72,7 +80,7 @@ export function getOpenClawAgentDatabaseIfOpen(
   assertAgentDeletionDatabaseCleanupAccess(database, options);
   assertAgentCreationClaimAccess(database, options);
   observeOpenClawDatabaseMaintenanceResource(database.db);
-  cache.idleTimers.get(database.db)?.refresh();
+  cache.refreshIdleTimer?.(database);
   return database;
 }
 

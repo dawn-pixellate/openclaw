@@ -87,6 +87,9 @@ const cache = resolveGlobalSingleton<AgentDatabaseLifecycle>(
   }),
 );
 
+// Install the activity owner before publishing handles, including reads with no timer yet.
+agentDatabaseBorrowers.refreshIdleTimer = refreshAgentDatabaseIdleTimer;
+
 export const closeCachedOpenClawAgentDatabase = createAgentDatabaseHandleCloser(cache);
 
 export function registerAgentDatabaseHandle(
