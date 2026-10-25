@@ -1124,7 +1124,6 @@ function buildConfig(
   agentIds: string[],
   provider: CliOptions["provider"],
   activitySummaryDiagnostics = false,
-  postgres = false,
 ): string {
   const controlUiRoot = path.join(root, "control-ui");
   mkdirSync(controlUiRoot, { recursive: true });
@@ -1147,15 +1146,6 @@ function buildConfig(
   }
 
   const config = structuredClone(BASE_GATEWAY_BENCH_CONFIG) as Record<string, unknown>;
-  if (postgres) {
-    config.database = {
-      engine: "postgres",
-      postgres: {
-        connection: { source: "env", provider: "default", id: POSTGRES_CONNECTION_ENV },
-        schemaPrefix: `gwbench_${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-      },
-    } satisfies NonNullable<OpenClawConfig["database"]>;
-  }
   if (activitySummaryDiagnostics) {
     config.logging = { consoleLevel: "debug", consoleStyle: "json" };
   }
@@ -1192,6 +1182,18 @@ function buildConfig(
         })
       : undefined;
   return writeGatewayBenchConfig(root, config, { agentList, pluginFixtures });
+}
+
+function configurePostgresBenchConfig(configPath: string): void {
+  const config: OpenClawConfig = JSON.parse(readFileSync(configPath, "utf8"));
+  config.database = {
+    engine: "postgres",
+    postgres: {
+      connection: { source: "env", provider: "default", id: POSTGRES_CONNECTION_ENV },
+      schemaPrefix: `gwbench_${randomUUID().replaceAll("-", "").slice(0, 16)}`,
+    },
+  } satisfies NonNullable<OpenClawConfig["database"]>;
+  writeFileSync(configPath, JSON.stringify(config));
 }
 
 async function readGatewayProtocolVersion(entry: string): Promise<number> {
@@ -1975,9 +1977,11 @@ async function runGatewaySample(
         agentIds,
         options.provider,
         Boolean(activityDiagnostics),
-        options.postgres,
       );
       const workersPath = path.join(fixtureRoot, "workers.jsonl");
+      if (options.postgres) {
+        configurePostgresBenchConfig(configPath);
+      }
       if (options.controlUiLoad) {
         const config = JSON.parse(readFileSync(configPath, "utf8"));
         config.gateway.auth = { mode: "token", token: controlUiToken };
@@ -3515,6 +3519,7 @@ export const testing = {
   createTurnEvidence,
   captureChildOutput,
   buildConfig,
+  configurePostgresBenchConfig,
   formatProbeFailure,
   formatRunFailure,
   requestHttp,

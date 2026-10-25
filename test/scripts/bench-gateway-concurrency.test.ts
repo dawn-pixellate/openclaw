@@ -2153,8 +2153,13 @@ syncBuiltinESMExports();\n`,
 
   it("isolates PostgreSQL runs with an env connection reference while keeping SQLite the default", async () => {
     await withTempDir("gateway-postgres-config-", async (root) => {
-      const write = (postgres: boolean) =>
-        testing.buildConfig(root, 12345, 64, 0, 0, ["main"], "mock", false, postgres);
+      const write = (postgres: boolean) => {
+        const configPath = testing.buildConfig(root, 12345, 64, 0, 0, ["main"], "mock");
+        if (postgres) {
+          testing.configurePostgresBenchConfig(configPath);
+        }
+        return configPath;
+      };
       const sqlite = JSON.parse(await readFile(write(false), "utf8"));
       expect(sqlite.database).toBeUndefined();
       const first = JSON.parse(await readFile(write(true), "utf8"));

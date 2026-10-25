@@ -37,7 +37,8 @@ export function postgresBridgeReuseKey(params: PostgresBridgeParameters): string
 
 export function createPostgresBridge(params: PostgresBridgeParameters): PostgresBridge {
   const { port1, port2 } = new MessageChannel();
-  const control = new Int32Array(new SharedArrayBuffer(8));
+  const connectionSignal = new SharedArrayBuffer(8);
+  const control = new Int32Array(connectionSignal);
   const { port, signal, nextStep } = selectPostgresPoolService();
   const service = new Int32Array(signal);
   if (Atomics.load(service, 1)) {
@@ -54,7 +55,7 @@ export function createPostgresBridge(params: PostgresBridgeParameters): Postgres
       {
         connection: {
           port: port2,
-          signal: control.buffer as SharedArrayBuffer,
+          signal: connectionSignal,
           url: params.url,
           schema: params.schema,
           connectTimeoutMs: POSTGRES_CONNECT_TIMEOUT_MS,

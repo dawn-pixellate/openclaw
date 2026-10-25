@@ -26,13 +26,28 @@ export type PostgresPoolWorkerData = {
   peers: PostgresPoolEndpoint[];
 };
 
-const state = resolveGlobalSingleton(Symbol.for("openclaw.postgresIoPool"), () => ({
-  endpoints: workerData?.postgresPool as PostgresPoolEndpoints | undefined,
-  workers: undefined as Worker[] | undefined,
-  nextStep: undefined as string | undefined,
-  ready: [] as Promise<void>[],
-  refresh: undefined as (() => void) | undefined,
-  failure: undefined as Error | undefined,
+type PoolState = {
+  endpoints?: PostgresPoolEndpoints;
+  workers?: Worker[];
+  nextStep?: string;
+  ready: Promise<void>[];
+  refresh?: () => void;
+  failure?: Error;
+};
+type PoolService = {
+  channel: MessageChannel;
+  signal: SharedArrayBuffer;
+  peers: PostgresPoolEndpoint[];
+};
+
+const inherited: { postgresPool?: PostgresPoolEndpoints } | null = workerData;
+const state = resolveGlobalSingleton<PoolState>(Symbol.for("openclaw.postgresIoPool"), () => ({
+  endpoints: inherited?.postgresPool,
+  workers: undefined,
+  nextStep: undefined,
+  ready: [],
+  refresh: undefined,
+  failure: undefined,
 }));
 
 /** A failed service invalidates this SQL host; its existing task owner retires it. */
@@ -65,10 +80,10 @@ function startPool(): PostgresPoolEndpoints {
     throw new Error("PostgreSQL SQL host was created without process pool endpoints");
   }
   const allocation = new SharedArrayBuffer(4);
-  const services = Array.from({ length: 4 }, () => ({
+  const services: PoolService[] = Array.from({ length: 4 }, () => ({
     channel: new MessageChannel(),
     signal: new SharedArrayBuffer(8),
-    peers: [] as PostgresPoolEndpoint[],
+    peers: [],
   }));
   // A surviving service wakes waiters on abrupt peer death even when MAIN cannot run events.
   for (let i = 0; i < services.length; i++) {
@@ -139,10 +154,10 @@ function startPool(): PostgresPoolEndpoints {
       failedServices.delete(index);
       // Only failed clients retire. Replacement hosts inherit the new setup endpoint;
       // checked-out connections are never moved or replayed.
-      const replacement = {
+      const replacement: PoolService = {
         channel: new MessageChannel(),
         signal: new SharedArrayBuffer(8),
-        peers: [] as PostgresPoolEndpoint[],
+        peers: [],
       };
       services[index] = replacement;
       endpoints.services[index] = { port: replacement.channel.port1, signal: replacement.signal };
