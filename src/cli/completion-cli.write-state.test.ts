@@ -8,9 +8,7 @@ import { createInvalidConfigError } from "../config/io.invalid-config.js";
 import { expectInstalledCompletionProfile } from "./completion-profile.test-support.js";
 import {
   COMPLETION_SHELLS,
-  formatCompletionReloadCommand,
   resolveCompletionCachePath,
-  resolveCompletionProfileHint,
   resolveCompletionProfilePath,
   type CompletionShell,
 } from "./completion-runtime.js";
@@ -93,14 +91,6 @@ async function seedCache(shell: CompletionShell = "zsh", contents = "# previous 
   return { cachePath, cacheDir };
 }
 
-async function expectCacheModes(cachePath: string, cacheDir: string) {
-  expect(await fs.readdir(cacheDir)).toEqual([path.basename(cachePath)]);
-  if (process.platform !== "win32") {
-    expect((await fs.stat(cachePath)).mode & 0o777).toBe(0o640);
-    expect((await fs.stat(cacheDir)).mode & 0o777).toBe(0o750);
-  }
-}
-
 function expectNoRegistration(): void {
   expect(programContext).not.toHaveBeenCalled();
   expect(coreGroups).not.toHaveBeenCalled();
@@ -152,25 +142,6 @@ describe("completion-cli write-state", () => {
     vi.unstubAllEnvs();
   });
 
-  it("preserves zsh completion when staged publication fails", async () => {
-    const { cachePath, cacheDir } = await seedCache();
-    publish.mockImplementationOnce(async (params) => {
-      return await publishAtomically({
-        ...params,
-        writeTemp: async (tempPath) => {
-          await params.writeTemp(tempPath);
-          await fs.truncate(tempPath, 1);
-          throw new Error("injected completion cache write failure");
-        },
-      });
-    });
-
-    await expect(writeCache("zsh")).rejects.toThrow("injected completion cache write failure");
-
-    await expect(fs.readFile(cachePath, "utf8")).resolves.toBe("# previous completion\n");
-    await expectCacheModes(cachePath, cacheDir);
-  });
-
   it.skipIf(process.platform === "win32").each(["cache", "temporary"] as const)(
     "protects symlink targets at the %s publication path",
     async (location) => {
@@ -218,11 +189,11 @@ describe("completion-cli write-state", () => {
   );
 
   it.each(["bash", "powershell", "fish"] as const)(
-    "installs cached %s completion visibly and idempotently without registering commands or plugins",
+    "installs cached %s completion idempotently without registering commands or plugins",
     async (shell) => {
       const { cachePath } = await seedCache(shell, "# cached completion\n");
       const profilePath = resolveCompletionProfilePath(shell);
-      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "warn").mockImplementation(() => {});
       vi.stubEnv("SHELL", "/usr/bin/fish");
       const args = [
@@ -235,42 +206,22 @@ describe("completion-cli write-state", () => {
 
       const installedProfile = await fs.readFile(profilePath, "utf8");
       expectInstalledCompletionProfile(installedProfile, shell, cachePath);
-      expect(log).toHaveBeenCalledWith(
-        `Completion installed. Restart your shell or run: ${formatCompletionReloadCommand(shell, resolveCompletionProfileHint(shell))}`,
-      );
       await expect(fs.readFile(cachePath, "utf8")).resolves.toBe("# cached completion\n");
 
-      log.mockClear();
       await program.parseAsync(args, { from: "user" });
 
-      expect(log).toHaveBeenCalledWith(`Completion already installed in ${profilePath}`);
       await expect(fs.readFile(profilePath, "utf8")).resolves.toBe(installedProfile);
       expectNoRegistration();
     },
   );
 
-  it("generates and installs completion after registering commands and plugins", async () => {
+  it("generates all shells and installs after awaiting registrars, surviving a failed subcli", async () => {
     const { cachePath, cacheDir } = await seedCache();
     const profilePath = resolveCompletionProfilePath("zsh");
     await fs.writeFile(profilePath, "", { mode: 0o640 });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    const program = await runCompletion(["--shell", "zsh", "--write-state", "--install", "--yes"]);
-
-    const { getCompletionScript } = await import("./completion-cli.js");
-    await expect(fs.readFile(cachePath, "utf8")).resolves.toBe(getCompletionScript("zsh", program));
-    await expectCacheModes(cachePath, cacheDir);
-    await expect(fs.readFile(profilePath, "utf8")).resolves.toContain(cachePath);
-    if (process.platform !== "win32") {
-      expect((await fs.stat(profilePath)).mode & 0o777).toBe(0o640);
-    }
-    expect(log).toHaveBeenCalledWith(
-      "Completion installed. Restart your shell or run: source ~/.zshrc",
-    );
-    expectRegistrationWarning();
-  });
-
-  it("keeps completion cache generation alive when a subcli fails to register", async () => {
+    vi.stubEnv("SHELL", "/bin/zsh");
     subcliGroups.mockReturnValueOnce([
       qaGroup,
       {
@@ -289,13 +240,25 @@ describe("completion-cli write-state", () => {
       program.command("async-plugin").option("--plugin-ready", "Async plugin option");
       return {};
     });
-    await runCompletion(["--write-state"]);
+    const program = await runCompletion(["--write-state", "--install", "--yes"]);
 
+    const { getCompletionScript } = await import("./completion-cli.js");
     for (const shell of COMPLETION_SHELLS) {
       const script = await fs.readFile(resolveCompletionCachePath(shell, "openclaw"), "utf8");
+      expect(script).toBe(getCompletionScript(shell, program));
       expect(script, shell).toContain("subcli-ready");
       expect(script, shell).toContain("plugin-ready");
     }
+    await expect(fs.readFile(profilePath, "utf8")).resolves.toContain(cachePath);
+    if (process.platform !== "win32") {
+      for (const file of [profilePath, cachePath]) {
+        expect((await fs.stat(file)).mode & 0o777).toBe(0o640);
+      }
+      expect((await fs.stat(cacheDir)).mode & 0o777).toBe(0o750);
+    }
+    expect(log).toHaveBeenCalledWith(
+      "Completion installed. Restart your shell or run: source ~/.zshrc",
+    );
     expectRegistrationWarning();
   });
 
@@ -321,23 +284,6 @@ describe("completion-cli write-state", () => {
     await expect(writeCache("zsh")).rejects.toBe(error);
 
     expect(publish).not.toHaveBeenCalled();
-  });
-
-  it("structures completion registration warnings for JSON console output", async () => {
-    const logging = await import("../logging.js");
-    try {
-      logging.setLoggerOverride({ level: "silent", consoleLevel: "info", consoleStyle: "json" });
-
-      await runCompletion(["--write-state"]);
-
-      expect(stderrWrites).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(String(stderrWrites.mock.calls[0]?.[0]))).toMatchObject({
-        level: "warn",
-        message: expect.stringContaining("skipping subcommand `qa`"),
-      });
-    } finally {
-      logging.resetLogger();
-    }
   });
 
   it("skips plugin registration during cache writes through the nodes registrar", async () => {

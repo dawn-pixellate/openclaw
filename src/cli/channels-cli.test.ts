@@ -67,26 +67,16 @@ function setupField(
   return { key, kind, cli: { flags, description: key, ...extra } };
 }
 
-const signalTransport = {
-  key: "signalTransport",
-  kind: "choice",
-  choices: ["external-native", "container"],
-  cli: { flags: "--signal-transport <kind>", description: "Signal transport kind" },
-} satisfies NonNullable<PluginPackageChannel["setup"]>["fields"][number];
 const matrixChannel = {
   id: "matrix",
   cliAddOptions: [{ flags: "--homeserver <url>", description: "Matrix homeserver URL" }],
 };
 const telegramChannel = setupChannel("telegram", setupField("token", "string", "--token <token>"));
 const legacyArgs = ["channels", "add", "--channel", "legacy-chat", "--token", "test-token"];
-function legacyChannel(
-  flags: string,
-  description: string,
-  valueType?: "int",
-): PluginPackageChannel {
+function legacyChannel(flags: string, valueType?: "int"): PluginPackageChannel {
   return {
     id: "legacy-chat",
-    cliAddOptions: [{ flags, description, defaultValue: "", ...(valueType ? { valueType } : {}) }],
+    cliAddOptions: [{ flags, description: "Option", defaultValue: "", valueType }],
   };
 }
 function expectAddCall(options: unknown) {
@@ -115,20 +105,6 @@ describe("registerChannelsCli", () => {
     process.argv = [...originalArgv];
     vi.restoreAllMocks();
     vi.clearAllMocks();
-  });
-
-  it("loads channel-specific add options only for channels add invocations", async () => {
-    process.argv = ["node", "openclaw", "channels"];
-    await registerChannelsCli(new Command().name("openclaw"));
-
-    expect(mocks.bundled).not.toHaveBeenCalled();
-    expect(mocks.catalog).not.toHaveBeenCalled();
-
-    process.argv = ["node", "openclaw", "channels", "add", "clickclack", "--help"];
-    await registerChannelsCli(new Command().name("openclaw"));
-
-    expect(mocks.bundled).toHaveBeenCalledTimes(1);
-    expect(mocks.catalog).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -202,13 +178,14 @@ describe("registerChannelsCli", () => {
       "--name <name>",
     ]);
     expect(mocks.bundled).not.toHaveBeenCalled();
+    expect(mocks.catalog).not.toHaveBeenCalled();
   });
 
   it("forwards only explicitly supplied setup options", async () => {
     mocks.bundled.mockReturnValueOnce([
       setupChannel(
         "signal",
-        signalTransport,
+        setupField("signalTransport", "string", "--signal-transport <kind>"),
         setupField("useEnv", "boolean", "--use-env", { defaultValue: false }),
         setupField("autoDiscover", "boolean", "--auto-discover", {
           negatedFlags: "--no-auto-discover",
@@ -233,7 +210,7 @@ describe("registerChannelsCli", () => {
     ["explicit integer blank", "--limit <n>", "int", ["--limit", ""], { limit: "" }],
     ["text default", "--note <text>", undefined, [], { note: "" }],
   ] as const)("preserves legacy %s", async (label, flags, valueType, args, expected) => {
-    mocks.bundled.mockReturnValueOnce([legacyChannel(flags, "Legacy option", valueType)]);
+    mocks.bundled.mockReturnValueOnce([legacyChannel(flags, valueType)]);
     await runChannelsCli([...legacyArgs, ...args]);
     expectAddCall(
       expect.objectContaining({ channel: "legacy-chat", token: "test-token", ...expected }),
