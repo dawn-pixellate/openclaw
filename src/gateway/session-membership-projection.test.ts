@@ -60,6 +60,14 @@ function membershipProjection(targets: Parameters<Projection["updateTargets"]>[0
   return Object.assign(projection, { [Symbol.dispose]: () => projection.dispose() });
 }
 
+function memberChange(identityId: string, present: boolean, storePath = target.filename) {
+  return {
+    storePath,
+    sessionKey,
+    facts: { kind: "member" as const, sessionId: "shared-session", identityId, present },
+  };
+}
+
 it.each([false, true])(
   "publishes after a delayed reader on Linux without statx only for the admitted file (replaced=%s)",
   async (replaced) => {
@@ -182,11 +190,7 @@ it.each(["member revocation", "owner reassignment"] as const)(
     if (change === "member revocation") {
       expect(projection.groupTargets().get("work")).toEqual([{ sessionKey, agentId: "main" }]);
       expect(projection.ready(target.filename, sessionKey)).toBe(true);
-      projection.invalidate({
-        storePath: target.filename,
-        sessionKey,
-        facts: { kind: "member", sessionId: "shared-session", identityId: "bob", present: true },
-      });
+      projection.invalidate(memberChange("bob", true));
       expect(projection.membership(target.storePath, sessionKey)).toEqual(["bob"]);
     }
     expect(projection.needsPreparation).toBe(false);
@@ -263,19 +267,11 @@ it("shares physical membership across logical aliases and publishes each group m
   await projection.prepare();
   expect(readFacts).toHaveBeenCalledTimes(1);
   expect(projection.groupTargets().get("work")).toEqual([{ sessionKey, agentId: "main" }]);
-  projection.invalidate({
-    storePath: target.filename,
-    sessionKey,
-    facts: { kind: "member", sessionId: "shared-session", identityId: "alice", present: false },
-  });
+  projection.invalidate(memberChange("alice", false));
   for (const storePath of [target.storePath, alias.storePath, target.filename]) {
     expect(projection.membership(storePath, sessionKey)).toEqual([]);
   }
-  projection.invalidate({
-    storePath: alias.storePath,
-    sessionKey,
-    facts: { kind: "member", sessionId: "shared-session", identityId: "bob", present: true },
-  });
+  projection.invalidate(memberChange("bob", true, alias.storePath));
   expect(projection.membership(target.storePath, sessionKey)).toEqual(["bob"]);
   projection.updateTargets([alias]);
   await projection.prepare();

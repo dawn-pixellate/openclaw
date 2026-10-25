@@ -226,13 +226,9 @@ test("delivers node commands and node requests during an unrelated pending pairi
     const originalInvoke = nodeInvokeReadiness.invokeNodeWithReadinessRetry;
     const invoke = vi
       .spyOn(nodeInvokeReadiness, "invokeNodeWithReadinessRetry")
-      .mockImplementationOnce(async (...args) => {
-        try {
-          return await originalInvoke(...args);
-        } finally {
-          dispatchSettled.resolve();
-        }
-      });
+      .mockImplementationOnce((...args) =>
+        originalInvoke(...args).finally(dispatchSettled.resolve),
+      );
     const originalAuthorize = requestAuthorization.authorizeGatewayRequestPreDispatch;
     const authorize = vi
       .spyOn(requestAuthorization, "authorizeGatewayRequestPreDispatch")
