@@ -53,11 +53,11 @@ it("shares legacy root plans across distinct ancestor histories without changing
       cfg,
     });
     const detach = connection.attachSessionRowProjection(projection);
-    const publishOne = (key: string, id: string) =>
+    const publish = (key: string, ids: string[]) =>
       connection.broadcastToConnIds(
         "sessions.changed",
         { sessionKey: key, agentId: "main", reason: "send" },
-        new Set([id]),
+        new Set(ids),
       );
     const createPeer = (audience: (typeof profiles)[number], id: string, prior: number) => {
       const peer = createSessionRowEventPeer(audience.profile, id, 1);
@@ -65,34 +65,49 @@ it("shares legacy root plans across distinct ancestor histories without changing
       connection.clients.add(peer.client);
       connection.sessionMessageSubscribers.subscribe(id, child);
       connection.sessionMessageSubscribers.subscribe(id, root);
-      // Separate publications establish different ancestor certificates even at equal seqs.
-      for (let index = 0; index < prior; index++) {
-        publishOne(child, id);
-      }
-      expect(peer.send).toHaveBeenCalledTimes(prior);
-      expect(JSON.parse(peer.send.mock.calls[0]![0]).payload.ancestorSessions).toMatchObject([
-        { key: parent },
-      ]);
       return Object.assign(peer, { audience, prior });
+    };
+    const prime = (peers: ReturnType<typeof createPeer>[], prior: number) => {
+      for (let index = 0; index < prior; index++) {
+        publish(
+          child,
+          peers.map((peer) => peer.client.connId),
+        );
+      }
+      for (const peer of peers) {
+        expect(peer.send).toHaveBeenCalledTimes(prior);
+        expect(JSON.parse(peer.send.mock.calls[0]![0]).payload.ancestorSessions).toMatchObject([
+          { key: parent },
+        ]);
+      }
     };
     try {
       const peers = Array.from({ length: 66 }, (_value, index) =>
         createPeer(
           profiles[index % 3]!,
           `legacy-recipient-${index}`,
-          1 + (Math.floor(index / 3) % 3),
+          1 + (Math.floor(index / 3) % 2),
         ),
       );
+      // Each audience has two histories; recipients within a cohort share a certificate.
+      for (const prior of [1, 2]) {
+        prime(
+          peers.filter((peer) => peer.prior === prior),
+          prior,
+        );
+      }
       const filtered = profiles.map((audience, index) => {
         const peer = createPeer(audience, `legacy-filtered-${index}`, 1);
+        prime([peer], 1);
         connection.sessionMessageSubscribers.unsubscribe(peer.client.connId, root);
         return peer;
       });
       const golden = new Map<string, string>();
       for (const audience of profiles) {
-        for (let prior = 1; prior <= 3; prior++) {
+        for (let prior = 1; prior <= 2; prior++) {
           const peer = createPeer(audience, `legacy-reference-${audience.role}-${prior}`, prior);
-          publishOne(root, peer.client.connId);
+          prime([peer], prior);
+          publish(root, [peer.client.connId]);
           const frame = peer.send.mock.lastCall![0].toString();
           expect(JSON.parse(frame)).toMatchObject({
             seq: prior + 1,
@@ -109,7 +124,6 @@ it("shares legacy root plans across distinct ancestor histories without changing
         { sessionSubscriptionVerified: true },
       );
       const rootPlans = planning.mock.calls.length;
-      planning.mockRestore();
       for (const peer of peers) {
         expect(peer.send).toHaveBeenCalledTimes(peer.prior + 1);
         expect(peer.send.mock.lastCall![0].toString()).toBe(
@@ -119,10 +133,15 @@ it("shares legacy root plans across distinct ancestor histories without changing
       for (const peer of filtered) {
         expect(peer.send).toHaveBeenCalledTimes(peer.prior);
       }
+      planning.mockClear();
+      publish(
+        child,
+        peers.map((peer) => peer.client.connId),
+      );
+      const childPlans = planning.mock.calls.length;
       for (const peer of peers) {
         const originalAncestor = JSON.parse(peer.send.mock.calls[0]![0]).payload
           .ancestorSessions[0];
-        publishOne(child, peer.client.connId);
         expect(JSON.parse(peer.send.mock.lastCall![0]).payload).toMatchObject({
           ancestorSessions: [],
           ancestorSessionRefs: [{ key: parent, revision: originalAncestor.ancestorRevision }],
@@ -130,6 +149,8 @@ it("shares legacy root plans across distinct ancestor histories without changing
       }
       // Legacy roots use neither wire-row versions nor retained ancestor certificates.
       expect(rootPlans).toBe(profiles.length);
+      // Sharing the root must not split either cohort's retained ancestor history.
+      expect(childPlans).toBe(profiles.length * 2);
     } finally {
       detach();
       await connection.mentionInbox.dispose();

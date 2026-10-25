@@ -276,6 +276,8 @@ export class ConnectionSessionRows {
       before: this.#history,
       // A socket retains only this token, never the publication's payload or plan.
       after: {},
+      // Baseline-free plans must preserve shared cohorts across different recipient histories.
+      historyTransitions: !diff && !ancestors?.length ? new Map<object, object>() : undefined,
     };
   }
 
@@ -314,7 +316,9 @@ export class ConnectionSessionRows {
         this.#delete(this.#rows.keys().next().value!);
       }
     }
-    if (this.#version === 0 && this.#rows.size === 0) {
+    if (plan.historyTransitions) {
+      this.#invalidateHistory(plan.historyTransitions);
+    } else if (this.#version === 0 && this.#rows.size === 0) {
       this.#history = EMPTY_HISTORY;
     } else {
       // Serialization can reenter delivery; changed retained state must stay separate.

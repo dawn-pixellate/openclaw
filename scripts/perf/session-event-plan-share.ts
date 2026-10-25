@@ -1,10 +1,13 @@
 /**
  * Real projection/broadcast owner, 66 legacy recipients across three authorization profiles.
  * Each recipient first receives its own ancestor certificate; measured root events need none.
- * Save the trusted comparison owner, then run five counterbalanced pairs in one process:
+ * Save the trusted comparison owners, then run five counterbalanced pairs in one process:
  * git show <base>:src/gateway/session-event-projection.ts > .local/base-projection.ts
+ * git show <base>:src/gateway/session-ancestor-references.ts > .local/base-history.ts
+ * git show <base>:src/gateway/server-connection-state.ts > .local/base-connection.ts
  * node --import ./scripts/tsx.mjs scripts/perf/session-event-plan-share.ts \
- *   --baseline-source .local/base-projection.ts --publications 250 --pairs 5
+ *   --baseline-source .local/base-projection.ts --baseline-history-source .local/base-history.ts \
+ *   --baseline-connection-source .local/base-connection.ts --publications 250 --pairs 5
  * CPU is untraced; sampled allocation runs separately and includes collected objects.
  * This owner measurement supplements, and does not replace, built-Gateway load testing.
  */
@@ -25,6 +28,8 @@ import { parseStrictIntegerOption } from "../lib/strict-integer-option.ts";
 const { values } = parseArgs({
   options: {
     "baseline-source": { type: "string" },
+    "baseline-history-source": { type: "string" },
+    "baseline-connection-source": { type: "string" },
     publications: { type: "string", default: "250" },
     pairs: { type: "string", default: "5" },
     clients: { type: "string", default: "66" },
@@ -32,27 +37,56 @@ const { values } = parseArgs({
     "state-root": { type: "string", default: ".local/session-event-plan-share" },
   },
 });
-assert(values["baseline-source"], "--baseline-source must name a trusted projection source");
 const integer = (key: "publications" | "pairs" | "clients" | "sampling-interval", min: number) =>
   parseStrictIntegerOption({ raw: values[key], fallback: min, min, label: `--${key}` });
 const publications = integer("publications", 1);
 const pairs = integer("pairs", 1);
 const clientCount = integer("clients", 66);
 const samplingInterval = integer("sampling-interval", 1024);
-const baselineSource = readFileSync(values["baseline-source"], "utf8");
 const ownerUrl = new URL("../../src/gateway/session-event-projection.ts", import.meta.url);
-const baselineUrl = `${ownerUrl.href}?plan-share-baseline`;
+const historyUrl = new URL("../../src/gateway/session-ancestor-references.ts", import.meta.url);
+const connectionUrl = new URL("../../src/gateway/server-connection-state.ts", import.meta.url);
+const baselineUrl = (url: URL) => `${url.href}?plan-share-baseline`;
+const sourceFiles = [
+  { name: "projection", url: ownerUrl, file: values["baseline-source"] },
+  { name: "history", url: historyUrl, file: values["baseline-history-source"] },
+  { name: "connection", url: connectionUrl, file: values["baseline-connection-source"] },
+];
+const baselineSources = new Map(
+  sourceFiles.map(({ name, url, file }) => {
+    assert(file, `--baseline-${name === "projection" ? "" : `${name}-`}source is required`);
+    return [baselineUrl(url), readFileSync(file, "utf8")];
+  }),
+);
+const baselineUrls = new Map(sourceFiles.map(({ url }) => [url.href, baselineUrl(url)]));
+const loadedBaseline = new Set<string>();
 const sourceHash = (source: string) => createHash("sha256").update(source).digest("hex");
 const hook = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const resolved = nextResolve(specifier, context);
+    const url =
+      context.parentURL && baselineSources.has(context.parentURL)
+        ? baselineUrls.get(resolved.url)
+        : undefined;
+    return url ? { ...resolved, url } : resolved;
+  },
   load(url, context, nextLoad) {
-    return url === baselineUrl
-      ? { format: "module-typescript", source: baselineSource, shortCircuit: true }
-      : nextLoad(url, context);
+    const source = baselineSources.get(url);
+    if (source !== undefined) {
+      loadedBaseline.add(url);
+      return { format: "module-typescript", source, shortCircuit: true };
+    }
+    return nextLoad(url, context);
   },
 });
 const baseline: typeof import("../../src/gateway/session-event-projection.js") = await import(
-  baselineUrl
+  baselineUrl(ownerUrl)
 );
+const baselineHistory: typeof import("../../src/gateway/session-ancestor-references.js") =
+  await import(baselineUrl(historyUrl));
+const baselineConnection: typeof import("../../src/gateway/server-connection-state.js") =
+  await import(baselineUrl(connectionUrl));
+assert.equal(loadedBaseline.size, sourceFiles.length, "baseline owner closure was not loaded");
 hook.deregister();
 const { prepareSessionEventProjection } =
   await import("../../src/gateway/session-event-projection.js");
@@ -119,10 +153,20 @@ try {
     }
     const projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
     const variants = [
-      { name: "base", prepare: baseline.prepareSessionEventProjection },
-      { name: "candidate", prepare: prepareSessionEventProjection },
-    ].map(({ name, prepare }) => {
-      const connection = createGatewayConnectionState({
+      {
+        name: "base",
+        prepare: baseline.prepareSessionEventProjection,
+        createConnection: baselineConnection.createGatewayConnectionState,
+        rows: baselineHistory.ConnectionSessionRows,
+      },
+      {
+        name: "candidate",
+        prepare: prepareSessionEventProjection,
+        createConnection: createGatewayConnectionState,
+        rows: ConnectionSessionRows,
+      },
+    ].map(({ name, prepare, createConnection, rows }) => {
+      const connection = createConnection({
         cfg,
         scheduler: createTestGatewayScheduler(),
         bootId: `plan-share-${name}`,
@@ -195,6 +239,7 @@ try {
       const payload = { sessionKey: root, agentId: "main", reason: "send" };
       return {
         name,
+        rows,
         connection,
         detach,
         peers,
@@ -225,21 +270,22 @@ try {
     const measurements: unknown[] = [];
     try {
       const planCounts: Record<string, number> = {};
-      // The count-only wrapper preserves each receiver with apply and restores the method.
-      // oxlint-disable-next-line typescript/unbound-method
-      const original = ConnectionSessionRows.prototype.prepareDelivery;
-      try {
-        for (const variant of variants) {
+      for (const variant of variants) {
+        // The count-only wrapper preserves each receiver with apply and restores the method.
+        // oxlint-disable-next-line typescript/unbound-method
+        const original = variant.rows.prototype.prepareDelivery;
+        try {
           let count = 0;
-          ConnectionSessionRows.prototype.prepareDelivery = function (...args) {
+          variant.rows.prototype.prepareDelivery = function (...args) {
             count++;
             return original.apply(this, args);
           };
           variant.publish();
+          assert(count > 0, `${variant.name} connection did not use its measured history owner`);
           planCounts[variant.name] = count;
+        } finally {
+          variant.rows.prototype.prepareDelivery = original;
         }
-      } finally {
-        ConnectionSessionRows.prototype.prepareDelivery = original;
       }
       verify();
       for (const variant of variants) {
@@ -297,9 +343,18 @@ try {
             samplingInterval,
             planCounts,
             sourceSha256: {
-              base: sourceHash(baselineSource),
+              base: sourceHash(baselineSources.get(baselineUrl(ownerUrl))!),
               candidate: sourceHash(readFileSync(ownerUrl, "utf8")),
             },
+            sourceClosureSha256: Object.fromEntries(
+              sourceFiles.map(({ name, url }) => [
+                name,
+                {
+                  base: sourceHash(baselineSources.get(baselineUrl(url))!),
+                  candidate: sourceHash(readFileSync(url, "utf8")),
+                },
+              ]),
+            ),
             measurements,
           },
           null,
