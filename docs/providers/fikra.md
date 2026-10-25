@@ -8,11 +8,11 @@ read_when:
 
 Fikra API is an OpenAI-compatible inference endpoint with pinned DeepSeek builds.
 
-| Property | Value |
-| -------- | ----- |
-| Provider | `fikra` |
-| Auth | `FIKRA_API_KEY` |
-| API | OpenAI-compatible |
+| Property | Value                           |
+| -------- | ------------------------------- |
+| Provider | `fikra`                         |
+| Auth     | `FIKRA_API_KEY`                 |
+| API      | OpenAI-compatible               |
 | Base URL | `https://api.fikraapi.co.ke/v1` |
 
 ## Models
