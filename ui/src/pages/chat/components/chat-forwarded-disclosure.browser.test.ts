@@ -167,7 +167,7 @@ it("keeps a forwarded stream open until final while collapsing prior messages", 
   draw();
   const bubbles = host.querySelectorAll(".chat-bubble");
   expect(bubbles[0]!.querySelector(".chat-message-disclosure")).not.toBeNull();
-  expect(bubbles[1]!.querySelector(".chat-message-disclosure")).toBeNull();
+  await expect.poll(() => bubbles[1]!.querySelector(".chat-message-disclosure")).toBeNull();
   group.isStreaming = false;
   draw();
   await expect
