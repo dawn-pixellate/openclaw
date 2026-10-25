@@ -69,16 +69,23 @@ function mountDetails(overrides: Partial<ChatDetailsProps> = {}) {
 it("retains cached Details while its descriptor arrives and replaces a new incarnation", () => {
   const view = mountDetails({
     cachePending: true,
+    progressCard: {
+      sessionKey: "agent:main:arrival",
+      revision: 1,
+      updatedAt: 1,
+      steps: [{ step: "Keep progress stable", status: "in_progress" }],
+    },
     selectedSession: undefined,
     detailsWorkspace: { root: null, label: null, branch: "feature/cached" },
     onOpenSubagents() {},
   });
   const section = view.container.querySelector(".chat-details-session")!;
-  expect(section.hasAttribute("data-held")).toBe(true);
+  expect(section.hasAttribute("inert")).toBe(true);
+  expect(section.querySelector("openclaw-chat-details-progress")).not.toBeNull();
   view.update({ cachePending: false });
-  expect(section.hasAttribute("data-held")).toBe(false);
+  expect(section.hasAttribute("inert")).toBe(false);
   view.update({ subagentSessionsSettled: false });
-  expect(section.hasAttribute("data-held")).toBe(false);
+  expect(section.hasAttribute("inert")).toBe(false);
   const environment = view.group("environment");
   expect(environment).not.toBeNull();
   view.update({

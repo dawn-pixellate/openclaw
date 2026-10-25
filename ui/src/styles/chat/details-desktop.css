@@ -42,8 +42,9 @@
   scrollbar-color: var(--details-scrollbar-thumb) transparent;
 }
 
-.chat-details-desktop-body:has([data-held]) {
-  visibility: hidden;
+/* Preserve initial geometry without inheriting visibility through the section tree. */
+.chat-details-session[inert] {
+  clip-path: inset(50%);
 }
 
 .chat-details-desktop-body:hover {
@@ -361,7 +362,7 @@
   padding-inline: var(--details-row-padding);
 }
 
-.chat-details-desktop-body__content > openclaw-chat-details-progress {
+.chat-details-session > openclaw-chat-details-progress {
   padding-block: var(--details-section-padding);
   border-top: 1px solid var(--details-separator);
 }

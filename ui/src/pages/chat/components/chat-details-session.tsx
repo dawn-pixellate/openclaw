@@ -53,6 +53,8 @@ type Props = {
   scrollport?: HTMLElement;
   /** Set by ChatDetails from its native presentation context, never pane width. */
   desktop?: boolean;
+  progressMenuRef?: (menu: MenuHandle) => void;
+  onHideProgress?: () => void;
 };
 export type ChatDetailsSession = SolidBridgeElement<Props>;
 
@@ -295,7 +297,7 @@ export const ChatDetailsSession = defineSolidBridge<Props>(
             <Show when={props.props}>
               <section
                 class="chat-details-session"
-                data-held={!revealed() ? "" : undefined}
+                inert={props.desktop && !revealed()}
                 data-details-desktop={props.desktop ? "" : undefined}
               >
                 <Show
@@ -506,36 +508,55 @@ export const ChatDetailsSession = defineSolidBridge<Props>(
                     onExpandedChange={(expanded) => changeSection("processes", expanded)}
                     onOpen={props.props?.onOpenProcesses}
                   />
-                </Show>
-                <Show when={desktopPresentation() && outputs()}>
-                  {(data) => (
-                    <Show when={hasChatDesktopOutputs(data())}>
-                      <ChatDetailsDesktopSection
-                        section="outputs"
-                        title={desktopPresentation()!.outputsLabel}
-                        expanded={sectionExpanded("outputs")}
-                        presented={active()}
-                        onExpandedChange={(expanded) => changeSection("outputs", expanded)}
-                        metadata={
-                          <Show when={getChatOutputsCount(data()) !== null}>
-                            <span class="chat-details-desktop-section__count">
-                              <span
-                                class="chat-details-desktop-section__count-separator"
-                                aria-hidden="true"
-                              >
-                                ·
+                  <Show when={desktopPresentation() && outputs()}>
+                    {(data) => (
+                      <Show when={hasChatDesktopOutputs(data())}>
+                        <ChatDetailsDesktopSection
+                          section="outputs"
+                          title={desktopPresentation()!.outputsLabel}
+                          expanded={sectionExpanded("outputs")}
+                          presented={active()}
+                          onExpandedChange={(expanded) => changeSection("outputs", expanded)}
+                          metadata={
+                            <Show when={getChatOutputsCount(data()) !== null}>
+                              <span class="chat-details-desktop-section__count">
+                                <span
+                                  class="chat-details-desktop-section__count-separator"
+                                  aria-hidden="true"
+                                >
+                                  ·
+                                </span>
+                                {getChatOutputsCount(data())}
                               </span>
-                              {getChatOutputsCount(data())}
-                            </span>
-                          </Show>
-                        }
-                      >
-                        <ChatLazyBoundary>
-                          <ChatOutputsDesktop {...data()} />
-                        </ChatLazyBoundary>
-                      </ChatDetailsDesktopSection>
-                    </Show>
-                  )}
+                            </Show>
+                          }
+                        >
+                          <ChatLazyBoundary>
+                            <ChatOutputsDesktop {...data()} />
+                          </ChatLazyBoundary>
+                        </ChatDetailsDesktopSection>
+                      </Show>
+                    )}
+                  </Show>
+                  <Show when={props.props?.progressCard}>
+                    <ChatDetailsProgress
+                      desktop
+                      props={props.props}
+                      presented={props.presented}
+                      menuRef={props.progressMenuRef}
+                      onHideProgress={props.onHideProgress}
+                    />
+                  </Show>
+                  <Show
+                    when={
+                      !props.props?.progressCard &&
+                      props.props?.progressCardError === "access-denied"
+                    }
+                  >
+                    <div class="chat-details__muted" role="status">
+                      {t("sessionProgressCard.widgetAccessDenied")}
+                    </div>
+                  </Show>
                 </Show>
               </section>
             </Show>
@@ -556,6 +577,8 @@ export const ChatDetailsSession = defineSolidBridge<Props>(
       scrollport: { default: undefined, attribute: false },
       dismissed: { default: false, type: Boolean },
       desktop: { default: false, type: Boolean },
+      progressMenuRef: { default: undefined, attribute: false },
+      onHideProgress: { default: undefined, attribute: false },
     },
   },
 );
@@ -566,38 +589,12 @@ declare global {
   }
 }
 
-export type ChatDetailsDesktopCompositionProps = Omit<Props, "desktop"> & {
-  /** The native host keeps ownership of top-layer menus and Undo/focus behavior. */
-  progressMenuRef?: (menu: MenuHandle) => void;
-  onHideProgress?: () => void;
-};
-
 /** Desktop entry point: one scroll body and the native Progress owner after Outputs. */
-export function ChatDetailsDesktopComposition(props: ChatDetailsDesktopCompositionProps) {
+export function ChatDetailsDesktopComposition(props: Omit<Props, "desktop">) {
   const [scrollport, setScrollport] = createSignal<HTMLDivElement>();
   return (
     <ChatDetailsDesktopBody presented={props.presented} onScrollPortRef={setScrollport}>
-      <ChatDetailsSession
-        props={props.props}
-        presented={props.presented}
-        dismissed={props.dismissed}
-        scrollport={scrollport()}
-        desktop
-      />
-      <Show when={props.props?.progressCard}>
-        <ChatDetailsProgress
-          desktop
-          props={props.props}
-          presented={props.presented}
-          menuRef={props.progressMenuRef}
-          onHideProgress={props.onHideProgress}
-        />
-      </Show>
-      <Show when={!props.props?.progressCard && props.props?.progressCardError === "access-denied"}>
-        <div class="chat-details__muted" role="status">
-          {t("sessionProgressCard.widgetAccessDenied")}
-        </div>
-      </Show>
+      <ChatDetailsSession {...props} scrollport={scrollport()} desktop />
     </ChatDetailsDesktopBody>
   );
 }

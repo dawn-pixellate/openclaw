@@ -103,7 +103,9 @@ suite.define(() => {
         await details.locator(".chat-details-session").waitFor({ state: "attached" });
         await nextPaint(page);
         expect(await subagents.count()).toBe(0);
-        expect(await progress.isVisible()).toBe(false);
+        const held = details.locator(".chat-details-session[inert]");
+        expect(await held.count()).toBe(1);
+        expect(await held.evaluate((body) => getComputedStyle(body).clipPath)).toBe("inset(50%)");
         if (roster === "failed") {
           await gateway.rejectDeferred(
             "sessions.list",
