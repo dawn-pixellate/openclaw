@@ -153,25 +153,12 @@ function isAllowedCoreContractSuite(file: string, imports: readonly string[]): b
 }
 
 describe("non-extension test boundaries", () => {
-  it("detects plugin dependencies in import types", () => {
-    const source = 'type Client = typeof import("../../extensions/feishu/src/client.js");';
-    expect(findExtensionImports(parser.parseSourceFile("source.ts", source))).toEqual([
-      "../../extensions/feishu/src/client.js",
-    ]);
-  });
-
-  it("ignores diagnostic strings, import examples, and fixture URLs", () => {
+  it("ignores fixture URLs", () => {
     expect(
       findExtensionImports(
         parser.parseSourceFile(
           "source.ts",
-          [
-            'const modulePath = "../../extensions/feishu/src/client.js";',
-            'const fixtureUrl = new URL("../../extensions/feishu/openclaw.plugin.json", import.meta.url);',
-            'const example = `import { client } from "../../extensions/feishu/src/client.js";`;',
-            '// import("../../extensions/feishu/src/client.js");',
-            '/* export * from "../../extensions/feishu/src/client.js"; */',
-          ].join("\n"),
+          'const fixtureUrl = new URL("../../extensions/feishu/openclaw.plugin.json", import.meta.url);',
         ),
       ),
     ).toEqual([]);

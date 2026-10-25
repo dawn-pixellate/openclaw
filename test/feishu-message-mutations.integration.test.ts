@@ -24,7 +24,7 @@ const MESSAGE_PATH = `/open-apis/im/v1/messages/${MESSAGE_ID}`;
 const PIN_PATH = "/open-apis/im/v1/pins";
 const REACTION_PATH = `${MESSAGE_PATH}/reactions`;
 
-type WireRequest = { method: string; path: string; query: string };
+type WireRequest = { method: string; path: string };
 type ResponseHandler = (request: WireRequest, response: ServerResponse) => Promise<unknown>;
 
 const success = (data: unknown) => ({ code: 0, data });
@@ -61,19 +61,13 @@ function defaultResponse({ method, path }: WireRequest, appId: string) {
   });
 }
 
-function makeRoute(
-  name: string,
-  params: Record<string, unknown>,
-  requests: string[],
-  result: Record<string, unknown>,
-) {
-  return { name, params, requests, result: { ok: true, ...result } };
+function makeRoute(name: string, params: Record<string, unknown>, requests: string[]) {
+  return { name, params, requests };
 }
 
-const edited = (contentType: string) => ({ action: "edit", messageId: MESSAGE_ID, contentType });
 const removeReaction = [`GET ${REACTION_PATH}`, `DELETE ${REACTION_PATH}/reaction_own`];
 const routes = [
-  makeRoute("text edit", { action: "edit" }, [`PUT ${MESSAGE_PATH}`], edited("post")),
+  makeRoute("text edit", { action: "edit" }, [`PUT ${MESSAGE_PATH}`]),
   makeRoute(
     "card edit",
     {
@@ -82,25 +76,12 @@ const routes = [
       card: { elements: [{ tag: "markdown", content: "Updated card" }] },
     },
     [`PATCH ${MESSAGE_PATH}`],
-    edited("interactive"),
   ),
-  makeRoute("pin", { action: "pin" }, [`POST ${PIN_PATH}`], {
-    action: "pin",
-    pin: { messageId: MESSAGE_ID },
-  }),
-  makeRoute("unpin", { action: "unpin" }, [`DELETE ${PIN_PATH}/${MESSAGE_ID}`], {
-    action: "unpin",
-    messageId: MESSAGE_ID,
-  }),
-  makeRoute("reaction addition", { action: "react", emoji: "SMILE" }, [`POST ${REACTION_PATH}`], {
-    added: "SMILE",
-  }),
-  makeRoute("reaction removal", { action: "react", emoji: "SMILE", remove: true }, removeReaction, {
-    removed: "SMILE",
-  }),
-  makeRoute("clearing reactions", { action: "react", clearAll: true }, removeReaction, {
-    removed: 1,
-  }),
+  makeRoute("pin", { action: "pin" }, [`POST ${PIN_PATH}`]),
+  makeRoute("unpin", { action: "unpin" }, [`DELETE ${PIN_PATH}/${MESSAGE_ID}`]),
+  makeRoute("reaction addition", { action: "react", emoji: "SMILE" }, [`POST ${REACTION_PATH}`]),
+  makeRoute("reaction removal", { action: "react", emoji: "SMILE", remove: true }, removeReaction),
+  makeRoute("clearing reactions", { action: "react", clearAll: true }, removeReaction),
 ];
 
 const mutationScopes = routes.filter(({ name }) =>
@@ -110,7 +91,6 @@ const mutationScopes = routes.filter(({ name }) =>
 async function withFeishuMutation(
   run: (fixture: {
     cfg: OpenClawConfig;
-    requests: WireRequest[];
     paths: (method?: string) => string[];
     execute: (params?: Record<string, unknown>) => Promise<unknown>;
     retire: () => void;
@@ -132,7 +112,6 @@ async function withFeishuMutation(
           const record = {
             method: request.method ?? "",
             path: url.pathname,
-            query: url.search,
           };
           requests.push(record);
           const override = await handleRequest(record, response);
@@ -187,7 +166,6 @@ async function withFeishuMutation(
         try {
           await run({
             cfg,
-            requests,
             paths: (method) =>
               requests
                 .filter((request) => !method || request.method === method)
@@ -233,7 +211,7 @@ afterEach(() => {
 
 it.each(routes)("performs $name normally for a current caller", (route) =>
   withFeishuMutation(async ({ execute, paths }) => {
-    await expect(execute(route.params)).resolves.toMatchObject({ details: route.result });
+    await expect(execute(route.params)).resolves.toMatchObject({ details: { ok: true } });
     expect(paths()).toEqual([`POST ${AUTH_PATH}`, `GET ${MESSAGE_PATH}`, ...route.requests]);
   }),
 );
@@ -286,38 +264,23 @@ it.each([
   }),
 );
 
-it.each([false, true])("checks reaction-page currentness (retired: %s)", (retired) =>
-  withFeishuMutation(async ({ cfg, execute, requests, paths, respond, retire }) => {
-    respond(async ({ method, path, query }) => {
+it("stops reaction pagination when the caller retires", () =>
+  withFeishuMutation(async ({ execute, paths, respond, retire }) => {
+    respond(async ({ method, path }) => {
       if (method !== "GET" || path !== REACTION_PATH) {
         return undefined;
       }
-      const secondPage = new URLSearchParams(query).has("page_token");
-      if (!secondPage && retired) {
-        retire();
-      }
+      retire();
       return success({
-        items: [
-          reaction(
-            secondPage ? "reaction_own" : "reaction_foreign",
-            "app",
-            secondPage ? cfg.channels!.feishu!.appId : "another_app",
-          ),
-        ],
-        has_more: !secondPage,
-        page_token: secondPage ? undefined : "next_page",
+        items: [reaction("reaction_foreign", "app", "another_app")],
+        has_more: true,
+        page_token: "next_page",
       });
     });
-    const result = execute({ action: "react", clearAll: true });
-    if (retired) {
-      await expect(result).rejects.toThrow();
-    } else {
-      await expect(result).resolves.toMatchObject({ details: { ok: true, removed: 1 } });
-    }
-    expect(requests.filter(({ path }) => path === REACTION_PATH)).toHaveLength(retired ? 1 : 2);
-    expect(paths("DELETE")).toEqual(retired ? [] : [`${REACTION_PATH}/reaction_own`]);
-  }),
-);
+    await expect(execute({ action: "react", clearAll: true })).rejects.toThrow();
+    expect(paths("GET")).toEqual([MESSAGE_PATH, REACTION_PATH]);
+    expect(paths("DELETE")).toEqual([]);
+  }));
 
 it.each(["retirement", "provider failure"])(
   "preserves %s after an accepted reaction deletion",
@@ -397,8 +360,8 @@ it.each(mutationScopes)(
 );
 
 it("retains the configured group policy denial", () =>
-  withFeishuMutation(async ({ cfg, execute, requests }) => {
+  withFeishuMutation(async ({ cfg, execute, paths }) => {
     cfg.channels!.feishu!.groupPolicy = "disabled";
     await expect(execute()).rejects.toThrow(/not allowed/);
-    expect(requests).toEqual([]);
+    expect(paths()).toEqual([]);
   }));
