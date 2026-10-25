@@ -15,9 +15,12 @@ import type {
 import { readSessionStateDeleteSnapshot } from "./session-accessor.sqlite-delete-snapshot.js";
 import { collectSessionStateIdsForEntry } from "./session-accessor.sqlite-references.js";
 import { parseSessionEntryJson } from "./session-accessor.sqlite-status.js";
+import { MAX_COLD_ARCHIVE_BYTES } from "./session-cold-storage-codec.js";
 import { readSessionColdStorageProtection } from "./session-cold-storage-eligibility.js";
 import { readSessionColdTranscript } from "./session-cold-storage-state.js";
+import type { SessionColdOversized } from "./session-cold-storage.types.js";
 import { collectSessionAdmissionReferences } from "./session-history-eviction-candidates.js";
+import { transcriptEventReadBytesSql } from "./session-transcript-read-bytes.js";
 import { normalizeStoreSessionKey } from "./store-entry.js";
 
 export type SessionColdBatchInput = {
@@ -95,7 +98,21 @@ export function selectSessionColdBatch(input: SessionColdBatchInput) {
                     .limit(input.maxTranscripts - externalizations.length),
                 ).rows
               : [];
+          const oversizedTranscripts: SessionColdOversized[] = [];
           const plans = candidates.flatMap(({ session_id: sessionId }) => {
+            const lowerBoundBytes =
+              executeSqliteQuerySync(
+                database.db,
+                db
+                  .selectFrom("transcript_events")
+                  .select((eb) => eb.fn.sum<number>(transcriptEventReadBytesSql()).as("bytes"))
+                  .where("session_id", "=", sessionId),
+              ).rows[0]?.bytes ?? 0;
+            // The uncompressed envelope contains every original event body plus restore metadata.
+            if (lowerBoundBytes > MAX_COLD_ARCHIVE_BYTES) {
+              oversizedTranscripts.push({ sessionId, lowerBoundBytes });
+              return [];
+            }
             const snapshot = readSessionStateDeleteSnapshot(database.db, sessionId);
             return snapshot.generation && snapshot.lastSeq !== null
               ? [
@@ -117,7 +134,7 @@ export function selectSessionColdBatch(input: SessionColdBatchInput) {
               database.db.prepare("PRAGMA freelist_count").get()?.freelist_count ?? 0,
             );
           }
-          return { plans, externalizations, freePages };
+          return { plans, externalizations, oversizedTranscripts, freePages };
         },
         { databaseLabel: database.path, operationLabel: "cold transcript selection" },
       ),
