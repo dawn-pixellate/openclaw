@@ -17,10 +17,10 @@ import { mixedAgentConnection, useMixedAgentPair } from "./mixed-agent.conforman
 
 // Keep the previous PG expansion executable as a semantic control, without a second compiler.
 function previousStringSet(db: EngineConnection, values: readonly string[]) {
-  return isPostgresSqlConnection(db)
-    ? /* kysely-allow-raw: Previous dialect output is the independent semantic control. */
-      sql<string>`(SELECT value FROM json_array_elements_text(${encodeSqliteStringSet(values)}::json) AS value)`
-    : sqliteStringSet(values);
+  if (isPostgresSqlConnection(db)) {
+    return /* kysely-allow-raw: Previous dialect output is the semantic control. */ sql<string>`(SELECT value FROM json_array_elements_text(${encodeSqliteStringSet(values)}::json) AS value)`;
+  }
+  return sqliteStringSet(values);
 }
 
 const selectionCases = [
@@ -158,8 +158,8 @@ for (const engine of ["sqlite", "postgres"] as const) {
               const result = executeSqliteQuerySync(
                 db,
                 query
-                  .selectNoFrom(sql<string>`${expected}`.as("value"))
-                  .where(sql<string>`${expected}`, "in", set),
+                  .selectNoFrom((eb) => eb.val<string>(expected).as("value"))
+                  .where((eb) => eb(eb.val<string>(expected), "in", set)),
               ).rows;
               expect(result).toEqual([{ value: expected }]);
             }
@@ -190,10 +190,10 @@ for (const engine of ["sqlite", "postgres"] as const) {
                 ]),
               )
               .orderBy("session_id");
-            // kysely-allow-raw: EXPLAIN requires a SQL prefix around the real compiled query.
-            const compiled = sql<{
-              "QUERY PLAN": string;
-            }>`EXPLAIN (ANALYZE, BUFFERS) ${query}`.compile(getNodeSqliteKysely<DB>(db));
+            const compiled =
+              /* kysely-allow-raw: EXPLAIN prefixes the real query under test. */ sql<{
+                "QUERY PLAN": string;
+              }>`EXPLAIN (ANALYZE, BUFFERS) ${query}`.compile(getNodeSqliteKysely<DB>(db));
             const plan = executeSqliteQuerySync(db, { compile: () => compiled });
             const text = plan.rows.map((row) => row["QUERY PLAN"]).join("\n");
             expect(text).not.toMatch(/Seq Scan|Hash Semi Join/);
