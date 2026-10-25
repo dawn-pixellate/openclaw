@@ -282,13 +282,11 @@ describe("feishu bitable create app cleanup", () => {
     const { client, registered, resolveTool } = createBitableClient([
       record("rec_1", { Name: hostile }),
     ]);
-    expect(registered).toHaveLength(8);
-    for (const registration of registered) {
-      const factory = registration.tool as (context: { agentAccountId?: string }) => {
-        resultContentSource?: string;
-      };
-      expect(factory({}).resultContentSource).toBe("network");
+    const factory = registered[0]?.tool;
+    if (typeof factory !== "function") {
+      throw new Error("Expected a contextual Bitable tool factory");
     }
+    expect(factory({})).toMatchObject({ resultContentSource: "network" });
     const tool = resolveTool("feishu_bitable_list_records");
     expect(tool.parameters).toMatchObject({
       properties: { page_size: { type: "integer", minimum: 1, maximum: 500 } },

@@ -221,6 +221,9 @@ describe("Feishu read authority over the real Lark SDK transport", () => {
       { status: "fulfilled", value: { code: 0 } },
     ]);
     expect(paths()).toEqual([AUTH_PATH, `${MESSAGE_PATH}/om_current`]);
+    for (const request of requests) {
+      expect(request.headers["user-agent"]).toMatch(/^openclaw-feishu-builtin\//);
+    }
   });
 
   it.each([false, true])(

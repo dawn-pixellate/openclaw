@@ -6,16 +6,21 @@ import {
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { createChannelReplayGuard } from "openclaw/plugin-sdk/persistent-dedupe";
 import { createPluginRuntimeMock, createRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
+import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { withOpenClawTestState } from "openclaw/plugin-sdk/test-state";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveFeishuAccount } from "./accounts.js";
 import { createFeishuBroadcastIngressSettlement } from "./bot-broadcast.js";
 import type { handleFeishuMessage } from "./bot.js";
 import { createFeishuCardInteractionEnvelope } from "./card-interaction.js";
 import type { FeishuMessageProcessingClaim } from "./dedup.js";
+import { resolveFeishuMessageDedupeKey } from "./dedupe-key.js";
 import type { FeishuIngressLifecycle } from "./feishu-ingress.js";
 import { monitorSingleAccount } from "./monitor.account.js";
 import { createFeishuTestIngressQueue } from "./monitor.test-mocks.js";
+import { createFeishuVcMeetingInvitedHandler } from "./monitor.vc-meeting-invited-handler.js";
+import * as send from "./send.js";
+import { getFeishuSyntheticDirectPreDispatchTarget } from "./synthetic-event-target.js";
 
 type MessageParams = Parameters<typeof handleFeishuMessage>[0];
 const meetingEvent = (event_id: string) => ({
@@ -23,6 +28,135 @@ const meetingEvent = (event_id: string) => ({
   meeting: { meeting_no: "123456789" },
   inviter: { id: { open_id: "fixture-user" } },
   invite_time: "1712345678",
+});
+
+describe("meeting invitation ownership", () => {
+  let guard: ReturnType<typeof createChannelReplayGuard<string | null | undefined>>;
+  const invitation = {
+    ...meetingEvent("evt_vc_123"),
+    call_id: "call_vc_123",
+    inviter: { id: { user_id: "u_inviter_1" } },
+  };
+  const createHandler = (abortSignal?: AbortSignal) =>
+    createFeishuVcMeetingInvitedHandler({
+      cfg: {},
+      accountId: "test",
+      autoJoin: true,
+      fireAndForget: false,
+      abortSignal,
+      runtime: createRuntimeEnv(),
+    });
+  beforeEach(() => {
+    guard = createChannelReplayGuard<string | null | undefined>({
+      dedupe: { ttlMs: 86_400_000, memoryMaxSize: 1000 },
+      buildReplayKey: (key) => key,
+    });
+    mocks.claim.mockImplementation(({ messageId, namespace }) =>
+      guard.claim(messageId, { namespace }),
+    );
+  });
+  afterEach(async () => {
+    await closeOpenClawStateDatabaseAsync();
+  });
+
+  it("releases failed invitations for redelivery and preserves adopted replay ownership after stop", async () => {
+    let adopted: FeishuIngressLifecycle | undefined;
+    mocks.handleMessage.mockRejectedValueOnce(new Error("pre-adoption failure"));
+    mocks.handleMessage.mockImplementation(async ({ turnAdoptionLifecycle }) => {
+      adopted = turnAdoptionLifecycle;
+      await adopted?.onAdopted();
+    });
+    const controller = new AbortController();
+    const handler = createHandler(controller.signal);
+    await handler(invitation);
+    await handler(invitation);
+    await handler(invitation);
+    expect(mocks.handleMessage).toHaveBeenCalledTimes(2);
+    const event = mocks.handleMessage.mock.calls[0]![0].event;
+    expect(getFeishuSyntheticDirectPreDispatchTarget(event)).toBe("user:u_inviter_1");
+    expect(event.message.content).toContain("123456789");
+    expect(event.message.content).toContain("call_vc_123");
+    const key = resolveFeishuMessageDedupeKey(event);
+    expect(key).not.toBe(event.message.message_id);
+    expect(await guard.hasRecent(key, { namespace: "test" })).toBe(true);
+    controller.abort();
+    expect(adopted?.abortSignal.aborted).toBe(false);
+    await createHandler()(invitation);
+    expect(mocks.handleMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not dispatch malformed invite events", async () => {
+    const handler = createHandler();
+    await handler({ ...invitation, meeting: { topic: "Weekly sync" } });
+    await handler({ ...invitation, inviter: { id: {} } });
+    await handler({ ...invitation, meeting: { meeting_no: "not-a-meeting" } });
+    expect(mocks.handleMessage).not.toHaveBeenCalled();
+    expect(mocks.claim).not.toHaveBeenCalled();
+  });
+
+  it("falls back to /menu for unrelated bot menu keys", async () => {
+    const sendCard = vi.spyOn(send, "sendCardFeishu");
+    const { maybeHandleFeishuQuickActionMenu } =
+      await vi.importActual<typeof import("./card-ux-launcher.js")>("./card-ux-launcher.js");
+    mocks.menu.mockImplementation(maybeHandleFeishuQuickActionMenu);
+    const { ready, close } = monitorAccount("application.bot.menu_v6");
+    try {
+      const invoke = await ready;
+      await invoke({
+        event_key: "custom-key",
+        timestamp: "1700000000002",
+        operator: { operator_id: { open_id: "ou_user1", user_id: "user_1", union_id: "union_1" } },
+      });
+      await vi.waitFor(() => expect(mocks.handleMessage).toHaveBeenCalledOnce());
+      expect(mocks.handleMessage.mock.calls[0]?.[0]).toMatchObject({
+        botOpenId: "fixture-bot",
+        event: { message: { content: '{"text":"/menu custom-key"}' } },
+      });
+      expect(sendCard).not.toHaveBeenCalled();
+    } finally {
+      await close();
+      sendCard.mockRestore();
+    }
+  });
+
+  it("keeps meeting invitations inert until the live account opts in", async () => {
+    const { ready, close } = monitorAccount("vc.bot.meeting_invited_v1");
+    try {
+      await expect((await ready)(invitation)).resolves.toBeUndefined();
+      expect(mocks.handleMessage).not.toHaveBeenCalled();
+    } finally {
+      await close();
+    }
+  });
+
+  it("abandons deferred invitation ownership when the account transport ends", async () => {
+    let lifecycle: FeishuIngressLifecycle | undefined;
+    mocks.handleMessage.mockImplementationOnce(async ({ turnAdoptionLifecycle }) => {
+      lifecycle = turnAdoptionLifecycle;
+      lifecycle?.onDeferred();
+    });
+    mocks.handleMessage.mockImplementation(async ({ turnAdoptionLifecycle }) => {
+      await turnAdoptionLifecycle?.onAdopted();
+    });
+    const { ready, close } = monitorAccount("vc.bot.meeting_invited_v1", true);
+    try {
+      const invoke = await ready;
+      await invoke(invitation);
+      await vi.waitFor(() => expect(lifecycle).toBeDefined());
+      const key = mocks.claim.mock.calls[0]?.[0].messageId;
+      expect((await guard.claim(key, { namespace: "test" })).kind).toBe("inflight");
+      await close();
+      expect(lifecycle?.abortSignal.aborted).toBe(true);
+      expect(() => lifecycle?.onAdopted()).toThrow();
+      await invoke(invitation);
+      expect(mocks.handleMessage).toHaveBeenCalledOnce();
+      await createHandler()(invitation);
+      expect(mocks.handleMessage).toHaveBeenCalledTimes(2);
+      expect(await guard.hasRecent(key, { namespace: "test" })).toBe(true);
+    } finally {
+      await close();
+    }
+  });
 });
 
 function gated<T>(result: () => T | Promise<T>) {

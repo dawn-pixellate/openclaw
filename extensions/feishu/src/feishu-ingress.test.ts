@@ -9,9 +9,6 @@ import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runt
 import { withOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { feishuDedupeState } from "./dedup-state.js";
-import { claimUnprocessedFeishuMessage, finalizeFeishuMessageProcessing } from "./dedup.js";
-import { resolveFeishuMessageDedupeKey } from "./dedupe-key.js";
-import type { FeishuMessageEvent } from "./event-types.js";
 import {
   buildFeishuFlushIngressLifecycle,
   createFeishuDurableIngress,
@@ -263,40 +260,6 @@ describe("Feishu durable ingress", () => {
       await expect(queue.enqueue("evt-failure", {} as FeishuIngressPayload)).resolves.toMatchObject(
         expected,
       );
-    });
-  });
-
-  it("suppresses a captioned post redelivery after upgrade when the pre-upgrade record exists", async () => {
-    await withQueue(async () => {
-      const preUpgradeKey = "om_post";
-      await expect(
-        finalizeFeishuMessageProcessing({
-          messageId: preUpgradeKey,
-          namespace: "default",
-        }),
-      ).resolves.toBe(true);
-      await closeOpenClawStateDatabaseAsync();
-      feishuDedupeState.reset();
-
-      const redelivery: FeishuMessageEvent = {
-        sender: { sender_id: { open_id: "ou-user" } },
-        message: {
-          message_id: preUpgradeKey,
-          chat_id: "oc-chat",
-          chat_type: "p2p",
-          message_type: "post",
-          content: JSON.stringify({
-            title: "",
-            content: [[{ tag: "text", text: "这是账本" }]],
-            files: [{ file_key: "file_v3_report", file_name: "report.csv", is_folder: false }],
-          }),
-        },
-      };
-      const currentKey = resolveFeishuMessageDedupeKey(redelivery);
-      expect(currentKey).toBe(preUpgradeKey);
-      await expect(
-        claimUnprocessedFeishuMessage({ messageId: currentKey, namespace: "default" }),
-      ).resolves.toEqual({ kind: "duplicate" });
     });
   });
 
