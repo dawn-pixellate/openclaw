@@ -32,16 +32,19 @@ async function seedClaim(stateDir: string) {
 }
 
 describe("channel ingress claim ownership", () => {
-  it("deduplicates batched admissions without replacing the first payload", async () => {
+  it("deduplicates batched and competing admissions without replacing the first payload", async () => {
     await withTempState(async (stateDir) => {
       const queue = createTestIngressQueue(stateDir, { now: () => 100 });
       await queue.enqueue("completed", { text: "processed" });
       await queue.complete("completed");
-      const batch = await queue.enqueueBatch!([
-        { id: "second", payload: { text: "first payload" }, receivedAt: 102 },
-        { id: "first", payload: { text: "earlier" }, receivedAt: 101 },
-        { id: "completed", payload: { text: "replay" } },
-        { id: "second", payload: { text: "duplicate payload" }, receivedAt: 103 },
+      const [batch, competing] = await Promise.all([
+        queue.enqueueBatch!([
+          { id: "second", payload: { text: "first payload" }, receivedAt: 102 },
+          { id: "first", payload: { text: "earlier" }, receivedAt: 101 },
+          { id: "completed", payload: { text: "replay" } },
+          { id: "second", payload: { text: "duplicate payload" }, receivedAt: 103 },
+        ]),
+        queue.enqueue("second", { text: "competing payload" }),
       ]);
       expect(batch.map((result) => result.kind)).toEqual([
         "accepted",
@@ -49,6 +52,10 @@ describe("channel ingress claim ownership", () => {
         "completed",
         "pending",
       ]);
+      expect(competing).toMatchObject({
+        kind: "pending",
+        record: { payload: { text: "first payload" } },
+      });
       expect((await queue.listPending()).map(({ id, payload }) => ({ id, payload }))).toEqual([
         { id: "first", payload: { text: "earlier" } },
         { id: "second", payload: { text: "first payload" } },
@@ -71,7 +78,7 @@ describe("channel ingress claim ownership", () => {
         using _ = onAdmission(stage, () => {
           policyChanged = true;
         });
-        await queue.claimNext({
+        const claimed = await queue.claimNext({
           ownerId: "worker",
           blockedLaneKeys: ["chat:123"],
           deriveLaneKey: (record) => {
@@ -84,6 +91,7 @@ describe("channel ingress claim ownership", () => {
             stored === `${derived}:topic:7` || stored === `${derived}:topic:9`,
         });
         expect(policyChanged).toBe(true);
+        expect(claimed).toMatchObject({ id: "b", laneKey: "chat:456" });
         expect((await queue.listClaims()).map((row) => [row.id, row.laneKey])).toEqual([
           ["b", "chat:456"],
         ]);
@@ -152,17 +160,18 @@ describe("channel ingress claim ownership", () => {
         request: SqliteWorkerRequest,
         transferList,
       ) {
-        const command: unknown =
-          request.type === "execute" ? deserialize(request.input) : undefined;
-        if (
-          command &&
-          typeof command === "object" &&
-          "type" in command &&
-          command.type === "channelIngress.claimNext"
-        ) {
-          stopClaimWorker = () => this.terminate();
-          claimRequest = request.id;
-          attempts++;
+        if (request.type === "execute") {
+          const command: unknown = deserialize(request.input);
+          if (
+            command &&
+            typeof command === "object" &&
+            "type" in command &&
+            command.type === "channelIngress.claimNext"
+          ) {
+            stopClaimWorker = () => this.terminate();
+            claimRequest = request.id;
+            attempts++;
+          }
         }
         return originalPost.call(this, request, transferList);
       });

@@ -78,19 +78,48 @@ export function registerCodexFastModeTests({
       serviceTier: "priority",
     });
   });
-  it.each<ModeCase>`
-    name                         | options                        | tier           | limit
-    ${"disabled switch"}         | ${{ enableUltrafast: false }}  | ${"priority"}  | ${undefined}
-    ${"fresh capped limit"}      | ${{ fresh: true }}             | ${"ultrafast"} | ${260_000}
-    ${"smaller limit"}           | ${{ nativeLimit: 120_000 }}    | ${"ultrafast"} | ${120_000}
-    ${"zero limit"}              | ${{ nativeLimit: 0 }}          | ${"ultrafast"} | ${0}
-    ${"negative limit"}          | ${{ nativeLimit: -1 }}         | ${"ultrafast"} | ${-1}
-    ${"missing limit"}           | ${{ nativeLimit: undefined }}  | ${"ultrafast"} | ${260_000}
-    ${"unsupported model"}       | ${{ supported: false }}        | ${"priority"}  | ${undefined}
-    ${"changed native model"}    | ${{ nativeOwned: "metadata" }} | ${"ultrafast"} | ${260_000}
-    ${"omitted native model"}    | ${{ nativeOwned: "omitted" }}  | ${"priority"}  | ${undefined}
-    ${"Fast with flex baseline"} | ${{ fastMode: true }}          | ${"priority"}  | ${undefined}
-  `(
+  it.each<ModeCase>([
+    {
+      name: "disabled switch",
+      options: { enableUltrafast: false },
+      tier: "priority",
+      limit: undefined,
+    },
+    { name: "fresh capped limit", options: { fresh: true }, tier: "ultrafast", limit: 260_000 },
+    { name: "smaller limit", options: { nativeLimit: 120_000 }, tier: "ultrafast", limit: 120_000 },
+    { name: "zero limit", options: { nativeLimit: 0 }, tier: "ultrafast", limit: 0 },
+    { name: "negative limit", options: { nativeLimit: -1 }, tier: "ultrafast", limit: -1 },
+    {
+      name: "missing limit",
+      options: { nativeLimit: undefined },
+      tier: "ultrafast",
+      limit: 260_000,
+    },
+    {
+      name: "unsupported model",
+      options: { supported: false },
+      tier: "priority",
+      limit: undefined,
+    },
+    {
+      name: "changed native model",
+      options: { nativeOwned: "metadata" },
+      tier: "ultrafast",
+      limit: 260_000,
+    },
+    {
+      name: "omitted native model",
+      options: { nativeOwned: "omitted" },
+      tier: "priority",
+      limit: undefined,
+    },
+    {
+      name: "Fast with flex baseline",
+      options: { fastMode: true },
+      tier: "priority",
+      limit: undefined,
+    },
+  ])(
     "requires explicit Ultrafast for $name at the actual turn boundary",
     async ({ options, tier, limit }) => {
       const { supported, fastMode, enableUltrafast, nativeLimit, fresh, nativeOwned } = {

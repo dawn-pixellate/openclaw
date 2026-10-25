@@ -1,7 +1,9 @@
+// Doctor auth profile-health tests cover stale profile detection, repair notes, and store health.
+import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { createOAuthRefreshCredential } from "../agents/auth-profiles/credential-fixtures.test-support.js";
+import { writePersistedAuthProfileStoreRaw } from "../agents/auth-profiles/sqlite.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
@@ -9,7 +11,10 @@ import type { DoctorPrompter } from "./doctor-prompter.js";
 
 const authProfileMocks = vi.hoisted(() => ({
   loadAuthProfileStoreForRuntime: vi.fn<
-    typeof import("../agents/auth-profiles.js").loadAuthProfileStoreForRuntime
+    (
+      agentDir?: string,
+      options?: { allowKeychainPrompt?: boolean; readOnly?: boolean; inheritedAuthDir?: string },
+    ) => AuthProfileStore
   >(() => {
     throw new Error("unexpected auth profile load");
   }),
@@ -20,7 +25,10 @@ const authProfileMocks = vi.hoisted(() => ({
 
 vi.mock("../agents/auth-profiles.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../agents/auth-profiles.js")>()),
-  ...authProfileMocks,
+  loadAuthProfileStoreForRuntime: authProfileMocks.loadAuthProfileStoreForRuntime,
+  hasAnyAuthProfileStoreSource: authProfileMocks.hasAnyAuthProfileStoreSource,
+  hasLocalAuthProfileStoreSource: authProfileMocks.hasLocalAuthProfileStoreSource,
+  resolveApiKeyForProfile: authProfileMocks.resolveApiKeyForProfile,
 }));
 
 vi.mock("../agents/auth-profiles/doctor.js", () => ({
@@ -37,10 +45,13 @@ describe("inspectAuthProfileHealth", () => {
   let mainDir: string;
 
   function configForAgents(...ids: string[]): OpenClawConfig {
-    const entries = Object.fromEntries(
-      ids.map((id) => [id, { agentDir: path.join(tempDir, `${id}-agent`) }]),
-    );
-    return { agents: { entries } };
+    return {
+      agents: {
+        entries: Object.fromEntries(
+          ids.map((id) => [id, { agentDir: path.join(tempDir, `${id}-agent`) }]),
+        ),
+      },
+    };
   }
 
   beforeEach(() => {
@@ -48,9 +59,12 @@ describe("inspectAuthProfileHealth", () => {
     mainDir = path.join(tempDir, "main-agent");
     vi.spyOn(Date, "now").mockReturnValue(now);
     vi.stubEnv("OPENCLAW_STATE_DIR", tempDir);
-    Object.values(authProfileMocks).forEach((mock) => mock.mockReset());
+    authProfileMocks.loadAuthProfileStoreForRuntime.mockReset();
+    authProfileMocks.hasAnyAuthProfileStoreSource.mockReset();
     authProfileMocks.hasAnyAuthProfileStoreSource.mockReturnValue(false);
+    authProfileMocks.hasLocalAuthProfileStoreSource.mockReset();
     authProfileMocks.hasLocalAuthProfileStoreSource.mockReturnValue(false);
+    authProfileMocks.resolveApiKeyForProfile.mockReset();
   });
 
   afterEach(() => {
@@ -59,34 +73,35 @@ describe("inspectAuthProfileHealth", () => {
     vi.restoreAllMocks();
   });
 
-  function useLocalStore(store: AuthProfileStore, onlyDir?: string): void {
+  function writeAuthStore(agentDir: string): void {
+    fs.mkdirSync(agentDir, { recursive: true });
+    writePersistedAuthProfileStoreRaw({ version: 1, profiles: {} }, agentDir);
+  }
+
+  function useLocalStore(store: AuthProfileStore): void {
     authProfileMocks.hasLocalAuthProfileStoreSource.mockImplementation(
       (agentDir) => agentDir !== undefined,
     );
-    authProfileMocks.loadAuthProfileStoreForRuntime.mockImplementation((agentDir) =>
-      onlyDir && agentDir !== onlyDir ? { version: 1, profiles: {} } : store,
-    );
+    authProfileMocks.loadAuthProfileStoreForRuntime.mockReturnValue(store);
   }
 
-  function inspect(cfg = configForAgents("main"), confirmAutoFix = vi.fn(async () => false)) {
-    return inspectAuthProfileHealth({
-      cfg,
-      prompter: { confirmAutoFix } as unknown as DoctorPrompter,
-      allowKeychainPrompt: false,
-    });
+  function expectedAuthStorePath(agentDir: string): string {
+    return path.join(agentDir, "openclaw-agent.sqlite");
   }
 
-  function collect() {
-    return collectAuthProfileHealthFindings({ cfg: configForAgents("main") });
-  }
-
-  const oauth = (provider: string, expires: number) =>
-    createOAuthRefreshCredential({ provider, expires, access: "access", refresh: "refresh" });
-  function expiredStore(...profileIds: string[]) {
-    const profiles = Object.fromEntries(
-      profileIds.map((id) => [id, oauth("openai-codex", now - 60_000)]),
-    );
-    return { version: 1, profiles } satisfies AuthProfileStore;
+  function expiredStore(profileId: string, expires: number) {
+    return {
+      version: 1,
+      profiles: {
+        [profileId]: {
+          type: "oauth" as const,
+          provider: "openai-codex",
+          access: "access",
+          refresh: "refresh",
+          expires,
+        },
+      },
+    } satisfies AuthProfileStore;
   }
 
   it("keeps expiring warnings for static and custom Claude CLI profiles", async () => {
@@ -99,11 +114,19 @@ describe("inspectAuthProfileHealth", () => {
           token: "token",
           expires: now + 3 * 60 * 60_000,
         },
-        "anthropic:custom-cli": oauth("claude-cli", now + 3 * 60 * 60_000),
+        "anthropic:custom-cli": {
+          type: "oauth",
+          provider: "claude-cli",
+          access: "access",
+          refresh: "refresh",
+          expires: now + 3 * 60 * 60_000,
+        },
       },
     });
 
-    const findings = await collect();
+    const findings = await collectAuthProfileHealthFindings({
+      cfg: configForAgents("main"),
+    });
 
     expect(findings.map((finding) => finding.target)).toEqual([
       "anthropic:custom-cli",
@@ -112,7 +135,11 @@ describe("inspectAuthProfileHealth", () => {
   });
 
   it("maps disabled auth profiles to structured findings", async () => {
-    useLocalStore({
+    writeAuthStore(mainDir);
+    authProfileMocks.hasLocalAuthProfileStoreSource.mockImplementation(
+      (agentDir) => agentDir !== undefined,
+    );
+    authProfileMocks.loadAuthProfileStoreForRuntime.mockReturnValue({
       version: 1,
       profiles: {},
       usageStats: {
@@ -123,24 +150,35 @@ describe("inspectAuthProfileHealth", () => {
       },
     } satisfies AuthProfileStore);
 
-    const findings = await collect();
+    const findings = await collectAuthProfileHealthFindings({
+      cfg: configForAgents("main"),
+    });
 
-    expect(findings).toMatchObject([
-      {
+    expect(findings).toEqual([
+      expect.objectContaining({
         checkId: "core/doctor/auth-profiles",
         message: "Auth profile openai:billing is disabled:billing (5m).",
-        path: path.join(mainDir, "openclaw-agent.sqlite"),
+        path: expectedAuthStorePath(mainDir),
         target: "openai:billing",
         fixHint: "Top up credits (provider billing) or switch provider.",
-      },
+      }),
     ]);
   });
 
   it("shows exact WHAM classification while retaining canonical recovery policy", async () => {
-    useLocalStore({
+    authProfileMocks.hasLocalAuthProfileStoreSource.mockImplementation(
+      (agentDir) => agentDir !== undefined,
+    );
+    authProfileMocks.loadAuthProfileStoreForRuntime.mockReturnValue({
       version: 1,
       profiles: {
-        "openai:expired": oauth("openai", now + 365 * 24 * 60 * 60_000),
+        "openai:expired": {
+          type: "oauth",
+          provider: "openai",
+          access: "secret",
+          refresh: "refresh-secret",
+          expires: now + 365 * 24 * 60 * 60_000,
+        },
       },
       usageStats: {
         "openai:expired": {
@@ -151,13 +189,15 @@ describe("inspectAuthProfileHealth", () => {
       },
     } satisfies AuthProfileStore);
 
-    const findings = await collect();
+    const findings = await collectAuthProfileHealthFindings({
+      cfg: configForAgents("main"),
+    });
 
-    expect(findings).toMatchObject([
-      {
+    expect(findings).toEqual([
+      expect.objectContaining({
         message: "Auth profile openai:expired is cooldown:wham_token_expired (5m).",
         fixHint: expect.stringContaining("Re-authenticate with"),
-      },
+      }),
     ]);
   });
   it("skips external auth profile resolution when no auth source exists", async () => {
@@ -171,86 +211,142 @@ describe("inspectAuthProfileHealth", () => {
     });
 
     expect(findings).toEqual([]);
+    expect(authProfileMocks.hasAnyAuthProfileStoreSource).toHaveBeenCalledOnce();
     expect(authProfileMocks.loadAuthProfileStoreForRuntime).not.toHaveBeenCalled();
   });
 
   it("aggregates model auth diagnostics and labels strict agent subsets", async () => {
     const coderDir = path.join(tempDir, "coder-agent");
-    useLocalStore({ version: 1, profiles: {} });
+    writeAuthStore(mainDir);
+    writeAuthStore(coderDir);
+    authProfileMocks.hasLocalAuthProfileStoreSource.mockImplementation(
+      (agentDir) => agentDir !== undefined,
+    );
     authProfileMocks.loadAuthProfileStoreForRuntime.mockImplementation((agentDir) => {
-      if (agentDir === mainDir || agentDir === coderDir) {
-        const id = agentDir === mainDir ? "main" : "coder";
-        return expiredStore("openai-codex:shared", `openai-codex:${id}`);
+      if (agentDir === mainDir) {
+        return {
+          version: 1,
+          profiles: {
+            ...expiredStore("openai-codex:shared", now - 60_000).profiles,
+            ...expiredStore("openai-codex:main", now - 60_000).profiles,
+          },
+        };
+      }
+      if (agentDir === coderDir) {
+        return {
+          version: 1,
+          profiles: {
+            ...expiredStore("openai-codex:shared", now - 60_000).profiles,
+            ...expiredStore("openai-codex:coder", now - 60_000).profiles,
+          },
+        };
       }
       throw new Error(`unexpected agent dir: ${agentDir ?? "<default>"}`);
     });
 
-    const findings = await inspect(configForAgents("main", "coder"));
+    const findings = await inspectAuthProfileHealth({
+      cfg: configForAgents("main", "coder"),
+      prompter: {
+        confirmAutoFix: vi.fn(async () => false),
+      } as unknown as DoctorPrompter,
+      allowKeychainPrompt: false,
+    });
 
-    expect(findings).toMatchObject([
-      {
+    expect(findings).toEqual([
+      expect.objectContaining({
         target: "openai-codex:coder",
         message: "Auth profile openai-codex:coder is expired (0m). (stores: Agent coder)",
-        path: path.join(coderDir, "openclaw-agent.sqlite"),
-      },
-      {
+        path: expectedAuthStorePath(coderDir),
+      }),
+      expect.objectContaining({
         target: "openai-codex:main",
         message: "Auth profile openai-codex:main is expired (0m). (stores: Agent main)",
-        path: path.join(mainDir, "openclaw-agent.sqlite"),
-      },
-      {
+        path: expectedAuthStorePath(mainDir),
+      }),
+      expect.objectContaining({
         target: "openai-codex:shared",
         message: "Auth profile openai-codex:shared is expired (0m).",
         fixHint: "Re-authenticate this profile.",
-      },
+      }),
     ]);
     expect(findings[2]?.path).toBeUndefined();
   });
 
   it("offers credential repair while the same profile is cooling down", async () => {
-    useLocalStore({
-      ...expiredStore("openai-codex:expired"),
+    writeAuthStore(mainDir);
+    authProfileMocks.hasLocalAuthProfileStoreSource.mockImplementation(
+      (agentDir) => agentDir !== undefined,
+    );
+    authProfileMocks.loadAuthProfileStoreForRuntime.mockReturnValue({
+      ...expiredStore("openai-codex:expired", now - 60_000),
       usageStats: { "openai-codex:expired": { cooldownUntil: now + 5 * 60_000 } },
     });
     const confirmAutoFix = vi.fn(async () => false);
 
-    const findings = await inspect(configForAgents("main"), confirmAutoFix);
+    const findings = await inspectAuthProfileHealth({
+      cfg: configForAgents("main"),
+      prompter: { confirmAutoFix } as unknown as DoctorPrompter,
+      allowKeychainPrompt: false,
+    });
 
     expect(confirmAutoFix).toHaveBeenCalledOnce();
-    for (const message of ["cooldown (5m)", "expired"]) {
-      expect(findings).toContainEqual(
+    expect(findings).toEqual(
+      expect.arrayContaining([
         expect.objectContaining({
           category: "fix-now",
-          message: expect.stringContaining(message),
+          message: expect.stringContaining("cooldown (5m)"),
         }),
-      );
-    }
+        expect.objectContaining({
+          category: "fix-now",
+          message: expect.stringContaining("expired"),
+        }),
+      ]),
+    );
   });
 
   it("prints malformed API-key profile diagnostics", async () => {
-    useLocalStore(
-      {
-        version: 1,
-        profiles: {
-          "zai:default": {
-            type: "api_key",
-            provider: "zai",
-            key: "openclaw onboard --auth-choice zai-coding-global",
-          },
-        },
+    const agentDir = path.join(tempDir, "main-agent");
+    writeAuthStore(agentDir);
+    authProfileMocks.hasLocalAuthProfileStoreSource.mockImplementation(
+      (candidateDir) => candidateDir !== undefined,
+    );
+    authProfileMocks.loadAuthProfileStoreForRuntime.mockImplementation(
+      (receivedAgentDir): AuthProfileStore => {
+        if (receivedAgentDir === agentDir) {
+          return {
+            version: 1,
+            profiles: {
+              "zai:default": {
+                type: "api_key",
+                provider: "zai",
+                key: "openclaw onboard --auth-choice zai-coding-global",
+              },
+            },
+          };
+        }
+        return { version: 1, profiles: {} };
       },
-      mainDir,
     );
 
-    const findings = await inspect();
+    const findings = await inspectAuthProfileHealth({
+      cfg: {
+        agents: {
+          entries: { main: { agentDir } },
+        },
+      } as OpenClawConfig,
+      prompter: {
+        confirmAutoFix: vi.fn(async () => false),
+      } as unknown as DoctorPrompter,
+      allowKeychainPrompt: false,
+    });
 
-    expect(findings).toMatchObject([
-      {
+    expect(findings).toEqual([
+      expect.objectContaining({
         target: "zai:default",
         category: "fix-now",
         requirement: "malformed_api_key",
         fixHint: "Paste the API key value, not an OpenClaw onboarding command.",
-      },
+      }),
     ]);
   });
 
@@ -278,19 +374,30 @@ describe("inspectAuthProfileHealth", () => {
   ])(
     "formats OAuth refresh failures through the doctor command path",
     async (profileId, message, expected) => {
-      useLocalStore(expiredStore(profileId));
+      const agentDir = path.join(tempDir, "main-agent");
+      authProfileMocks.hasLocalAuthProfileStoreSource.mockImplementation(
+        (candidateDir) => candidateDir !== undefined,
+      );
+      authProfileMocks.loadAuthProfileStoreForRuntime.mockReturnValue(
+        expiredStore(profileId, now - 60_000),
+      );
       authProfileMocks.resolveApiKeyForProfile.mockRejectedValue(new Error(message));
 
-      const findings = await inspect(
-        configForAgents("main"),
-        vi.fn(async () => true),
-      );
+      const findings = await inspectAuthProfileHealth({
+        cfg: {
+          agents: { entries: { main: { agentDir } } },
+        } as OpenClawConfig,
+        prompter: { confirmAutoFix: vi.fn(async () => true) } as unknown as DoctorPrompter,
+        allowKeychainPrompt: false,
+      });
 
-      expect(findings).toContainEqual(
-        expect.objectContaining({
-          category: "fix-now",
-          message: expect.stringContaining(expected),
-        }),
+      expect(findings).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            category: "fix-now",
+            message: expect.stringContaining(expected),
+          }),
+        ]),
       );
     },
   );

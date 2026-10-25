@@ -68,10 +68,10 @@ describe("msteamsOutbound cfg threading", () => {
   });
 
   it("caps lightweight and runtime outbound at 4000 characters", () => {
-    const params = {
-      cfg: { channels: { msteams: { textChunkLimit: 6000 } } },
-      fallbackLimit: 6000,
+    const configuredCfg: OpenClawConfig = {
+      channels: { msteams: { appId: "resolved-app-id", textChunkLimit: 6000 } },
     };
+    const params = { cfg: configuredCfg, fallbackLimit: 6000 };
 
     expect(msteamsPlugin.outbound?.resolveEffectiveTextChunkLimit?.(params)).toBe(4000);
     expect(msteamsOutbound.resolveEffectiveTextChunkLimit?.(params)).toBe(4000);
@@ -96,11 +96,30 @@ describe("msteamsOutbound cfg threading", () => {
   });
 
   it("renders and sends presentation payloads as Adaptive Cards", async () => {
-    const presentation: MessagePresentation = { blocks: [] };
+    const presentation: MessagePresentation = {
+      title: "Deploy",
+      blocks: [
+        { type: "text", text: "Finished" },
+        { type: "buttons", buttons: [{ label: "Open", value: "open" }] },
+      ],
+    };
     const payload = { text: "Deploy finished", presentation };
     const rendered = await render(payload);
 
     expect(rendered?.presentation).toBe(presentation);
+    expect(rendered?.channelData?.msteams).toEqual({
+      presentationCard: {
+        type: "AdaptiveCard",
+        version: "1.4",
+        body: [
+          { type: "TextBlock", text: "Deploy finished", wrap: true },
+          { type: "TextBlock", text: "Deploy", weight: "Bolder", size: "Medium", wrap: true },
+          { type: "TextBlock", text: "Finished", wrap: true },
+        ],
+        actions: [{ type: "Action.Submit", title: "Open", data: { value: "open", label: "Open" } }],
+      },
+    });
+
     const result = await sendPayload({
       cfg,
       to: "conversation:19:channel@thread.tacv2",
@@ -113,11 +132,7 @@ describe("msteamsOutbound cfg threading", () => {
       accountId: "default",
       cfg,
       to: "conversation:19:channel@thread.tacv2;messageid=presentation-thread-root",
-      card: {
-        type: "AdaptiveCard",
-        version: "1.4",
-        body: [{ type: "TextBlock", text: "Deploy finished", wrap: true }],
-      },
+      card: (rendered!.channelData!.msteams as { presentationCard: unknown }).presentationCard,
     });
     expect(result).toEqual({
       channel: "msteams",

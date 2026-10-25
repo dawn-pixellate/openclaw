@@ -19,10 +19,15 @@ vi.mock("./delivery-subagent-registry.runtime.js", () => ({
   hasUnsettledCronDescendants: vi.fn().mockResolvedValue(false),
 }));
 
-vi.mock("../../agents/run-wait.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../agents/run-wait.js")>()),
-  readLatestAssistantReply: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock("../../agents/run-wait.js", async () => {
+  const actual = await vi.importActual<typeof import("../../agents/run-wait.js")>(
+    "../../agents/run-wait.js",
+  );
+  return {
+    ...actual,
+    readLatestAssistantReply: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 import * as gatewayCallRuntime from "../../gateway/call.js";
 const callGateway = vi.spyOn(gatewayCallRuntime, "callGateway").mockResolvedValue({ status: "ok" });
@@ -34,17 +39,15 @@ const { readLatestAssistantReply } = await import("../../agents/run-wait.js");
 const listRuns = vi.mocked(listDescendantRunsForRequester);
 const latestReply = vi.mocked(readLatestAssistantReply);
 const unsettled = vi.mocked(hasUnsettledCronDescendants);
-const waitedRunIds = () =>
-  callGateway.mock.calls.map(([request]) => (request.params as { runId: string }).runId);
 
-async function resolveAfterAdvancingTimers<T>(promise: Promise<T>, advanceMs = 100) {
+async function resolveAfterAdvancingTimers<T>(promise: Promise<T>, advanceMs = 100): Promise<T> {
   await vi.advanceTimersByTimeAsync(advanceMs);
   return promise;
 }
 
 function waitSummary(params: Partial<Parameters<typeof waitForDescendantSubagentSummary>[0]> = {}) {
   return waitForDescendantSubagentSummary({
-    sessionKey: "test-session",
+    sessionKey: "cron-session",
     initialReply: "on it",
     timeoutMs: 100,
     observedActiveDescendants: true,
@@ -56,9 +59,13 @@ const fallbackReply = () =>
   readDescendantSubagentFallbackReply({ sessionKey: "test-session", runStartedAt: 1000 });
 
 function createDescendantRun(
-  params: Partial<SubagentRunRecord> & { active?: boolean } = {},
+  params: Partial<SubagentRunRecord> & {
+    endedAt?: number;
+    active?: boolean;
+    resultText?: string | null;
+  } = {},
 ): SubagentRunRecord {
-  const { active, ...overrides } = params;
+  const { endedAt = 2000, active, resultText, ...overrides } = params;
   return {
     runId: "run-1",
     childSessionKey: "child-1",
@@ -69,7 +76,18 @@ function createDescendantRun(
     createdAt: 1000,
     execution: active
       ? { status: "running" }
-      : { status: "terminal", endedAt: 2000, outcome: { status: "ok" } },
+      : { status: "terminal", endedAt, outcome: { status: "ok" } },
+    ...(resultText === undefined
+      ? {}
+      : {
+          completion: {
+            required: true,
+            resultText,
+            terminalReply: resultText
+              ? { disposition: "visible", text: resultText }
+              : { disposition: "empty" },
+          },
+        }),
     ...overrides,
   };
 }
@@ -77,11 +95,9 @@ function createDescendantRun(
 function terminalRun(
   terminalReply: NonNullable<SubagentRunRecord["completion"]>["terminalReply"],
   resultText = "stale output",
-  endedAt = 2000,
 ) {
   return createDescendantRun({
     completion: { required: true, terminalReply, resultText, fallbackResultText: "older fallback" },
-    execution: { status: "terminal", endedAt, outcome: { status: "ok" } },
   });
 }
 
@@ -91,13 +107,21 @@ describe("readDescendantSubagentFallbackReply", () => {
     ["silent", [terminalRun({ disposition: "silent" })], undefined],
     ["empty", [terminalRun({ disposition: "empty" })], undefined],
     ["token", [terminalRun({ disposition: "visible", text: "NO_REPLY" }, "NO_REPLY")], "NO_REPLY"],
+    ["missing terminal token", [terminalRun(undefined, "NO_REPLY")], undefined],
     ["missing terminal answer", [terminalRun(undefined, "captured answer")], undefined],
-    ["old", [terminalRun({ disposition: "visible", text: "old" }, "old", 900)], undefined],
+    ["null result", [createDescendantRun({ cleanup: "delete", resultText: null })], undefined],
+    ["old", [createDescendantRun({ endedAt: 900, resultText: "old" })], undefined],
     [
       "skip silent child",
       [
         terminalRun({ disposition: "silent" }),
-        terminalRun({ disposition: "visible", text: "useful output" }, "useful output", 3000),
+        createDescendantRun({
+          runId: "run-2",
+          childSessionKey: "child-2",
+          task: "task-2",
+          endedAt: 3000,
+          resultText: "useful output",
+        }),
       ],
       "useful output",
     ],
@@ -124,6 +148,7 @@ describe("waitForDescendantSubagentSummary", () => {
   it("returns initialReply immediately when no active descendants and observedActiveDescendants=false", async () => {
     const result = await waitSummary({ observedActiveDescendants: false });
     expect(result).toBe("on it");
+    expect(callGateway).not.toHaveBeenCalled();
   });
 
   it("waits for a queued descendant's successor to produce the synthesis", async () => {
@@ -145,23 +170,29 @@ describe("waitForDescendantSubagentSummary", () => {
 
     try {
       const result = await waitSummary({
+        sessionKey: "test-session",
         initialReply: parentReply,
         timeoutMs: 300,
         observedActiveDescendants: undefined,
       });
 
       expect(result).toBe("The successor completed the report.");
-      expect(waitedRunIds()).toEqual(["queued-run", "successor-run"]);
+      expect(
+        callGateway.mock.calls.map(([request]) => (request.params as { runId: string }).runId),
+      ).toEqual(["queued-run", "successor-run"]);
     } finally {
       clearTimeout(completion);
     }
   });
 
-  it("ignores the unchanged parent reply, including its media directives", async () => {
-    vi.useFakeTimers();
-    latestReply.mockResolvedValue("on it\n\nMEDIA:/workspace/report.png");
-    expect(await resolveAfterAdvancingTimers(waitSummary())).toBeUndefined();
-  });
+  it.each(["on it\n\nMEDIA:/workspace/report.png", "HEARTBEAT_OK"])(
+    "ignores unchanged/control-only parent reply %s",
+    async (parentReply) => {
+      vi.useFakeTimers();
+      latestReply.mockResolvedValue(parentReply);
+      expect(await resolveAfterAdvancingTimers(waitSummary())).toBeUndefined();
+    },
+  );
 
   it.each([false, true])(
     "waits through delayed successor admission (children already ended: %s)",
@@ -187,7 +218,7 @@ describe("waitForDescendantSubagentSummary", () => {
       );
       let descendants = [orchestrator, ...workers];
       let cronReply = "spawned a subagent";
-      const finalSynthesis = "Final synthesis";
+      const finalSynthesis = "Daily report complete: both findings reconciled.";
       listRuns.mockImplementation(async () => descendants);
       unsettled.mockImplementation(async () =>
         hasDescendantRunAwaitingSettleFromRuns(
@@ -207,7 +238,7 @@ describe("waitForDescendantSubagentSummary", () => {
           ...workers,
         ];
       };
-      callGateway.mockImplementation(async (request) => {
+      vi.mocked(callGateway).mockImplementation(async (request) => {
         const runId = (request.params as { runId: string }).runId;
         const completed = descendants.find((entry) => entry.runId === runId);
         expect(completed).toBeDefined();
@@ -239,7 +270,10 @@ describe("waitForDescendantSubagentSummary", () => {
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(100);
       expect(await resultPromise).toBe(finalSynthesis);
-      expect(waitedRunIds()).toEqual(
+      const waitedRunIds = vi
+        .mocked(callGateway)
+        .mock.calls.map(([request]) => (request.params as { runId: string }).runId);
+      expect(waitedRunIds).toEqual(
         childrenAlreadyEnded
           ? ["orchestrator-successor"]
           : ["worker-a", "worker-b", "orchestrator-successor"],
@@ -254,7 +288,7 @@ describe("waitForDescendantSubagentSummary", () => {
     unsettled.mockResolvedValue(true);
     latestReply.mockResolvedValue("Partial results are available.");
 
-    const resultPromise = waitSummary({ timeoutMs: 60 });
+    const resultPromise = waitSummary({ sessionKey: "test-session", timeoutMs: 60 });
     expect(await resolveAfterAdvancingTimers(resultPromise, 60)).toBeUndefined();
     expect(callGateway).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
@@ -270,7 +304,7 @@ describe("waitForDescendantSubagentSummary", () => {
     listRuns.mockResolvedValue([descendant]);
     unsettled.mockResolvedValue(true);
     latestReply.mockResolvedValue("on it");
-    callGateway.mockImplementation(async ({ signal }) => {
+    vi.mocked(callGateway).mockImplementation(async ({ signal }) => {
       await new Promise<void>((_resolve, reject) => {
         signal?.addEventListener(
           "abort",
@@ -282,6 +316,7 @@ describe("waitForDescendantSubagentSummary", () => {
     });
 
     const resultPromise = waitSummary({
+      sessionKey: "test-session",
       timeoutMs: 500,
       abortSignal: controller.signal,
       observedActiveDescendants: undefined,
@@ -290,13 +325,16 @@ describe("waitForDescendantSubagentSummary", () => {
     controller.abort(new Error("cron cancelled"));
     expect(await resultPromise).toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
+    expect(readLatestAssistantReply).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["NO_REPLY", "HEARTBEAT_OK child completed the scheduled reminder"])(
-    "preserves prepared synthesis without reclassifying its text: %s",
-    async (synthesis) => {
-      latestReply.mockResolvedValueOnce("on it").mockResolvedValue(synthesis);
-      await expect(waitSummary({ initialReply: undefined })).resolves.toBe(synthesis);
-    },
-  );
+  it.each([
+    "NO_REPLY",
+    "NO_REPLY\nexample",
+    "HEARTBEAT_OK child completed the scheduled reminder",
+    '{"action":"HEARTBEAT_OK","message":"child completed the scheduled reminder"}',
+  ])("preserves prepared synthesis without reclassifying its text: %s", async (synthesis) => {
+    latestReply.mockResolvedValueOnce("on it").mockResolvedValue(synthesis);
+    await expect(waitSummary({ initialReply: undefined })).resolves.toBe(synthesis);
+  });
 });

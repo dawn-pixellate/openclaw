@@ -56,7 +56,7 @@ function holdClaimInspection() {
       entered.resolve();
       await release.promise;
     }
-    return { eventId: raw.id, laneKey: raw.lane };
+    return { eventId: raw.id, laneKey: raw.lane ?? "lane:a" };
   };
   return { entered, release, inspectAsync };
 }
@@ -271,7 +271,7 @@ describe("channel ingress monitor asynchronous inspection", () => {
       const deliver = vi.fn();
       const monitor = createMonitor(queue, {
         inspectAsync: (raw, context) => {
-          const facts = { eventId: raw.id, laneKey: raw.lane };
+          const facts = { eventId: raw.id, laneKey: raw.lane ?? "lane:a" };
           if (context.phase !== "claim") {
             return Promise.resolve(facts);
           }

@@ -137,7 +137,10 @@ describe("channel ingress drain lanes", () => {
             const retryClaim = expectDefined(await queue.claim("retry-delayed"), "retry claim");
             await queue.release(retryClaim, { lastError: "retry", releasedAt: currentNow });
 
-            const readBacklog = expectDefined(lifecycles.get("self")?.readLaneBacklog);
+            const readBacklog = expectDefined(
+              lifecycles.get("self")?.readLaneBacklog,
+              "self backlog",
+            );
             const pendingBefore = await queue.listPending();
             const claimsBefore = await queue.listClaims();
             const expectedIds =
@@ -147,6 +150,7 @@ describe("channel ingress drain lanes", () => {
             expect((await readBacklog()).map((row) => row.id)).toEqual(expectedIds);
             const readDispatchingBacklog = expectDefined(
               lifecycles.get("dispatching")?.readLaneBacklog,
+              "dispatching backlog",
             );
             expect((await readDispatchingBacklog()).map((row) => row.id)).toEqual(
               expectedIds.filter((id) => id !== "dispatching"),
@@ -228,7 +232,7 @@ describe("channel ingress drain lanes", () => {
           return snapshot;
         };
         const listPending = queue.listPending.bind(queue);
-        const listUnsettled = expectDefined(queue.listUnsettled).bind(queue);
+        const listUnsettled = expectDefined(queue.listUnsettled, "list unsettled").bind(queue);
         // The split-read negative control loses the head between these same boundaries.
         vi.spyOn(queue, "listPending").mockImplementationOnce((options) =>
           afterSnapshot(listPending(options)),
@@ -296,7 +300,7 @@ describe("channel ingress drain lanes", () => {
                 lifecycle.onDeferred();
               }
               failure = Promise.resolve(
-                expectDefined(lifecycle.onFailed)(new Error("retry head")),
+                expectDefined(lifecycle.onFailed, "failure callback")(new Error("retry head")),
               ).catch((error: unknown) => {
                 settlementError = error;
               });

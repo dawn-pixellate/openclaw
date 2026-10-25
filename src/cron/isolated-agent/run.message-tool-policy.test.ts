@@ -421,7 +421,7 @@ describe("runCronIsolatedAgentTurn delivery policy", () => {
       );
       expect(prompt).not.toContain("If this job is no longer needed");
       expect(prompt).not.toContain("the job's instructions win");
-      expect(buildSafeExternalPromptMock).toHaveBeenCalledWith(
+      expect(h.buildSafeExternalPromptMock).toHaveBeenCalledWith(
         expect.objectContaining({ content: "send a message", jobName: "Message Tool Policy" }),
       );
     });
