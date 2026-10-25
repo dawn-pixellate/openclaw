@@ -104,8 +104,11 @@ async function openPendingChat(page: Page, gateway: Gateway) {
   expect((await gateway.waitForRequest("chat.startup")).params).toMatchObject({ sessionKey });
   expect((await gateway.waitForRequest("sessions.subscribe")).params).toEqual({});
   await page
-    .locator(".chat-pane-cache__pane--active .chat-thread .lazy-view-state--loading")
+    .locator(
+      '.chat-pane-cache__pane--active .chat-thread openclaw-panel-loading-skeleton[data-panel-skeleton="chat"]',
+    )
     .waitFor();
+  expect(await page.getByText(historyText, { exact: true }).count()).toBe(0);
 }
 
 async function expectBulkReadsHeld(gateway: Gateway) {
@@ -266,7 +269,9 @@ suite.define(() => {
       expect(await page.getByText(historyText, { exact: true }).count()).toBe(0);
       expect(await gateway.getRequests("chat.startup")).toHaveLength(1);
       await page
-        .locator(".chat-pane-cache__pane--active .chat-thread .lazy-view-state--loading")
+        .locator(
+          '.chat-pane-cache__pane--active .chat-thread openclaw-panel-loading-skeleton[data-panel-skeleton="chat"]',
+        )
         .waitFor();
       await settleStartup(page, gateway);
     });
