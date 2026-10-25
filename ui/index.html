@@ -273,9 +273,19 @@
           env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
       }
 
-      .connect-splash.connect-splash--skeleton {
+      /* Keep the connecting frame and the mounted chat route on one geometry. */
+      .connect-splash--skeleton,
+      .content--workbench .lazy-view-state--route {
         --boot-ink: var(--text, #bcbcc0);
         --boot-line: color-mix(in srgb, var(--boot-ink) 10%, transparent);
+      }
+
+      .content--workbench .lazy-view-state--route {
+        container-type: inline-size;
+        min-height: 0;
+      }
+
+      .connect-splash.connect-splash--skeleton {
         position: relative;
         display: flex;
         align-items: stretch;
@@ -291,11 +301,12 @@
         animation: none;
       }
 
-      html[data-theme-mode="light"] .connect-splash--skeleton {
+      html[data-theme-mode="light"]
+        :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route) {
         --boot-ink: var(--text, #3f3f46);
       }
 
-      .connect-splash--skeleton * {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route) * {
         box-sizing: border-box;
       }
 
@@ -341,7 +352,7 @@
         width: 65%;
       }
 
-      .connect-splash--skeleton .skeleton {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route) .skeleton {
         position: relative;
         overflow: hidden;
         border-radius: 6px;
@@ -349,19 +360,21 @@
       }
 
       /* Static placeholders do not animate or hold compositor layers during boot. */
-      .connect-splash--skeleton .skeleton::after {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route) .skeleton::after {
         content: none;
       }
 
-      .connect-splash--skeleton .skeleton-line {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route) .skeleton-line {
         height: 14px;
       }
 
-      .connect-splash--skeleton .skeleton-line--medium {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .skeleton-line--medium {
         width: 65%;
       }
 
-      .connect-splash--skeleton .skeleton-line--long {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .skeleton-line--long {
         width: 85%;
       }
 
@@ -376,7 +389,8 @@
         text-align: center;
       }
 
-      .connect-splash--skeleton .loading-skeleton {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton {
         box-sizing: border-box;
         gap: 0;
         display: flex;
@@ -388,7 +402,8 @@
         padding: 0 18px 14px;
       }
 
-      .connect-splash--skeleton .loading-skeleton__header {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton__header {
         display: flex;
         flex: none;
         align-items: center;
@@ -400,18 +415,21 @@
         border-bottom: 1px solid var(--boot-line, var(--border));
       }
 
-      .connect-splash--skeleton .loading-skeleton__avatar {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton__avatar {
         flex: none;
         width: 32px;
         height: 32px;
         border-radius: 50%;
       }
 
-      .connect-splash--skeleton .loading-skeleton__title {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton__title {
         width: 140px;
       }
 
-      .connect-splash--skeleton .loading-skeleton__messages {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton__messages {
         display: flex;
         flex: 1;
         flex-direction: column;
@@ -420,18 +438,21 @@
         margin: 28px auto 0;
       }
 
-      .connect-splash--skeleton .loading-skeleton__message {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton__message {
         display: grid;
         gap: 14px;
         width: 85%;
       }
 
-      .connect-splash--skeleton .loading-skeleton__message--user {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton__message--user {
         align-self: flex-end;
         width: 48%;
       }
 
-      .connect-splash--skeleton .loading-skeleton__composer {
+      :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+        .loading-skeleton__composer {
         flex: none;
         width: min(100%, 48rem);
         height: 92px;
@@ -440,16 +461,35 @@
         border-radius: 20px;
       }
 
+      @media (min-width: 769px) {
+        html[data-openclaw-boot-chat] #openclaw-boot-shell .loading-skeleton__composer,
+        .connect-splash[data-chat] .loading-skeleton__composer,
+        .content--workbench .lazy-view-state--route .loading-skeleton__composer {
+          /* Match composer-surface: one editor line, five vertical insets,
+             the send control, the footer margin, and both surface borders. */
+          height: max(
+            var(--chat-composer-min-height, 88px),
+            calc(
+              var(--chat-composer-editor-line, calc(var(--control-ui-text-md, 14px) * 1.5)) +
+                var(--chat-composer-editor-inset-block, 6px) * 5 +
+                var(--chat-composer-send-size, 32px) + 4px + 2px
+            )
+          );
+        }
+      }
+
       /* Chat Details automatically reserves 300px plus its 13px inset in a
          frame at least 1200px wide. Match that first painted destination. */
       @container (min-width: 1200px) {
         html[data-openclaw-boot-chat] #openclaw-boot-shell .loading-skeleton,
-        .connect-splash[data-chat] .loading-skeleton {
+        .connect-splash[data-chat] .loading-skeleton,
+        .content--workbench .lazy-view-state--route .loading-skeleton {
           padding-inline-end: 331px;
         }
 
         html[data-openclaw-boot-chat] #openclaw-boot-shell .loading-skeleton__header,
-        .connect-splash[data-chat] .loading-skeleton__header {
+        .connect-splash[data-chat] .loading-skeleton__header,
+        .content--workbench .lazy-view-state--route .loading-skeleton__header {
           margin-inline-end: -331px;
         }
 
@@ -475,16 +515,19 @@
       }
 
       @media (max-width: 768px) {
-        .connect-splash--skeleton .loading-skeleton {
+        :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+          .loading-skeleton {
           padding: 0 16px 10px;
         }
 
-        .connect-splash--skeleton .loading-skeleton__header {
+        :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+          .loading-skeleton__header {
           height: 58px;
           margin-inline: -16px;
         }
 
-        .connect-splash--skeleton .loading-skeleton__composer {
+        :is(.connect-splash--skeleton, .content--workbench .lazy-view-state--route)
+          .loading-skeleton__composer {
           height: 52px;
           border-radius: 22px;
         }

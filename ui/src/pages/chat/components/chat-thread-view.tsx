@@ -13,7 +13,6 @@ import {
   markdownSessionLinkFromKeyboardEvent,
 } from "../../../components/markdown-session-links.ts";
 import { handleMarkdownTableInteraction } from "../../../components/markdown-tables.ts";
-import { LoadingState } from "../../../components/solid/loading-state.tsx";
 import { PanelLoadingSkeleton } from "../../../components/solid/panel-loading-skeleton.tsx";
 import { registerChatSessionEnglish } from "../../../i18n/locales/en-chat-session.ts";
 import {
@@ -151,8 +150,8 @@ export function ChatThread(input: {
   const contents = createMemo(() => {
     // Native range changes redraw this island without preparing the whole pane.
     geometry().read();
-    if (routeLoading()) {
-      return mobile() ? <ChatConversationLoading route /> : <LoadingState />;
+    if (routeLoading() && mobile()) {
+      return <ChatConversationLoading route />;
     }
     if (showLoadingSkeleton() || isEmpty()) {
       return (
@@ -214,7 +213,7 @@ export function ChatThread(input: {
           "chat-thread",
           {
             "chat-thread--direct": current().projection.isDirectThread,
-            "chat-thread--route-loading": routeLoading(),
+            "chat-thread--route-loading": mobile() && routeLoading(),
             "chat-thread--comment-pins": commentPins(),
           },
         ]}

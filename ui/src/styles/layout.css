@@ -4251,6 +4251,12 @@ openclaw-tooltip.sidebar-hover-tooltip {
   padding-bottom: 0;
 }
 
+/* Session routes reserve the final frame before their lazy styles load. */
+.content--chat.content--workbench {
+  padding-left: 0;
+  padding-right: 0;
+}
+
 .content--chat > :where(:not(:first-child)),
 .content--custodian > :where(:not(:first-child)) {
   margin-top: 0;
