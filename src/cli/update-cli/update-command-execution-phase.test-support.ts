@@ -34,6 +34,17 @@ type FixtureInputs = Pick<typeof fixtures, "executionParams" | "mocks" | "succes
 };
 type Run = NonNullable<UpdateCommandOptions["run"]>;
 
+function interceptPhaseReceipt(phase: Phase, afterReceipt: () => void | Promise<void>) {
+  const original = phaseWrites.recordUpdateRunPhaseAsync;
+  return vi.spyOn(phaseWrites, "recordUpdateRunPhaseAsync").mockImplementation(async (...args) => {
+    const record = await original(...args);
+    if (args[1] === phase) {
+      await afterReceipt();
+    }
+    return record;
+  });
+}
+
 export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
   const { executionParams, mocks, successfulUpdate, phaseAdmission } = inputs;
   const gitTarget = { sha: "a".repeat(40), version: "2026.9.2" };
@@ -145,17 +156,10 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
       withPhase(phase, async (fixture) => {
         const entered = createDeferredCore();
         const release = createDeferredCore();
-        const original = phaseWrites.recordUpdateRunPhaseAsync;
-        using _ = vi
-          .spyOn(phaseWrites, "recordUpdateRunPhaseAsync")
-          .mockImplementation(async (...args) => {
-            const record = await original(...args);
-            if (args[1] === phase) {
-              entered.resolve();
-              await release.promise;
-            }
-            return record;
-          });
+        using _ = interceptPhaseReceipt(phase, () => {
+          entered.resolve();
+          return release.promise;
+        });
         let observing = false;
         fixture.beforeCall.run = () => {
           observing = true;
@@ -264,17 +268,10 @@ export function registerExecutionPhaseReceiptTests(inputs: FixtureInputs) {
   it("refuses downstream work after an interrupted staging receipt", async () => {
     await withPhase("staging", async (fixture) => {
       let received = false;
-      const recordPhase = phaseWrites.recordUpdateRunPhaseAsync;
-      using _ = vi
-        .spyOn(phaseWrites, "recordUpdateRunPhaseAsync")
-        .mockImplementation(async (...args) => {
-          const record = await recordPhase(...args);
-          if (args[1] === "staging") {
-            received = true;
-            fixture.run.interrupted = true;
-          }
-          return record;
-        });
+      using _ = interceptPhaseReceipt("staging", () => {
+        received = true;
+        fixture.run.interrupted = true;
+      });
       expect(await fixture.start()).toMatchObject({
         mutationStarted: false,
         result: { status: "error" },
