@@ -317,7 +317,7 @@ describe("copyBundledPluginMetadata", () => {
     );
   });
 
-  it("removes generated outputs for plugins no longer present in source", () => {
+  it.each([false, true])("removes stale dist outputs (manifestless source=%s)", (sourceExists) => {
     const repoRoot = makeRepoRoot("openclaw-bundled-plugin-removed-");
     const distDir = bundledPluginDir(repoRoot, "removed-plugin");
     writeFiles(distDir, {
@@ -327,21 +327,15 @@ describe("copyBundledPluginMetadata", () => {
     fs.mkdirSync(path.join(distDir, "node_modules"), { recursive: true });
     writeStaleMetadata(distDir, "removed-plugin", ["./bundled-skills/@scope/skill"]);
     fs.mkdirSync(path.join(repoRoot, "extensions"), { recursive: true });
+    if (sourceExists) {
+      fs.mkdirSync(path.join(repoRoot, "extensions/removed-plugin/node_modules"), {
+        recursive: true,
+      });
+    }
 
     copyBundledPluginMetadata({ repoRoot });
 
     expect(fs.existsSync(distDir)).toBe(false);
-  });
-
-  it("removes stale dist outputs when a source extension directory no longer has a manifest", () => {
-    const repoRoot = makeRepoRoot("openclaw-bundled-plugin-manifestless-source-");
-    const sourcePluginDir = path.join(repoRoot, "extensions", "google-gemini-cli-auth");
-    fs.mkdirSync(path.join(sourcePluginDir, "node_modules"), { recursive: true });
-    const staleDistDir = bundledPluginDir(repoRoot, "google-gemini-cli-auth");
-    writeFiles(staleDistDir, { "index.js": "export default {}\n" });
-    writeStaleMetadata(staleDistDir, "google-gemini-cli-auth");
-    copyBundledPluginMetadata({ repoRoot });
-    expect(fs.existsSync(staleDistDir)).toBe(false);
   });
 
   it("preserves manifest-less runtime support package outputs and copies package metadata", () => {

@@ -7,7 +7,7 @@ import {
   resolveProviderPluginChoiceCore,
   runProviderModelSelectedHookCore,
 } from "./provider-wizard.js";
-import type { ProviderPlugin } from "./types.js";
+import type { ProviderAuthMethod, ProviderPlugin } from "./types.js";
 
 const resolvePluginProvidersCore = vi.hoisted(() => vi.fn<() => ProviderPlugin[]>(() => []));
 vi.mock("./providers.runtime.js", () => ({
@@ -24,6 +24,10 @@ function makeProvider(overrides: Partial<ProviderPlugin> & Pick<ProviderPlugin, 
   } satisfies ProviderPlugin;
 }
 
+function auth(id: string, wizard?: ProviderAuthMethod["wizard"]): ProviderAuthMethod {
+  return { id, label: id, kind: "custom", run: vi.fn(), ...(wizard ? { wizard } : {}) };
+}
+
 describe("manifest auth choice dispatch", () => {
   const manifestChoice = {
     pluginId: "moonshot",
@@ -36,14 +40,11 @@ describe("manifest auth choice dispatch", () => {
     pluginId: "moonshot",
     label: "Moonshot",
     auth: [
-      { id: "api-key", label: "Global", kind: "api_key", run: vi.fn() },
-      {
-        id: "api-key-cn",
-        label: "China",
-        kind: "api_key",
-        wizard: { groupLabel: "Moonshot", modelSelection: { allowKeepCurrent: false } },
-        run: vi.fn(),
-      },
+      auth("api-key"),
+      auth("api-key-cn", {
+        groupLabel: "Moonshot",
+        modelSelection: { allowKeepCurrent: false },
+      }),
     ],
   });
 
@@ -150,10 +151,7 @@ describe("provider wizard boundaries", () => {
       provider: makeProvider({
         id: "vllm",
         label: "vLLM",
-        auth: [
-          { id: "local", label: "Local", kind: "custom", run: vi.fn() },
-          { id: "cloud", label: "Cloud", kind: "custom", run: vi.fn() },
-        ],
+        auth: [auth("local"), auth("cloud")],
         wizard: {
           setup: {
             choiceId: "self-hosted-vllm",
@@ -173,71 +171,21 @@ describe("provider wizard boundaries", () => {
         id: "openai",
         label: "OpenAI",
         auth: [
-          {
-            id: "api-key",
-            label: "OpenAI API key",
-            kind: "api_key",
-            wizard: {
-              choiceId: "openai-api-key",
-              choiceLabel: "OpenAI API key",
-              groupId: "openai",
-              groupLabel: "OpenAI",
-              onboardingScopes: ["text-inference"],
+          auth("api-key", {
+            choiceId: "openai-api-key",
+            choiceLabel: "OpenAI API key",
+            groupId: "openai",
+            groupLabel: "OpenAI",
+            onboardingScopes: ["text-inference", "image-generation"],
+            modelAllowlist: {
+              allowedKeys: ["openai/fixture"],
+              initialSelections: ["openai/fixture"],
+              message: "Fixture models",
             },
-            run: vi.fn(),
-          },
+          }),
         ],
       }),
       choice: "openai-api-key",
-      resolveWizard: (provider: ProviderPlugin) => provider.auth[0]?.wizard,
-    },
-    {
-      name: "returns method wizard metadata for media-only choices",
-      provider: makeProvider({
-        id: "fal",
-        label: "fal",
-        auth: [
-          {
-            id: "api-key",
-            label: "fal API key",
-            kind: "api_key",
-            wizard: {
-              choiceId: "fal-api-key",
-              choiceLabel: "fal API key",
-              groupId: "fal",
-              groupLabel: "fal",
-              onboardingScopes: ["image-generation"],
-            },
-            run: vi.fn(),
-          },
-        ],
-      }),
-      choice: "fal-api-key",
-      resolveWizard: (provider: ProviderPlugin) => provider.auth[0]?.wizard,
-    },
-    {
-      name: "returns method wizard metadata for canonical choices",
-      provider: makeProvider({
-        id: "anthropic",
-        label: "Anthropic",
-        auth: [
-          {
-            id: "cli",
-            label: "Claude CLI",
-            kind: "custom",
-            wizard: {
-              choiceId: "anthropic-cli",
-              modelAllowlist: {
-                allowedKeys: ["claude-cli/claude-sonnet-4-6"],
-                initialSelections: ["claude-cli/claude-sonnet-4-6"],
-                message: "Claude CLI models",
-              },
-            },
-            run: vi.fn(),
-          },
-        ],
-      }),
-      choice: "anthropic-cli",
       resolveWizard: (provider: ProviderPlugin) => provider.auth[0]?.wizard,
     },
   ] as const)("$name", ({ provider, choice, resolveWizard }) => {
@@ -257,10 +205,7 @@ describe("provider wizard boundaries", () => {
     const provider = makeProvider({
       id: "sglang",
       label: "SGLang",
-      auth: [
-        { id: "server", label: "Server", kind: "custom", run: vi.fn() },
-        { id: "cloud", label: "Cloud", kind: "custom", run: vi.fn() },
-      ],
+      auth: [auth("server"), auth("cloud")],
       wizard: {
         modelPicker: {
           label: "SGLang server",
@@ -269,45 +214,20 @@ describe("provider wizard boundaries", () => {
         },
       },
     });
+    const config = {};
+    const env = createHomeEnv();
+    const params = { config, workspaceDir: DEFAULT_WORKSPACE_DIR, env };
     resolvePluginProvidersCore.mockReturnValue([provider]);
-    expect(resolveProviderModelPickerEntries({})).toEqual([
+    expect(resolveProviderModelPickerEntries(params)).toEqual([
       {
         value: buildProviderPluginMethodChoice("sglang", "server"),
         label: "SGLang server",
         hint: "OpenAI-compatible local runtime",
       },
     ]);
-  });
-
-  it("resolves providers in setup mode for the model picker", () => {
-    const provider = makeProvider({
-      id: "sglang",
-      label: "SGLang",
-      auth: [{ id: "server", label: "Server", kind: "custom", run: vi.fn() }],
-      wizard: {
-        setup: {
-          choiceLabel: "SGLang setup",
-          groupId: "sglang",
-          groupLabel: "SGLang",
-        },
-        modelPicker: {
-          label: "SGLang server",
-          methodId: "server",
-        },
-      },
-    });
-    const config = {};
-    const env = createHomeEnv();
-    resolvePluginProvidersCore.mockReturnValue([provider]);
-
-    const runtimeParams = { config, workspaceDir: DEFAULT_WORKSPACE_DIR, env };
-    expect(resolveProviderModelPickerEntries(runtimeParams)).toHaveLength(1);
-
     expect(resolvePluginProvidersCore).toHaveBeenCalledTimes(1);
     expect(resolvePluginProvidersCore).toHaveBeenCalledWith({
-      config,
-      workspaceDir: DEFAULT_WORKSPACE_DIR,
-      env,
+      ...params,
       mode: "setup",
     });
   });
