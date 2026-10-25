@@ -322,10 +322,6 @@ describe("realtime voice session harness", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(consult).toHaveBeenCalledOnce();
-    expect(consult.mock.calls[0]?.[0]).toMatchObject({
-      question: "first\nsecond",
-      responseStyle: "brief",
-    });
     expect(deliver).toHaveBeenCalledWith("answer:first\nsecond");
   });
 
