@@ -93,11 +93,7 @@ function summarizeSuppressions(entries: readonly SuppressionEntry[]): string[] {
   return [...counts].map(([key, count]) => `${key}|${count}`).toSorted();
 }
 
-// Include the transparent filesystem spy in the otherwise production-only inventory.
-const productionLintSuppressions = [
-  ...listSuppressionFiles(),
-  "test/helpers/claude-managed-settings.ts",
-].flatMap((file) =>
+const productionLintSuppressions = listSuppressionFiles().flatMap((file) =>
   collectFileSuppressions(file, fs.readFileSync(path.join(repoRoot, file), "utf8")),
 );
 
@@ -155,6 +151,8 @@ describe("production lint suppressions", () => {
         "scripts/e2e/lib/upgrade-survivor/probe-volume-gateway.mjs|no-underscore-dangle|1",
         "scripts/e2e/lib/upgrade-survivor/probe-volume-gateway.mjs|preserve-caught-error|1",
         "scripts/e2e/parallels/host-command.ts|no-warning-comments|1",
+        // The scheduling probe forwards native methods with the original call receiver through Reflect.apply.
+        "scripts/lib/control-ui-resource-counts.ts|typescript/unbound-method|8",
         "scripts/lib/plain-gh.mjs|no-warning-comments|1",
         "scripts/lib/sqlite-reliability-process.ts|typescript/prefer-promise-reject-errors|1",
         // The load probe forwards native WebSocket.send with its original socket receiver.
@@ -267,8 +265,6 @@ describe("production lint suppressions", () => {
         "src/transcripts/library.query-budget.test-support.ts|typescript/unbound-method|1",
         "src/utils.ts|typescript/no-unnecessary-type-parameters|1",
         "src/utils/run-with-concurrency.ts|typescript/prefer-promise-reject-errors|1",
-        // The managed-settings spy preserves caller options; call sites govern recursion.
-        "test/helpers/claude-managed-settings.ts|openclaw-boundaries/no-recursive-readdir|1",
         // Native host bridges are not EventTargets or Window.postMessage endpoints.
         "ui/src/app/native-bridge.ts|unicorn/require-post-message-target-origin|1",
         "ui/src/app/native-gateway-auth.ts|unicorn/prefer-add-event-listener|1",

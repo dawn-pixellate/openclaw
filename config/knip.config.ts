@@ -112,8 +112,19 @@ const repositoryScriptEntries = [
   // The ACP eviction PR invokes this isolated stdio/Gateway workload by path.
   "scripts/perf/acp-ledger-eviction-measure.ts!",
   "scripts/perf/plugin-blob-registration-measure.ts!",
+  "scripts/perf/session-reaction-quota-measure.ts!",
+  // Maintained guides, source headers, and paired drivers invoke these roots by path.
+  "scripts/perf/node-worker-journal-measure.ts!",
+  "scripts/perf/orphan-recovery-observer.mjs!",
+  "scripts/perf/session-actor-residency-snapshot.mjs!",
+  "scripts/perf/session-actor-retention-seed.ts!",
+  "scripts/perf/session-row-materialization-measure.ts!",
+  "scripts/perf/ws-counter-stress-preload.ts!",
+  "scripts/perf/ws-counter-stress.ts!",
   // The source header documents this GitHub reader benchmark's Node command.
   "scripts/perf/github-reader-measure.ts!",
+  // scripts/perf/pairing-live-measure.md invokes this synthetic pairing workload by path.
+  "scripts/perf/pairing-live-measure.mts!",
   // docs/reference/test/performance.md invokes the Decision transport comparison driver.
   "scripts/bench-decision-transport.mts!",
   // docs/reference/test/performance.md invokes the frozen-revision benchmark builder.
@@ -281,6 +292,27 @@ const repositoryScriptEntries = [
   "scripts/perf/session-initial-context-measure.ts!",
   "scripts/perf/sql-probe-measure.ts!",
   "scripts/perf/workspace-manifest-retention.ts!",
+  // Maintained guides and source headers invoke these focused workloads by exact path.
+  "scripts/bench-memory-publication.mjs!",
+  "scripts/perf/bash-parser-memory.ts!",
+  "scripts/perf/chat-progress-capture-measure.ts!",
+  "scripts/perf/code-mode-json-fit-measure.ts!",
+  "scripts/perf/code-mode-json-gateway-measure.ts!",
+  "scripts/perf/crabbox-state-polling.mts!",
+  "scripts/perf/local-workspace-manifest-equivalence.ts!",
+  "scripts/perf/local-workspace-manifest-measure.ts!",
+  "scripts/perf/operator-model-policy-list-probe.mjs!",
+  "scripts/perf/operator-model-policy-load.mjs!",
+  "scripts/perf/operator-model-policy-measure.ts!",
+  "scripts/perf/provider-rate-limit-retention.ts!",
+  "scripts/perf/session-cost-refresh-measure.ts!",
+  "scripts/perf/sqlite-operation-receive-measure.ts!",
+  "scripts/perf/tool-search-lexical-measure.ts!",
+  "scripts/perf/worker-cold-fixture.ts!",
+  // The performance drivers load these instrumentation preloads by exact path.
+  "scripts/perf/bash-parser-gateway-preload.mjs!",
+  "scripts/perf/provider-rate-limit-stress-probe.mjs!",
+  "scripts/perf/worker-creation-preload.mjs!",
   // Merged benchmark PRs and source headers invoke these retained workloads by exact path.
   // The transcript broadcast benchmark loads the stall recorder through --gateway-preload.
   "scripts/bench-filesystem-preconditions.mts!",
@@ -967,6 +999,14 @@ function compileDynamicMjsConsumers(source: string, filePath: string): string {
       "import(pathToFileURL(bundlePath).href)",
       'import("../packages/gateway-protocol/scripts/native-codegen.ts")',
     );
+  }
+  const typedShimImplementation = source.match(
+    /\brun(?:Node|Tsx)CliShim\(\s*import\.meta\.url\s*,\s*\{[\s\S]*?\bimplementation\s*:\s*["'](\.\/[^"'\r\n]+\.mts)["']/u,
+  )?.[1];
+  if (typedShimImplementation) {
+    // Keep implementation exports auditable: the shim executes the module but
+    // does not consume every named export merely by loading it.
+    return `${source}\nimport ${JSON.stringify(typedShimImplementation)};`;
   }
   return source;
 }
