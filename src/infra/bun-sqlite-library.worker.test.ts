@@ -29,7 +29,10 @@ const runtime = vi.hoisted(() => ({
 }));
 
 vi.mock("./bun-sqlite-close-probe.js", () => ({ probeSqliteNativeClose: runtime.closeProbe }));
-vi.mock("./bun-sqlite-library-probe.js", () => ({ probeBunSqliteLibrary: runtime.probe }));
+vi.mock("./bun-sqlite-library-probe.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./bun-sqlite-library-probe.js")>()),
+  probeBunSqliteLibrary: runtime.probe,
+}));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
