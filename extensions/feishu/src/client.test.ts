@@ -47,14 +47,8 @@ const proxyAgentInstance = vi.hoisted(() => ({ proxied: true, destroy: vi.fn() }
 const proxyAgentCtorMock = vi.hoisted(() => vi.fn(() => proxyAgentInstance));
 const mockBaseHttpInstance = vi.hoisted(() => ({
   defaults: {},
-  request: vi.fn().mockResolvedValue({}),
+  request: vi.fn(async (_options: Record<string, unknown>) => ({})),
   get: vi.fn().mockResolvedValue({}),
-  post: vi.fn().mockResolvedValue({}),
-  put: vi.fn().mockResolvedValue({}),
-  patch: vi.fn().mockResolvedValue({}),
-  delete: vi.fn().mockResolvedValue({}),
-  head: vi.fn().mockResolvedValue({}),
-  options: vi.fn().mockResolvedValue({}),
   interceptors: { request: { use: vi.fn() } },
 }));
 const proxyEnvKeys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] as const;
@@ -71,15 +65,6 @@ const baseAccount: ResolvedFeishuAccount = {
   domain: "feishu",
   config: FeishuConfigSchema.parse({}),
 };
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function callOptions(mock: { mock: { calls: unknown[][] } }, index = -1): Record<string, unknown> {
-  const call = mock.mock.calls.at(index)?.[0];
-  return isObjectRecord(call) ? call : {};
-}
 
 function createHttpInstance(
   accountId: string,
@@ -141,7 +126,7 @@ describe("Feishu custom HTTPS API domains", () => {
 
   function createCustomDomainHttpInstance(accountId: string): HttpInstanceLike {
     const http = createHttpInstance(accountId, customDomain);
-    expect(callOptions(clientCtorMock).domain).toBe(0);
+    expect(clientCtorMock.mock.lastCall![0].domain).toBe(0);
     return http;
   }
 
@@ -159,7 +144,7 @@ describe("Feishu custom HTTPS API domains", () => {
         ? { file_type: "stream", file_name: "proof.txt", file: bytes }
         : { image_type: "message", image: bytes },
     });
-    const delegated = callOptions(mockBaseHttpInstance.request);
+    const delegated = mockBaseHttpInstance.request.mock.lastCall![0];
     expect(delegated).toMatchObject({
       url: `${file ? customDomain.slice(0, -1) : sdkOrigin}${path}`,
       timeout: FEISHU_HTTP_TIMEOUT_MS,
@@ -196,7 +181,8 @@ describe("Feishu custom HTTPS API domains", () => {
     ]);
   });
 
-  it("routes WebSocket endpoint discovery through the same configured origin", async () => {
+  it("routes WebSocket discovery through its configured origin and proxy", async () => {
+    process.env.HTTPS_PROXY = "http://upper-https:8002";
     await createFeishuWSClient({
       ...baseAccount,
       accountId: "custom-domain-websocket",
@@ -205,6 +191,7 @@ describe("Feishu custom HTTPS API domains", () => {
 
     const options = wsClientCtorMock.mock.lastCall![0];
     expect(options.domain).toBe(0);
+    expect(options.agent).toBe(proxyAgentInstance);
     const httpInstance = options.httpInstance;
     await httpInstance.request({ url: `${sdkOrigin}/callback/ws/endpoint`, method: "post" });
 
@@ -212,13 +199,16 @@ describe("Feishu custom HTTPS API domains", () => {
       url: "https://private.feishu.test:8443/reverse-proxy/callback/ws/endpoint",
       method: "post",
       timeout: FEISHU_HTTP_TIMEOUT_MS,
+      httpAgent: proxyAgentInstance,
+      httpsAgent: proxyAgentInstance,
+      proxy: false,
     });
   });
 
   it("preserves the existing Lark SDK domain and direct requests", async () => {
     const http = createHttpInstance("official-domain-lark", "lark");
     const url = "https://open.larksuite.com/open-apis/im/v1/messages";
-    expect(callOptions(clientCtorMock).domain).toBe(1);
+    expect(clientCtorMock.mock.lastCall![0].domain).toBe(1);
     await http.get(url);
     expect(mockBaseHttpInstance.get).toHaveBeenCalledWith(url, { timeout: FEISHU_HTTP_TIMEOUT_MS });
   });
@@ -298,7 +288,7 @@ describe("createFeishuClient HTTP timeout", () => {
       data,
     });
 
-    expect(callOptions(mockBaseHttpInstance.request).data).toBe(data);
+    expect(mockBaseHttpInstance.request.mock.lastCall![0].data).toBe(data);
   });
 
   it("overrides request-level agents while managed proxy mode is active", async () => {
@@ -326,15 +316,4 @@ describe("createFeishuClient HTTP timeout", () => {
     );
     expect(mockBaseHttpInstance.request).not.toHaveBeenCalled();
   });
-});
-
-it("passes the proxy-aware HTTP instance to Lark.WSClient bootstrap requests", async () => {
-  process.env.HTTPS_PROXY = "http://upper-https:8002";
-  await createFeishuWSClient(baseAccount);
-  const options = wsClientCtorMock.mock.calls[0]![0];
-  const httpInstance = options.httpInstance;
-  const url = `${sdkOrigin}/open-apis/ws/v1`;
-  await httpInstance.request({ url });
-  expect(options.agent).toBe(proxyAgentInstance);
-  expectProxyRequest(url);
 });
