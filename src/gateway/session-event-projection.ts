@@ -179,7 +179,9 @@ export function prepareSessionEventProjection(
         references.clearAncestors(audience.ancestorInvalidations);
       }
       const deliveries = audience.deliveries[rowDeltas ? 1 : 0];
-      let delivery = deliveries.get(references.history);
+      // Legacy roots carry no decoder baselines; unrelated ancestor history cannot change bytes.
+      const deliveryKey = rowDeltas || audience.ancestors?.length ? references.history : audience;
+      let delivery = deliveries.get(deliveryKey);
       if (!delivery) {
         const plan = references.prepareDelivery(
           row,
@@ -224,7 +226,7 @@ export function prepareSessionEventProjection(
               : serializeSessionRow(row)),
           delivered: (viewer) => connection.references(viewer).deliver(plan),
         };
-        deliveries.set(references.history, delivery);
+        deliveries.set(deliveryKey, delivery);
       }
       const fieldRefs =
         rowDeltas &&

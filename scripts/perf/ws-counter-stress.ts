@@ -212,6 +212,7 @@ try {
   };
   config.diagnostics = { enabled: true };
   config.cron = { ...config.cron, enabled: true };
+  config.plugins.enabled = true;
   config.plugins.entries = { "memory-core": { config: { dreaming: { enabled: false } } } };
   const pluginFixtures = writePluginFixtures(output, { count: 40 });
   const promptHookIds = pluginFixtures.pluginIds.slice(0, 2);

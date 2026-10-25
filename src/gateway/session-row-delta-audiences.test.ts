@@ -13,11 +13,130 @@ import {
   listSessions,
   requestContext,
 } from "./server-methods/sessions-read-cache.test-support.js";
+import { ConnectionSessionRows } from "./session-ancestor-references.js";
 import { createSessionRowEventPeer } from "./session-row-event.test-support.js";
 import { getSessionRowProjection } from "./session-row-projection-access.js";
 import { createSessionRowProjection } from "./session-row-projection.js";
 import { rolePolicyConfig } from "./session-sharing.test-utils.js";
 import type { SessionsListResult } from "./session-utils.types.js";
+
+it("shares legacy root plans across distinct ancestor histories without changing recipient bytes", async () => {
+  using _ = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+  await withOpenClawTestState({ scenario: "minimal", prepareProfileCatalog: true }, async () => {
+    const cfg = rolePolicyConfig();
+    cfg.agents = { entries: { main: {} } };
+    const profiles = ["owner", "member", "viewer"].map((role) => {
+      const profile = ensureProfileForEmail(`legacy-root-${role}@example.test`);
+      setUserProfileRole(profile.id, role === "member" ? "write" : "view");
+      return { profile, role };
+    });
+    const root = "agent:main:legacy-root";
+    const parent = "agent:main:legacy-parent";
+    const child = "agent:main:legacy-child";
+    for (const key of [root, parent, child]) {
+      replaceSessionEntrySync(
+        { agentId: "main", sessionKey: key },
+        {
+          sessionId: key,
+          label: key,
+          updatedAt: 1,
+          visibility: "shared",
+          createdActor: { type: "human", source: "profile", id: profiles[0]!.profile.id },
+          ...(key === child ? { parentSessionKey: parent } : {}),
+        },
+      );
+    }
+    const projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
+    const connection = createGatewayConnectionState({
+      scheduler: createTestGatewayScheduler(),
+      bootId: "legacy-root-plans",
+      cfg,
+    });
+    const detach = connection.attachSessionRowProjection(projection);
+    const publishOne = (key: string, id: string) =>
+      connection.broadcastToConnIds(
+        "sessions.changed",
+        { sessionKey: key, agentId: "main", reason: "send" },
+        new Set([id]),
+      );
+    const createPeer = (audience: (typeof profiles)[number], id: string, prior: number) => {
+      const peer = createSessionRowEventPeer(audience.profile, id, 1);
+      peer.client.connect.caps = [];
+      connection.clients.add(peer.client);
+      connection.sessionMessageSubscribers.subscribe(id, child);
+      connection.sessionMessageSubscribers.subscribe(id, root);
+      // Separate publications establish different ancestor certificates even at equal seqs.
+      for (let index = 0; index < prior; index++) {
+        publishOne(child, id);
+      }
+      expect(peer.send).toHaveBeenCalledTimes(prior);
+      expect(JSON.parse(peer.send.mock.calls[0]![0]).payload.ancestorSessions).toMatchObject([
+        { key: parent },
+      ]);
+      return Object.assign(peer, { audience, prior });
+    };
+    try {
+      const peers = Array.from({ length: 66 }, (_value, index) =>
+        createPeer(
+          profiles[index % 3]!,
+          `legacy-recipient-${index}`,
+          1 + (Math.floor(index / 3) % 3),
+        ),
+      );
+      const filtered = profiles.map((audience, index) => {
+        const peer = createPeer(audience, `legacy-filtered-${index}`, 1);
+        connection.sessionMessageSubscribers.unsubscribe(peer.client.connId, root);
+        return peer;
+      });
+      const golden = new Map<string, string>();
+      for (const audience of profiles) {
+        for (let prior = 1; prior <= 3; prior++) {
+          const peer = createPeer(audience, `legacy-reference-${audience.role}-${prior}`, prior);
+          publishOne(root, peer.client.connId);
+          const frame = peer.send.mock.lastCall![0].toString();
+          expect(JSON.parse(frame)).toMatchObject({
+            seq: prior + 1,
+            payload: { session: { key: root, sharingRole: audience.role }, ancestorSessions: [] },
+          });
+          golden.set(`${audience.role}-${prior}`, frame);
+          connection.clients.delete(peer.client);
+        }
+      }
+      using planning = vi.spyOn(ConnectionSessionRows.prototype, "prepareDelivery");
+      connection.broadcast(
+        "sessions.changed",
+        { sessionKey: root, agentId: "main", reason: "send" },
+        { sessionSubscriptionVerified: true },
+      );
+      const rootPlans = planning.mock.calls.length;
+      planning.mockRestore();
+      for (const peer of peers) {
+        expect(peer.send).toHaveBeenCalledTimes(peer.prior + 1);
+        expect(peer.send.mock.lastCall![0].toString()).toBe(
+          golden.get(`${peer.audience.role}-${peer.prior}`),
+        );
+      }
+      for (const peer of filtered) {
+        expect(peer.send).toHaveBeenCalledTimes(peer.prior);
+      }
+      for (const peer of peers) {
+        const originalAncestor = JSON.parse(peer.send.mock.calls[0]![0]).payload
+          .ancestorSessions[0];
+        publishOne(child, peer.client.connId);
+        expect(JSON.parse(peer.send.mock.lastCall![0]).payload).toMatchObject({
+          ancestorSessions: [],
+          ancestorSessionRefs: [{ key: parent, revision: originalAncestor.ancestorRevision }],
+        });
+      }
+      // Legacy roots use neither wire-row versions nor retained ancestor certificates.
+      expect(rootPlans).toBe(profiles.length);
+    } finally {
+      detach();
+      await connection.mentionInbox.dispose();
+      projection.dispose();
+    }
+  });
+});
 
 it("preserves shared ancestor references across staggered roster reads and first admission", async () => {
   await withOpenClawTestState({ scenario: "minimal", prepareProfileCatalog: true }, async () => {
