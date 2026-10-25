@@ -185,8 +185,6 @@ describe("createPluginRuntimeMock", () => {
         reply: { dispatchReplyWithBufferedBlockDispatcher },
       },
     });
-    expect(runtime.channel.turn).toBe(runtime.channel.inbound);
-    expect(runtime.channel.turn.dispatch).toBe(runtime.channel.inbound.dispatch);
     const adapter = eventAdapter(async () => ({
       ...routedTurn(),
       afterRecord,

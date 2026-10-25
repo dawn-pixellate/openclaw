@@ -695,22 +695,13 @@ export function describeZAIProviderRuntimeContract(load: ProviderRuntimeContract
 
     it("owns Z.AI token-limit overflow classification", () => {
       const provider = getProvider("zai");
-
-      expect(
-        provider.matchesContextOverflowError?.({
-          errorMessage: "code 1210: tokens in request more than max tokens allowed",
-        }),
-      ).toBe(true);
-      expect(
-        provider.matchesContextOverflowError?.({
-          errorMessage: "code 1261: Prompt exceeds max length",
-        }),
-      ).toBe(true);
-      expect(
-        provider.matchesContextOverflowError?.({
-          errorMessage: "code 1210: invalid request parameters",
-        }),
-      ).toBe(false);
+      for (const [errorMessage, expected] of [
+        ["code 1210: tokens in request more than max tokens allowed", true],
+        ["code 1261: Prompt exceeds max length", true],
+        ["code 1210: invalid request parameters", false],
+      ] as const) {
+        expect(provider.matchesContextOverflowError?.({ errorMessage })).toBe(expected);
+      }
     });
 
     it("owns usage auth resolution", async () => {

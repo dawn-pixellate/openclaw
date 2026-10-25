@@ -40,17 +40,25 @@ function setRuntimeAuthStore(store?: AuthProfileStore) {
   );
 }
 
-function setGithubCopilotProfileSnapshot() {
-  setRuntimeAuthStore({
-    version: 1,
-    profiles: {
-      "github-copilot:github": {
-        type: "token",
-        provider: "github-copilot",
-        token: "profile-token",
-      },
-    },
+function setProfile(profileId: string, credential: AuthProfileStore["profiles"][string]) {
+  setRuntimeAuthStore({ version: 1, profiles: { [profileId]: credential } });
+}
+
+function installCatalogFetch(ids: string[]) {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ data: ids.map((id) => ({ id })) })),
+    );
   });
+  afterEach(() => vi.unstubAllGlobals());
+}
+
+function providerConfig(
+  id: string,
+  config: NonNullable<NonNullable<OpenClawConfig["models"]>["providers"]>[string],
+): OpenClawConfig {
+  return { models: { providers: { [id]: config } } };
 }
 
 type ProviderCatalogParams = Parameters<typeof runProviderCatalog>[0];
@@ -136,17 +144,13 @@ async function expectSelfHostedCatalog(
 
 function selfHostedConfig(providerId: string, model: string, baseUrl: string): OpenClawConfig {
   return {
+    ...providerConfig(providerId, {
+      baseUrl,
+      apiKey: providerId.toUpperCase() + "_API_KEY",
+      api: "openai-completions",
+      models: [],
+    }),
     agents: { defaults: { models: { [model]: {} } } },
-    models: {
-      providers: {
-        [providerId]: {
-          baseUrl,
-          apiKey: providerId.toUpperCase() + "_API_KEY",
-          api: "openai-completions",
-          models: [],
-        },
-      },
-    },
   };
 }
 
@@ -254,7 +258,11 @@ export function describeGithubCopilotProviderDiscoveryContract(params: {
     });
 
     it("reports an unavailable profile catalog without replacing inventory", async () => {
-      setGithubCopilotProfileSnapshot();
+      setProfile("github-copilot:github", {
+        type: "token",
+        provider: "github-copilot",
+        token: "profile-token",
+      });
 
       await expect(
         runCatalog({
@@ -371,17 +379,7 @@ export function describeMinimaxProviderDiscoveryContract(
 ) {
   describe("minimax provider discovery contract", () => {
     const getProvider = installDiscoveryHooks({ providerIds: ["minimax", "minimax-portal"], load });
-    beforeEach(() => {
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () =>
-          Response.json({
-            data: [{ id: "MiniMax-M3" }, { id: "MiniMax-M2.7" }, { id: "MiniMax-M2.7-highspeed" }],
-          }),
-        ),
-      );
-    });
-    afterEach(() => vi.unstubAllGlobals());
+    installCatalogFetch(["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"]);
 
     it("keeps API catalog provider-owned", async () => {
       const result = await runCatalog({
@@ -404,17 +402,12 @@ export function describeMinimaxProviderDiscoveryContract(
     });
 
     it("keeps portal oauth marker fallback provider-owned", async () => {
-      setRuntimeAuthStore({
-        version: 1,
-        profiles: {
-          "minimax-portal:default": {
-            type: "oauth",
-            provider: "minimax-portal",
-            access: "access-token",
-            refresh: "refresh-token",
-            expires: Date.now() + 60_000,
-          },
-        },
+      setProfile("minimax-portal:default", {
+        type: "oauth",
+        provider: "minimax-portal",
+        access: "access-token",
+        refresh: "refresh-token",
+        expires: Date.now() + 60_000,
       });
 
       const result = await runCatalog({
@@ -440,17 +433,11 @@ export function describeMinimaxProviderDiscoveryContract(
     it("keeps portal explicit base URL override provider-owned", async () => {
       const result = await runCatalog({
         provider: getProvider("minimax-portal"),
-        config: {
-          models: {
-            providers: {
-              "minimax-portal": {
-                baseUrl: "https://portal-proxy.example.com/anthropic",
-                apiKey: "explicit-key",
-                models: [],
-              },
-            },
-          },
-        },
+        config: providerConfig("minimax-portal", {
+          baseUrl: "https://portal-proxy.example.com/anthropic",
+          apiKey: "explicit-key",
+          models: [],
+        }),
         resolveProviderApiKey: () => ({ apiKey: undefined }),
         resolveProviderAuth: noAuth,
       });
@@ -467,31 +454,15 @@ export function describeModelStudioProviderDiscoveryContract(
 ) {
   describe("modelstudio provider discovery contract", () => {
     const getProvider = installDiscoveryHooks({ providerIds: ["qwen"], load });
-    beforeEach(() => {
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () =>
-          Response.json({
-            data: [{ id: "qwen3.5-plus" }, { id: "qwen3-max-2026-01-23" }, { id: "MiniMax-M2.5" }],
-          }),
-        ),
-      );
-    });
-    afterEach(() => vi.unstubAllGlobals());
+    installCatalogFetch(["qwen3.5-plus", "qwen3-max-2026-01-23", "MiniMax-M2.5"]);
 
     it("keeps catalog provider-owned", async () => {
       const result = await runCatalog({
         provider: getProvider("qwen"),
-        config: {
-          models: {
-            providers: {
-              modelstudio: {
-                baseUrl: "https://coding.dashscope.aliyuncs.com/v1",
-                models: [],
-              },
-            },
-          },
-        },
+        config: providerConfig("modelstudio", {
+          baseUrl: "https://coding.dashscope.aliyuncs.com/v1",
+          models: [],
+        }),
         env: {
           MODELSTUDIO_API_KEY: "modelstudio-key",
         } as NodeJS.ProcessEnv,
@@ -530,23 +501,15 @@ export function describeCloudflareAiGatewayProviderDiscoveryContract(
     });
 
     it("keeps env-managed catalog provider-owned", async () => {
-      setRuntimeAuthStore({
-        version: 1,
-        profiles: {
-          "cloudflare-ai-gateway:default": {
-            type: "api_key",
-            provider: "cloudflare-ai-gateway",
-            keyRef: {
-              source: "env",
-              provider: "default",
-              id: "CLOUDFLARE_AI_GATEWAY_API_KEY",
-            },
-            metadata: {
-              accountId: "acc-123",
-              gatewayId: "gw-456",
-            },
-          },
+      setProfile("cloudflare-ai-gateway:default", {
+        type: "api_key",
+        provider: "cloudflare-ai-gateway",
+        keyRef: {
+          source: "env",
+          provider: "default",
+          id: "CLOUDFLARE_AI_GATEWAY_API_KEY",
         },
+        metadata: { accountId: "acc-123", gatewayId: "gw-456" },
       });
 
       const result = await runCatalog({
