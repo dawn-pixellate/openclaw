@@ -1,4 +1,4 @@
-import { channel } from "node:diagnostics_channel";
+import { channel as createDiagnosticChannel } from "node:diagnostics_channel";
 import {
   BroadcastChannel,
   isMainThread,
@@ -48,7 +48,7 @@ type PoolService = {
   peers: PostgresPoolEndpoint[];
 };
 
-const selfRootDiagnostic = channel("openclaw.postgres.pool.self-root");
+const selfRootDiagnostic = createDiagnosticChannel("openclaw.postgres.pool.self-root");
 const inherited: { postgresPool?: PostgresPoolEndpoints } | null = workerData;
 const state = resolveGlobalSingleton<PoolState>(Symbol.for("openclaw.postgresIoPool"), () => ({
   endpoints: inherited?.postgresPool,
@@ -91,6 +91,8 @@ function startPool(): PostgresPoolEndpoints {
     // Diagnostics cross thread boundaries even for externally constructed plugin workers.
     const diagnostics = new BroadcastChannel("openclaw.postgres.pool.self-root");
     diagnostics.unref();
+    // Node BroadcastChannel has no targetOrigin argument.
+    // oxlint-disable-next-line unicorn/require-post-message-target-origin
     diagnostics.postMessage(event);
     diagnostics.close();
     createSubsystemLogger("postgres").warn(

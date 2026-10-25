@@ -1,7 +1,3 @@
-import {
-  declarePostgresTestRoot,
-  installPostgresTestRootGuard,
-} from "./helpers/postgres-pool-roots.js";
 // Env-only isolation for fast shards that intentionally skip the full shared
 // setup (no module mocks, no custom runner). unit-fast runs isolate:false with
 // auto-curated membership, so without this any test that reads config/state
@@ -9,9 +5,6 @@ import {
 // schema rejects deterministically fails schema-reading tests locally while CI
 // stays green).
 import { installTestEnv } from "./test-env.js";
-
-declarePostgresTestRoot();
-installPostgresTestRootGuard();
 
 process.env.VITEST = "true";
 
@@ -36,3 +29,8 @@ if (!globalState[ENV_ISOLATION_SETUP]) {
   process.once("exit", handle.cleanup);
   globalState[ENV_ISOLATION_SETUP] = handle;
 }
+
+const { declarePostgresTestRoot, installPostgresTestRootGuard } =
+  await import("./helpers/postgres-pool-roots.js");
+declarePostgresTestRoot();
+installPostgresTestRootGuard();

@@ -349,17 +349,20 @@ if (values.mode === "seed") {
       ) {
         continue;
       }
-      const root = roots.get(event.pid);
-      if (!root || event.threadId !== 0 || !event.poolService) {
+      const processRoot = roots.get(event.pid);
+      if (!processRoot || event.threadId !== 0 || !event.poolService) {
         throw new Error(`PostgreSQL service has an undeclared owner: ${JSON.stringify(event)}`);
       }
-      root.physicalServices++;
+      processRoot.physicalServices++;
     }
-    for (const root of roots.values()) {
+    for (const processRoot of roots.values()) {
       // A prestarted schema/broker child may never open PG; any PG-using process owns four.
-      if ((root.kind === "gateway" || root.physicalServices !== 0) && root.physicalServices !== 4) {
+      if (
+        (processRoot.kind === "gateway" || processRoot.physicalServices !== 0) &&
+        processRoot.physicalServices !== 4
+      ) {
         throw new Error(
-          `Expected four PostgreSQL services for ${root.kind} ${root.pid}; got ${root.physicalServices}`,
+          `Expected four PostgreSQL services for ${processRoot.kind} ${processRoot.pid}; got ${processRoot.physicalServices}`,
         );
       }
     }

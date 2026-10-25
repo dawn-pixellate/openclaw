@@ -99,11 +99,11 @@ it("lets an explicitly declared external worker own four services and reports it
   });
   declarePostgresTestRoot(worker.threadId);
   trackNativeWorkerForCpu(worker, url);
-  diagnostics.onmessage = ({ data }) => {
+  diagnostics.addEventListener("message", ({ data }) => {
     if (data.threadId === worker.threadId) {
       reported.resolve(data);
     }
-  };
+  });
   const attached = new Promise<void>((resolve, reject) => {
     worker.on("message", (message: unknown) => {
       if (receiveWorkerMemoryPort(worker, message)) {

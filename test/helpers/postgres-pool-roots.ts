@@ -53,8 +53,9 @@ export function installPostgresTestRootGuard(): void {
   const broadcast = new BroadcastChannel(rootChannel);
   // Keep listening through worker retirement; late undeclared events still fail Vitest.
   broadcast.unref();
-  broadcast.onmessage = ({ data }) =>
-    assertDeclaredPostgresTestRoot(data as { threadId: number; owner: string });
+  broadcast.addEventListener("message", ({ data }) =>
+    assertDeclaredPostgresTestRoot(data as { threadId: number; owner: string }),
+  );
   const diagnostic = channel(rootChannel);
   diagnostic.subscribe((event) =>
     assertDeclaredPostgresTestRoot(event as { threadId: number; owner: string }),
