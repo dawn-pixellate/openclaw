@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeEnv } from "../runtime-api.js";
-import type { MSTeamsConversationStore } from "./conversation-store.js";
 import { createMSTeamsActivityHandler } from "./monitor-handler.js";
 import {
+  createMSTeamsMessageHandlerDeps,
   getMSTeamsTestRuntimeState,
   installMSTeamsTestRuntime,
 } from "./monitor-handler.test-helpers.js";
@@ -23,31 +22,11 @@ function createDeps(): MSTeamsMessageHandlerDeps {
   installMSTeamsTestRuntime();
 
   return {
-    cfg: { channels: { msteams: { dmPolicy: "allowlist", allowFrom: ["user-aad"] } } },
-    runtime: { error: vi.fn() } as unknown as RuntimeEnv,
-    accountId: "default",
+    ...createMSTeamsMessageHandlerDeps({
+      cfg: { channels: { msteams: { dmPolicy: "allowlist", allowFrom: ["user-aad"] } } },
+    }),
     appId: "test-app",
-    app: {} as MSTeamsMessageHandlerDeps["app"],
-    tokenProvider: {
-      getAccessToken: vi.fn(async () => "token"),
-    },
-    textLimit: 4000,
     mediaMaxBytes: 1024 * 1024,
-    conversationStore: {
-      get: vi.fn(async () => null),
-      upsert: vi.fn(async () => undefined),
-      list: vi.fn(async () => []),
-      remove: vi.fn(async () => false),
-      findPreferredDmByUserId: vi.fn(async () => null),
-    } satisfies MSTeamsConversationStore,
-    pollStore: {
-      recordVote: vi.fn(async () => null),
-    } as unknown as MSTeamsMessageHandlerDeps["pollStore"],
-    log: {
-      info: vi.fn(),
-      debug: vi.fn(),
-      error: vi.fn(),
-    } as unknown as MSTeamsMessageHandlerDeps["log"],
   };
 }
 

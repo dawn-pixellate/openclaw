@@ -1,7 +1,4 @@
-import {
-  useAttachmentTestTransport,
-  type AttachmentTestTransport,
-} from "./attachments/transport.test-support.js";
+import { useAttachmentTestTransport } from "./attachments/transport.test-support.js";
 const installAttachmentTestTransport = useAttachmentTestTransport();
 import { resolveRequestUrl } from "openclaw/plugin-sdk/request-url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,7 +18,6 @@ const GRAPH_HOST = "graph.microsoft.com";
 const SHAREPOINT_HOST = "contoso.sharepoint.com";
 const DEFAULT_MESSAGE_URL = `https://${GRAPH_HOST}/v1.0/chats/19%3Achat/messages/123`;
 const GRAPH_SHARES_URL_PREFIX = `https://${GRAPH_HOST}/v1.0/shares/`;
-const DEFAULT_MAX_BYTES = 1024 * 1024;
 const DEFAULT_SHAREPOINT_ALLOW_HOSTS = [GRAPH_HOST, SHAREPOINT_HOST];
 const DEFAULT_SHARE_REFERENCE_URL = `https://${SHAREPOINT_HOST}/site/file`;
 const CONTENT_TYPE_IMAGE_PNG = "image/png";
@@ -57,20 +53,11 @@ const runtimeStub = {
   },
 } as unknown as PluginRuntime;
 
-type DownloadGraphMediaParams = Parameters<typeof downloadGraphMedia>[0] & AttachmentTestTransport;
-
-function downloadMSTeamsGraphMedia({ fetchFn, resolveFn, ...params }: DownloadGraphMediaParams) {
-  installAttachmentTestTransport({ fetchFn, resolveFn });
-  return downloadGraphMedia(params);
-}
-type DownloadGraphMediaOverrides = Partial<
-  Omit<DownloadGraphMediaParams, "messageUrl" | "tokenProvider">
->;
-type GraphFetchMockOptions = {
-  hostedContents?: unknown[];
-  messageAttachments?: unknown[];
+type GraphTestOptions = Partial<Parameters<typeof downloadGraphMedia>[0]> & {
+  hosted?: [id: string, bytes: string];
   onShareRequest?: (url: string) => Response | Promise<Response>;
   onUnhandled?: (url: string) => Response | Promise<Response> | undefined;
+  observe?: (url: string, init?: RequestInit) => void;
 };
 const createTokenProvider = (token = "token") => ({ getAccessToken: vi.fn(async () => token) });
 const resolvePublicHost = async () => ({ address: "93.184.216.34" });
@@ -83,49 +70,52 @@ const createPdfResponse = (payload: Buffer | string = "pdf") =>
 const createJsonResponse = (payload: unknown) => new Response(JSON.stringify(payload));
 const createRedirectResponse = (location: string) =>
   new Response(null, { status: 302, headers: { location } });
-const createHostedImageContents = (...ids: string[]) =>
-  ids.map((id) => ({ id, contentType: CONTENT_TYPE_IMAGE_PNG }));
-const createGraphFetchMock = (options: GraphFetchMockOptions = {}) =>
-  vi.fn(async (input: RequestInfo | URL) => {
+async function download({
+  hosted,
+  onShareRequest,
+  onUnhandled,
+  observe,
+  ...overrides
+}: GraphTestOptions) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = resolveRequestUrl(input);
+    observe?.(url, init);
     if (url === DEFAULT_MESSAGE_URL) {
-      return createJsonResponse({ attachments: options.messageAttachments ?? [] });
+      return createJsonResponse({
+        attachments: onShareRequest
+          ? [
+              {
+                id: "ref-1",
+                contentType: "reference",
+                contentUrl: DEFAULT_SHARE_REFERENCE_URL,
+                name: "report.pdf",
+              },
+            ]
+          : [],
+      });
     }
     if (url === `${DEFAULT_MESSAGE_URL}/hostedContents`) {
-      return createJsonResponse({ value: options.hostedContents ?? [] });
+      return createJsonResponse({
+        value: hosted ? [{ id: hosted[0], contentType: CONTENT_TYPE_IMAGE_PNG }] : [],
+      });
     }
-    if (url.startsWith(GRAPH_SHARES_URL_PREFIX) && options.onShareRequest) {
-      return options.onShareRequest(url);
+    if (hosted && url === `${DEFAULT_MESSAGE_URL}/hostedContents/${hosted[0]}/$value`) {
+      return createBufferResponse(hosted[1], CONTENT_TYPE_IMAGE_PNG);
     }
-    return (await options.onUnhandled?.(url)) ?? new Response("not found", { status: 404 });
+    if (url.startsWith(GRAPH_SHARES_URL_PREFIX) && onShareRequest) {
+      return onShareRequest(url);
+    }
+    return (await onUnhandled?.(url)) ?? new Response("not found", { status: 404 });
   });
-const downloadGraphMediaWithMockOptions = async (
-  options: GraphFetchMockOptions = {},
-  overrides: DownloadGraphMediaOverrides = {},
-) => {
-  const fetchMock = createGraphFetchMock({
-    messageAttachments: options.onShareRequest
-      ? [
-          {
-            id: "ref-1",
-            contentType: "reference",
-            contentUrl: DEFAULT_SHARE_REFERENCE_URL,
-            name: "report.pdf",
-          },
-        ]
-      : [],
-    ...options,
-  });
-  const media = await downloadMSTeamsGraphMedia({
+  installAttachmentTestTransport({ fetchFn: fetchMock, resolveFn: resolvePublicHost });
+  const media = await downloadGraphMedia({
     messageUrl: DEFAULT_MESSAGE_URL,
     tokenProvider: createTokenProvider(),
-    maxBytes: DEFAULT_MAX_BYTES,
-    fetchFn: fetchMock,
-    resolveFn: resolvePublicHost,
+    maxBytes: 1024 * 1024,
     ...overrides,
   });
   return { fetchMock, media };
-};
+}
 
 describe("msteams graph attachments", () => {
   beforeEach(() => {
@@ -135,48 +125,24 @@ describe("msteams graph attachments", () => {
   });
 
   it("merges SharePoint reference attachments with hosted content", async () => {
-    const { media } = await downloadGraphMediaWithMockOptions({
-      hostedContents: createHostedImageContents("hosted-1"),
+    const { media } = await download({
+      hosted: ["hosted-1", "png"],
       onShareRequest: () => createPdfResponse(),
-      onUnhandled: (url) =>
-        url.endsWith("/hostedContents/hosted-1/$value")
-          ? createBufferResponse(PNG_BUFFER, CONTENT_TYPE_IMAGE_PNG)
-          : undefined,
     });
     expect(media.media).toHaveLength(2);
   });
 
   it("does not forward Authorization for SharePoint redirects outside auth allowlist", async () => {
-    const tokenProvider = createTokenProvider("top-secret-token");
     const escapedUrl = "https://example.com/collect";
     const seen: Array<{ url: string; auth: string }> = [];
-    const graphFetch = createGraphFetchMock({
-      messageAttachments: [
-        {
-          id: "ref-1",
-          contentType: "reference",
-          contentUrl: DEFAULT_SHARE_REFERENCE_URL,
-          name: "report.pdf",
-        },
-      ],
+    const { media } = await download({
+      tokenProvider: createTokenProvider("top-secret-token"),
       onShareRequest: () => createRedirectResponse(escapedUrl),
       onUnhandled: (url) => (url === escapedUrl ? createPdfResponse() : undefined),
-    });
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = resolveRequestUrl(input);
-      const auth = new Headers(init?.headers).get("Authorization") ?? "";
-      seen.push({ url, auth });
-      return graphFetch(input);
-    });
-
-    const media = await downloadMSTeamsGraphMedia({
-      messageUrl: DEFAULT_MESSAGE_URL,
-      tokenProvider,
-      maxBytes: DEFAULT_MAX_BYTES,
+      observe: (url, init) =>
+        seen.push({ url, auth: new Headers(init?.headers).get("Authorization") ?? "" }),
       allowHosts: [...DEFAULT_SHAREPOINT_ALLOW_HOSTS, "example.com"],
       authAllowHosts: DEFAULT_SHAREPOINT_ALLOW_HOSTS,
-      fetchFn: fetchMock,
-      resolveFn: resolvePublicHost,
     });
 
     expect(media.media).toHaveLength(1);
@@ -185,16 +151,12 @@ describe("msteams graph attachments", () => {
 
   it("blocks SharePoint redirects to hosts outside allowHosts", async () => {
     const escapedUrl = "https://evil.example/internal.pdf";
-    const { fetchMock, media } = await downloadGraphMediaWithMockOptions(
-      {
-        onShareRequest: () => createRedirectResponse(escapedUrl),
-        onUnhandled: (url) =>
-          url === escapedUrl ? createPdfResponse("should-not-be-fetched") : undefined,
-      },
-      {
-        allowHosts: DEFAULT_SHAREPOINT_ALLOW_HOSTS,
-      },
-    );
+    const { fetchMock, media } = await download({
+      onShareRequest: () => createRedirectResponse(escapedUrl),
+      onUnhandled: (url) =>
+        url === escapedUrl ? createPdfResponse("should-not-be-fetched") : undefined,
+      allowHosts: DEFAULT_SHAREPOINT_ALLOW_HOSTS,
+    });
 
     expect(media.media).toEqual([{ kind: "document", sourceId: "ref-1" }]);
     const calledUrls = fetchMock.mock.calls.map(([input]) => resolveRequestUrl(input));
@@ -202,16 +164,7 @@ describe("msteams graph attachments", () => {
   });
 
   it("enforces maxBytes while streaming hosted content", async () => {
-    const { media } = await downloadGraphMediaWithMockOptions(
-      {
-        hostedContents: createHostedImageContents("hosted-oversized"),
-        onUnhandled: (url) =>
-          url.endsWith("/hostedContents/hosted-oversized/$value")
-            ? createBufferResponse("too large", CONTENT_TYPE_IMAGE_PNG)
-            : undefined,
-      },
-      { maxBytes: 4 },
-    );
+    const { media } = await download({ hosted: ["hosted-oversized", "too large"], maxBytes: 4 });
 
     expect(media.media).toStrictEqual([
       { kind: "image", contentType: "image/png", sourceId: "hosted-oversized" },
