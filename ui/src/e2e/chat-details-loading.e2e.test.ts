@@ -1,5 +1,6 @@
 import { expect, it, onTestFinished } from "vitest";
 import { persistColdLoadWarmState } from "../../../scripts/lib/control-ui-bench-warm-state.ts";
+import { finishElementAnimations } from "../test-helpers/animations.ts";
 import { defaultControlUiFeatureMethods } from "../test-helpers/control-ui-e2e-defaults.ts";
 import { controlUiSessionUrl, installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { closeChatDetails, openChatDetails } from "./chat-details.test-support.ts";
@@ -67,6 +68,8 @@ suite.define(() => {
         const progress = page.locator(".chat-details openclaw-chat-details-progress");
         await progress.getByRole("listitem", { name: "Keep progress stable, paused" }).waitFor();
         await nextPaint(page);
+        await page.locator(".chat-details").evaluate(finishElementAnimations);
+        await nextPaint(page);
         const readOffset = (element: Element) =>
           element.getBoundingClientRect().top -
           element.closest(".chat-details")!.getBoundingClientRect().top;
@@ -114,6 +117,8 @@ suite.define(() => {
         await progress.getByRole("listitem", { name: "Keep progress stable, paused" }).waitFor();
         await nextPaint(page);
         if (roster === "ready") {
+          await details.evaluate(finishElementAnimations);
+          await nextPaint(page);
           expect(await progress.evaluate(readOffset)).toBeCloseTo(settledOffset, 0);
         } else {
           expect(await subagents.count()).toBe(0);
