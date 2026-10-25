@@ -199,12 +199,12 @@ export function createSqliteWorkerLifecycle({
     const postgresPool = createPostgresPoolEndpoints();
     const { worker, exited } = runInDetachedAsyncContext(() => ({
       worker: createCpuTrackedWorker(carrierUrl, {
-        workerData: { postgresPool },
-        transferList: postgresPoolTransferList(postgresPool),
         // V8's default young generation lets each carrier keep ~60 MiB of idle nursery.
         resourceLimits: { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 32 },
         env: resolveNodeCompileCacheEnv(),
         execArgv: resolveRuntimeWorkerThreadExecArgv(carrierUrl),
+        workerData: { postgresPool },
+        transferList: postgresPoolTransferList(postgresPool),
       }),
       exited: createDeferredCore(),
     }));

@@ -88,6 +88,9 @@ export const databaseWorkerCoreTestFiles = [
   "src/infra/database-engine/session-entry-write.conformance.test.ts",
   "src/infra/database-engine/physical-facts.test.ts",
   "src/infra/database-engine/bridge-prestart.test.ts",
+  "src/infra/postgres-sync/bridge-prestart.test.ts",
+  "src/infra/postgres-sync/connection.test.ts",
+  "src/infra/worker-cpu.postgres-bridge.test.ts",
   "src/infra/database-engine/port.test.ts",
   "src/infra/database-engine/offline-auth.postgres.test.ts",
   "src/infra/database-engine/auth-native-load.postgres.test.ts",
@@ -1394,9 +1397,6 @@ export const databaseWorkerCoreTestFiles = [
   "src/infra/database-engine/message-progress-retention.conformance.test.ts",
   "src/infra/database-engine/session-archive-alias.conformance.test.ts",
   "src/infra/database-engine/outcome-surfaces.postgres.test.ts",
-  "src/infra/postgres-sync/bridge-prestart.test.ts",
-  "src/infra/postgres-sync/connection.test.ts",
-  "src/infra/worker-cpu.postgres-bridge.test.ts",
 ];
 
 const databaseWorkerCoreTestFileSet = new Set(databaseWorkerCoreTestFiles);

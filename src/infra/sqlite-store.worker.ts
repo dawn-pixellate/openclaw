@@ -575,6 +575,7 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
     }
   } catch (error) {
     const refusedBeforeAgentOpen = error instanceof SqliteWorkerOpenRefusedError;
+    retire ||= Boolean(postgresPoolWorkerFailure());
     if (openNotEntered || (request.type === "open" && refusedBeforeAgentOpen)) {
       stateContexts.delete(request.actor);
     }
@@ -599,9 +600,7 @@ async function receive(request: SqliteWorkerRequest): Promise<void> {
     reply = {
       id: request.id,
       ok: false,
-      ...(retire || postgresPoolWorkerFailure() || (nativeCleanupFailure && executed)
-        ? { retire: true }
-        : {}),
+      ...(retire || (nativeCleanupFailure && executed) ? { retire: true } : {}),
       ...(refusedBeforeAgentOpen ? { openOutcome: "refused-before-agent-open" } : {}),
       ...(openNotEntered ? { openNotEntered: true } : {}),
       ...(admissionRefused ? { admissionRefused: true } : {}),
