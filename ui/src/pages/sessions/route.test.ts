@@ -11,6 +11,7 @@ async function loadSessionsRoute(
   search: string,
   scopeId: string | null,
   expectedQuery: Partial<SessionListOptions>,
+  cause: RouteLoaderOptions["cause"] = "navigation",
 ) {
   const sessions = { list: vi.fn(), listSnapshot: vi.fn(), refreshList: vi.fn() };
   const context = {
@@ -25,13 +26,15 @@ async function loadSessionsRoute(
     revalidating: false,
     location: { pathname: "/sessions", search, hash: "" },
     deps: "",
-    cause: "navigation",
+    cause,
   };
 
   const data = (await page.loader?.(context, loaderOptions)) as SessionsRouteData;
 
-  for (const request of Object.values(sessions)) {
-    expect(request).not.toHaveBeenCalled();
+  expect(sessions.list).not.toHaveBeenCalled();
+  expect(sessions.listSnapshot).not.toHaveBeenCalled();
+  if (cause !== "preload") {
+    expect(sessions.refreshList).not.toHaveBeenCalled();
   }
   expect(data).toEqual({
     expandedSessionKey: expectedQuery.search ?? null,
@@ -59,6 +62,19 @@ async function loadSessionsRoute(
     includeLastMessage: false,
     ...expectedQuery,
   });
+  if (cause === "preload") {
+    expect(sessions.refreshList).toHaveBeenCalledExactlyOnceWith(
+      buildSessionsListQuery(
+        scopeId,
+        {
+          statusFilter: data.statusFilter,
+          includeGlobal: true,
+          includeUnknown: Boolean(data.expandedSessionKey),
+        },
+        data.expandedSessionKey,
+      ),
+    );
+  }
 }
 
 it.each([
@@ -79,6 +95,17 @@ it.each([
   "prepares sessions route %s in scope %s without issuing outside the page owner",
   loadSessionsRoute,
 );
+
+it("warms the scoped managed window on intent without acquiring page ownership", () =>
+  loadSessionsRoute(
+    "?status=archived",
+    "writer",
+    {
+      archivedFilter: "archived",
+      agentId: "writer",
+    },
+    "preload",
+  ));
 
 it.each([
   {
