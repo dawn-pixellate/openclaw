@@ -105,39 +105,50 @@ describe("channel ingress monitor admission", () => {
     },
   );
 
-  it("does not replay or acknowledge an append with a wrapped unknown native outcome", async () => {
-    const queue = createChannelIngressQueue<StoredEvent>({
-      channelId: "test",
-      stateDir: tempDirs.make("openclaw-ingress-unknown-"),
-    });
-    const unknown = new SqliteWorkerError("Synthetic lost native outcome", "outcome-unknown");
-    const failure = new Error("Synthetic cleanup failure", {
-      cause: new AggregateError([unknown]),
-    });
-    const append = queue.enqueue.bind(queue);
-    let attempted = false;
-    const enqueue = vi.spyOn(queue, "enqueue").mockImplementation(async (...args) => {
-      const result = await append(...args);
-      if (!attempted) {
-        attempted = true;
-        throw failure;
+  it.each(["outcome-unknown", "retryable"] as const)(
+    "settles %s append failure without duplicate acknowledgment",
+    async (kind) => {
+      const queue = createQueue();
+      const failure =
+        kind === "outcome-unknown"
+          ? new Error("cleanup failure", {
+              cause: new AggregateError([new SqliteWorkerError("lost native outcome", kind)]),
+            })
+          : new Error("transient append failure");
+      const append = queue.enqueue.bind(queue);
+      const enqueue = vi
+        .spyOn(queue, "enqueue")
+        .mockImplementationOnce(async (...args) => {
+          if (kind === "outcome-unknown") {
+            await append(...args);
+          }
+          throw failure;
+        })
+        .mockImplementation(append);
+      const admissions: boolean[] = [];
+      const monitor = createMonitor(queue, {
+        appendRetryDelaysMs: kind === "outcome-unknown" ? [0, 0, 0] : [0, 0],
+        onDurableAdmission: (_raw, { isNew }) => {
+          admissions.push(isNew);
+        },
+      });
+      const event = { id: "event", text: "one" };
+      try {
+        if (kind === "outcome-unknown") {
+          await expect(monitor.admit(event)).rejects.toBe(failure);
+          expect(enqueue).toHaveBeenCalledOnce();
+        } else {
+          await monitor.admit(event);
+          await monitor.admit(event);
+          expect(enqueue).toHaveBeenCalledTimes(3);
+        }
+        expect(admissions).toEqual(kind === "outcome-unknown" ? [] : [true, false]);
+        expect((await queue.listPending()).map((row) => row.id)).toEqual(["event"]);
+      } finally {
+        await monitor.stop();
       }
-      return result;
-    });
-    const acknowledged = vi.fn();
-    const monitor = createMonitor(queue, {
-      onDurableAdmission: acknowledged,
-      appendRetryDelaysMs: [0, 0, 0],
-    });
-    try {
-      await expect(monitor.admit({ id: "unknown", text: "one" })).rejects.toBe(failure);
-      expect(enqueue).toHaveBeenCalledOnce();
-      expect(acknowledged).not.toHaveBeenCalled();
-      expect((await queue.listPending()).map((row) => row.id)).toEqual(["unknown"]);
-    } finally {
-      await monitor.stop();
-    }
-  });
+    },
+  );
 
   it("keeps delayed inspection in FIFO admission and joins it on stop", async () => {
     const queue = createQueue();
@@ -182,140 +193,70 @@ describe("channel ingress monitor admission", () => {
     expect(admissions).toEqual(["first", "second"]);
     expect(stopped).toBe(true);
   });
-
-  it("retries a known append failure and reports whether each admission inserted a new row", async () => {
-    const queue = createQueue();
-    const append = queue.enqueue.bind(queue);
-    const enqueue = vi
-      .spyOn(queue, "enqueue")
-      .mockRejectedValueOnce(new Error("Synthetic transient append failure"))
-      .mockImplementation(append);
-    const admissions: boolean[] = [];
-    const monitor = createMonitor(queue, {
-      pollIntervalMs: 10,
-      appendRetryDelaysMs: [0, 0],
-      onDurableAdmission: (_raw, { isNew }) => {
-        admissions.push(isNew);
-      },
-    });
-
-    try {
-      await monitor.admit({ id: "event-one", text: "hello" });
-      await monitor.admit({ id: "event-one", text: "hello" });
-      expect(admissions).toEqual([true, false]);
-      expect(enqueue).toHaveBeenCalledTimes(3);
-    } finally {
-      await monitor.stop();
-    }
-  });
 });
 
 describe("channel ingress monitor asynchronous inspection", () => {
   it.each([
-    { cancel: "stop", waitForDeliveryIdleOnStop: false },
-    { cancel: "abort", waitForDeliveryIdleOnStop: true },
-  ])(
-    "joins claim inspection after $cancel with delivery join=$waitForDeliveryIdleOnStop",
-    async ({ cancel, waitForDeliveryIdleOnStop }) => {
-      const queue = createQueue();
-      const { release, entered, inspectAsync } = holdClaimInspection();
-      const controller = new AbortController();
-      const deliver = vi.fn();
-      const monitor = createMonitor(queue, {
-        inspectAsync,
-        deliver,
-        abortSignal: controller.signal,
-        waitForDeliveryIdleOnStop,
-      });
-      await monitor.admit({ id: "delayed", lane: "a" });
-      monitor.start();
-      await entered.promise;
-      if (cancel === "abort") {
-        controller.abort();
-      }
-      let stopped = false;
-      const stopping = monitor.stop().then(() => {
-        stopped = true;
-      });
-      try {
-        await monitor.waitForPumpIdle();
-        await new Promise<void>((resolve) => {
-          setImmediate(resolve);
-        });
-        expect(stopped).toBe(false);
-        expect(deliver).not.toHaveBeenCalled();
-      } finally {
-        release.resolve();
-        await stopping;
-        await monitor.waitForIdle();
-      }
-      expect(stopped).toBe(true);
-      expect(deliver).not.toHaveBeenCalled();
-    },
-  );
-
-  it("joins pending inspection after the watchdog retires its claim", async () => {
+    ["stop", false],
+    ["abort", true],
+    ["watchdog", undefined],
+    ["deliver", undefined],
+  ] as const)("joins held claim inspection through %s", async (mode, waitForDeliveryIdleOnStop) => {
     const queue = createQueue();
     const { release, entered, inspectAsync } = holdClaimInspection();
-    const deliver = vi.fn();
+    const controller = new AbortController();
+    const activity: boolean[] = [];
+    const deliver = vi.fn(() => {
+      if (mode === "deliver") {
+        expect(activity).not.toContain(false);
+      }
+    });
     const monitor = createMonitor(queue, {
       inspectAsync,
       deliver,
-      drain: { startLimit: 1, adoptionStallTimeoutMs: 10 },
+      abortSignal: controller.signal,
+      waitForDeliveryIdleOnStop,
+      onActivityChange: (active) => activity.push(active),
+      ...(mode === "watchdog" ? { drain: { startLimit: 1, adoptionStallTimeoutMs: 10 } } : {}),
     });
-    await monitor.admit({ id: "watchdog", lane: "a" });
+    await monitor.admit({ id: "held", lane: "a" });
     monitor.start();
     await entered.promise;
-    let idle = false;
-    let waiting: Promise<void> | undefined;
-    try {
+    if (mode === "abort") {
+      controller.abort();
+    }
+    if (mode === "watchdog") {
       await vi.waitFor(async () => expect(await queue.listClaims()).toEqual([]));
-      waiting = monitor.waitForIdle().then(() => {
-        idle = true;
-      });
+    }
+    let settled = false;
+    const waiting = (
+      mode === "stop" || mode === "abort" ? monitor.stop() : monitor.waitForIdle()
+    ).then(() => {
+      settled = true;
+    });
+    try {
       await monitor.waitForPumpIdle();
       await new Promise<void>((resolve) => {
         setImmediate(resolve);
       });
-      expect(idle).toBe(false);
+      expect(settled).toBe(false);
       expect(deliver).not.toHaveBeenCalled();
-    } finally {
-      release.resolve();
-      const stopping = monitor.stop();
-      await waiting;
-      await stopping;
-    }
-    expect(idle).toBe(true);
-    expect(deliver).not.toHaveBeenCalled();
-  });
-
-  it("reports busy through inspection until delivery", async () => {
-    const queue = createQueue();
-    const { release, entered, inspectAsync } = holdClaimInspection();
-    const activity: boolean[] = [];
-    const deliver = vi.fn(() => {
-      expect(activity).not.toContain(false);
-    });
-    const monitor = createMonitor(queue, {
-      inspectAsync,
-      deliver,
-      onActivityChange: (active) => {
-        activity.push(active);
-      },
-    });
-    await monitor.admit({ id: "activity", lane: "a" });
-    monitor.start();
-    await entered.promise;
-    try {
-      await monitor.waitForPumpIdle();
-      expect(activity.at(-1)).toBe(true);
-      release.resolve();
-      await monitor.waitForIdle();
-      expect(activity.at(-1)).toBe(false);
-      expect(deliver).toHaveBeenCalledOnce();
+      if (mode === "deliver") {
+        expect(activity.at(-1)).toBe(true);
+        release.resolve();
+        await waiting;
+        expect(activity.at(-1)).toBe(false);
+        expect(deliver).toHaveBeenCalledOnce();
+      }
     } finally {
       release.resolve();
       await monitor.stop();
+      await waiting;
+      await monitor.waitForIdle();
+    }
+    expect(settled).toBe(true);
+    if (mode !== "deliver") {
+      expect(deliver).not.toHaveBeenCalled();
     }
   });
 
