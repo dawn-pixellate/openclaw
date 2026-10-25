@@ -1,4 +1,5 @@
 import { channel } from "node:diagnostics_channel";
+import { isInt32Array, isSharedArrayBuffer } from "node:util/types";
 import {
   BroadcastChannel,
   getEnvironmentData,
@@ -9,9 +10,10 @@ import {
 const declarationKey = "openclaw.test.postgresPoolRoots";
 const rootChannel = "openclaw.postgres.pool.self-root";
 const inherited: unknown = getEnvironmentData(declarationKey);
+// jsdom supplies different constructors; native brands preserve the shared registry.
 if (
   inherited !== undefined &&
-  (!(inherited instanceof Int32Array) || !(inherited.buffer instanceof SharedArrayBuffer))
+  (!isInt32Array(inherited) || !isSharedArrayBuffer(inherited.buffer))
 ) {
   throw new Error("Invalid PostgreSQL test root declaration registry");
 }
