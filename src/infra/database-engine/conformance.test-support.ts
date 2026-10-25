@@ -1,8 +1,5 @@
 import { Worker } from "node:worker_threads";
-import {
-  declarePostgresTestRoot,
-  installPostgresTestRootGuard,
-} from "../../../test/helpers/postgres-pool-roots.js";
+import { installPostgresTestRootGuard } from "../../../test/helpers/postgres-pool-roots.js";
 import { openNodeSqliteDatabase } from "../node-sqlite.js";
 import {
   createPostgresPoolEndpoints,
@@ -32,7 +29,6 @@ export function createConformanceWorker(
     workerData: { ...data, postgresPool },
     transferList: postgresPoolTransferList(postgresPool),
   });
-  declarePostgresTestRoot(worker.threadId);
   return worker;
 }
 
