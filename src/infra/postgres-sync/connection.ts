@@ -316,7 +316,6 @@ export class PostgresSyncConnection implements PostgresSqlConnection {
             requestId: this.requestId,
           });
           retained = true;
-          return;
         }
       } else {
         this.request({ operation: "close" });

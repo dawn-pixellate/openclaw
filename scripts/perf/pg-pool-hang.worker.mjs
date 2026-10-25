@@ -2,6 +2,8 @@
 import { workerData } from "node:worker_threads";
 import pg from "pg";
 
+// Capture the driver method; Reflect.apply below preserves each client's receiver.
+// oxlint-disable-next-line typescript/unbound-method
 const query = pg.Client.prototype.query;
 pg.Client.prototype.query = function (...args) {
   if (args[0] === "SELECT 424242 AS pg_pool_service_hang") {

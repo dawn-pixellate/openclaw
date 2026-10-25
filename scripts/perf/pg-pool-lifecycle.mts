@@ -85,11 +85,11 @@ function transferredWorker(depth: number) {
     });
   });
 }
-function open(schema = "public", options?: { statementTimeoutMs: number }) {
+function open(namespace = "public", options?: { statementTimeoutMs: number }) {
   const anchor = openNodeSqliteDatabase(":memory:");
   try {
     const db = withEngineStoreAdmission(
-      () => new PostgresSyncConnection(dsn!, schema, anchor, randomUUID(), options),
+      () => new PostgresSyncConnection(dsn!, namespace, anchor, randomUUID(), options),
     );
     return {
       db,
@@ -115,9 +115,13 @@ async function waitMessage(worker: Worker) {
 async function faultWorker(index = 0, extra: Omit<Fault, "kind" | "port"> = {}) {
   const endpoints = withDatabaseEngineSelection(selection, () => createPostgresPoolEndpoints());
   assert.ok(endpoints);
-  const port = endpoints.services[index].port;
+  const service = endpoints.services[index];
+  assert.ok(service);
+  const port = service.port;
   for (const [i, endpoint] of endpoints.services.entries()) {
-    if (i !== index) endpoint.port.close();
+    if (i !== index) {
+      endpoint.port.close();
+    }
   }
   const worker = spawnWorker({ kind: "fault", port, ...extra }, [port]);
   assert.equal(await waitMessage(worker), "ready");
@@ -126,9 +130,13 @@ async function faultWorker(index = 0, extra: Omit<Fault, "kind" | "port"> = {}) 
 function poolSnapshot() {
   const endpoints = withDatabaseEngineSelection(selection, () => createPostgresPoolEndpoints());
   assert.ok(endpoints);
-  for (const endpoint of endpoints.services) endpoint.port.close();
+  for (const endpoint of endpoints.services) {
+    endpoint.port.close();
+  }
+  const service = endpoints.services.at(0);
+  assert.ok(service);
   return {
-    signal: new Int32Array(endpoints.services[0].signal),
+    signal: new Int32Array(service.signal),
     allocations: new Uint32Array(endpoints.allocation),
   };
 }
@@ -247,13 +255,13 @@ if (child?.kind === "transfer") {
       await nested.terminate();
     }
   }
-  parentPort!.postMessage({ depth: child.depth, direct: true });
+  parentPort!.postMessage({ depth: child.depth, direct: true }, []);
   parentPort!.close();
 } else if (child?.kind === "fault") {
   const control = child.started ? new Int32Array(child.started) : undefined;
   const client = child.index ? new Client({ connectionString: dsn }) : undefined;
   await client?.connect();
-  parentPort!.postMessage("ready");
+  parentPort!.postMessage("ready", []);
   if (client) {
     const deadline = performance.now() + 30_000;
     for (;;) {
@@ -261,7 +269,9 @@ if (child?.kind === "transfer") {
         "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND query LIKE $1) AS ready",
         [`%${child.index}%`],
       );
-      if (result.rows[0].ready === true) break;
+      if (result.rows[0].ready === true) {
+        break;
+      }
       assert.ok(
         performance.now() < deadline,
         "Migration did not reach the first index before crash",
@@ -275,10 +285,10 @@ if (child?.kind === "transfer") {
   }
   // Corrupt the private setup channel to force an actual unhandled service failure,
   // without adding a production fault-injection API or replacing the bridge worker.
-  child.port.postMessage({ connection: null });
+  child.port.postMessage({ connection: null }, []);
   child.port.close();
   await client?.end();
-  parentPort!.postMessage("crashed");
+  parentPort!.postMessage("crashed", []);
   parentPort!.close();
 } else if (child?.kind === "task") {
   const { serveWorkerTasks } = await import("../../src/infra/worker-task-server.js");
@@ -286,7 +296,9 @@ if (child?.kind === "transfer") {
     (input) => {
       const current = open();
       try {
-        if (input.sleep) current.db.query(`SELECT pg_sleep(30) /* ${input.marker} */`);
+        if (input.sleep) {
+          current.db.query(`SELECT pg_sleep(30) /* ${input.marker} */`);
+        }
         check(current.db);
         return { ok: true };
       } catch {
@@ -414,7 +426,9 @@ if (child?.kind === "transfer") {
         milliseconds >= 119_000 && milliseconds < 121_000,
         "Unanswered query must use the existing 120s deadline",
       );
-      if (mode === "service-hang") assert.equal(Atomics.load(new Int32Array(entered), 0), 1);
+      if (mode === "service-hang") {
+        assert.equal(Atomics.load(new Int32Array(entered), 0), 1);
+      }
       report({
         mainBlocked: true,
         serviceEventLoopHung: mode === "service-hang",
@@ -466,7 +480,7 @@ if (child?.kind === "transfer") {
   } else if (mode === "migration") {
     const root = process.env.TMPDIR;
     assert.ok(
-      root?.includes("/dbasync-campaign/tmp/pgfootprint"),
+      root && root.includes("/dbasync-campaign/tmp/pgfootprint"),
       "Use the lane's internal TMPDIR",
     );
     const fixtureRoot = path.join(root, `pool-lifecycle-${randomUUID()}`);
@@ -536,7 +550,7 @@ if (child?.kind === "transfer") {
         ),
       );
       await delay(25);
-      for (let index = 0; index < 4; index++) {
+      for (let attempt = 0; attempt < 4; attempt++) {
         assert.deepEqual(
           await withDatabaseEngineSelection(selection, () =>
             pool.run({ sleep: false }, { timeoutMs: 60_000 }),
@@ -562,7 +576,7 @@ if (child?.kind === "transfer") {
       await import("../../src/infra/bun-sqlite-library.js");
     await initializeSqliteRuntimeCapabilities();
     const root = process.env.TMPDIR;
-    assert.ok(root?.includes("/dbasync-campaign/tmp/pgfootprint"));
+    assert.ok(root && root.includes("/dbasync-campaign/tmp/pgfootprint"));
     const fixtureRoot = path.join(root, `pool-lifecycle-${randomUUID()}`);
     mkdirSync(fixtureRoot);
     const broker = new SqliteWorkerBroker();
@@ -571,7 +585,7 @@ if (child?.kind === "transfer") {
       // No installed config at the SQLite-only open: the later PG config arrives
       // at an existing carrier, as it does during offline initialization.
       const selected = sqliteOnly ? undefined : selection;
-      const open = () =>
+      const openStore = () =>
         broker.open<PoolFixtureOperations>(
           {
             moduleUrl: new URL("./pg-pool-broker.fixture.mts", self),
@@ -585,7 +599,9 @@ if (child?.kind === "transfer") {
           undefined,
           { sharedState: true },
         );
-      const store = await (selected ? withDatabaseEngineSelection(selected, open) : open());
+      const store = await (selected
+        ? withDatabaseEngineSelection(selected, openStore)
+        : openStore());
       assert.ok(store);
       stores.push(store);
       return store;
@@ -606,7 +622,7 @@ if (child?.kind === "transfer") {
         postgres.execute({ type: "query", input: { sleep: true, marker: index } }),
         /outcome unknown/,
       );
-      for (let index = 0; index < 4; index++) {
+      for (let attempt = 0; attempt < 4; attempt++) {
         const fresh = await openBroker();
         const result = await fresh.execute({ type: "query", input: {} });
         assert.equal(result.postgres, true);

@@ -40,6 +40,8 @@ afterEach(async () => {
 });
 
 function observeConnections() {
+  // Capture the native method; Reflect.apply below preserves each port's receiver.
+  // oxlint-disable-next-line typescript/unbound-method
   const post = MessagePort.prototype.postMessage;
   vi.spyOn(MessagePort.prototype, "postMessage").mockImplementation(function (
     this: MessagePort,

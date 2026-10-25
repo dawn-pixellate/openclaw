@@ -13,8 +13,8 @@ import type {
   PostgresErrorData,
 } from "./protocol.js";
 
-const { host, signal, peers }: PostgresPoolWorkerData = workerData;
-const service = new Int32Array(signal);
+const { host: serviceHost, signal: serviceSignal, peers }: PostgresPoolWorkerData = workerData;
+const service = new Int32Array(serviceSignal);
 function watchPeer({ port, signal }: PostgresPoolEndpoint) {
   port.on("close", () => {
     const peer = new Int32Array(signal);
@@ -214,5 +214,5 @@ function attachConnection(data: BridgeWorkerData, clients: Set<() => void>) {
     void handleRequest(request);
   });
 }
-attachHost(host);
-parentPort?.postMessage({ poolReady: true });
+attachHost(serviceHost);
+parentPort?.postMessage({ poolReady: true }, []);

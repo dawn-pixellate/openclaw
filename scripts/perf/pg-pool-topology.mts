@@ -2,6 +2,7 @@
 // Node: node --import ./scripts/tsx.mjs /path/to/pg-pool-topology.mts --cell same-service
 // Bun: bun /path/to/pg-pool-topology.mts --cell all-saturated
 // PGFOOTPRINT_DSN must point at an owned, synthetic, loopback PostgreSQL server.
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, writeFileSync } from "node:fs";
@@ -76,7 +77,7 @@ const selection: DatabaseEngineSelection = {
 };
 
 function quantiles(samples: number[]) {
-  const sorted = [...samples].sort((a, b) => a - b);
+  const sorted = samples.toSorted((a, b) => a - b);
   const at = (fraction: number) =>
     sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)] ?? null;
   return {
@@ -116,20 +117,29 @@ if (!isMainThread) {
           connections.push(connection);
           if (index === 0) {
             connection.prepare("SELECT 1 AS ok").get();
-            parentPort!.postMessage({
-              firstRequest: true,
-              client: data.client,
-              milliseconds: performance.now() - started,
-            });
+            parentPort!.postMessage(
+              {
+                firstRequest: true,
+                client: data.client,
+                milliseconds: performance.now() - started,
+              },
+              [],
+            );
           }
         }
-        parentPort!.postMessage({ id: request.id, result: { counters: bridgeCounters() } });
+        parentPort!.postMessage({ id: request.id, result: { counters: bridgeCounters() } }, []);
       } else if (request.operation === "warm") {
-        for (let sample = 0; sample < 5; sample++) connections[0].prepare("SELECT 1 AS ok").get();
-        parentPort!.postMessage({ id: request.id, result: null });
+        const primary = connections.at(0);
+        assert.ok(primary);
+        for (let sample = 0; sample < 5; sample++) {
+          primary.prepare("SELECT 1 AS ok").get();
+        }
+        parentPort!.postMessage({ id: request.id, result: null }, []);
       } else if (request.operation === "measure") {
         const gate = new Int32Array(request.gate);
-        const statement = connections[0].prepare(request.sql);
+        const primary = connections.at(0);
+        assert.ok(primary);
+        const statement = primary.prepare(request.sql);
         Atomics.add(gate, 0, 1);
         Atomics.notify(gate, 0);
         Atomics.wait(gate, 1, 0);
@@ -143,34 +153,41 @@ if (!isMainThread) {
           statement.all();
           latencies.push(performance.now() - started);
         }
-        parentPort!.postMessage({
-          id: request.id,
-          result: {
-            client: data.client,
-            role: request.role,
-            latencyMs: quantiles(latencies),
-            queryCalls: latencies.length,
-            hostCpu: process.threadCpuUsage(cpuStart),
+        parentPort!.postMessage(
+          {
+            id: request.id,
+            result: {
+              client: data.client,
+              role: request.role,
+              latencyMs: quantiles(latencies),
+              queryCalls: latencies.length,
+              hostCpu: process.threadCpuUsage(cpuStart),
+            },
           },
-        });
+          [],
+        );
       } else {
-        for (const connection of connections) connection.close();
-        for (const anchor of anchors) anchor.close();
+        for (const connection of connections) {
+          connection.close();
+        }
+        for (const anchor of anchors) {
+          anchor.close();
+        }
         void pool?.closePostgresPool().then(() => {
-          parentPort!.postMessage({ id: request.id, result: null });
+          parentPort!.postMessage({ id: request.id, result: null }, []);
           parentPort!.close();
         });
         if (!pool) {
-          parentPort!.postMessage({ id: request.id, result: null });
+          parentPort!.postMessage({ id: request.id, result: null }, []);
           parentPort!.close();
         }
       }
     } catch {
       // Never copy PostgreSQL errors, DSNs, bound values, or result rows to reports.
-      parentPort!.postMessage({ id: request.id, failed: true });
+      parentPort!.postMessage({ id: request.id, failed: true }, []);
     }
   });
-  parentPort!.postMessage({ ready: true });
+  parentPort!.postMessage({ ready: true }, []);
 } else {
   const { values } = parseArgs({
     options: {
@@ -194,11 +211,14 @@ if (!isMainThread) {
     idleMs < 0 ||
     !Number.isFinite(durationMs) ||
     durationMs < 1000
-  )
+  ) {
     throw new Error(
       "Use --cell idle|ordinary-four|same-service|all-saturated, --kind slow|large, --output",
     );
-  if (process.env.NODE_OPTIONS) throw new Error("Run observer-free: unset NODE_OPTIONS");
+  }
+  if (process.env.NODE_OPTIONS) {
+    throw new Error("Run observer-free: unset NODE_OPTIONS");
+  }
   const activeClients = cell === "same-service" || cell === "ordinary-four" ? 4 : 20;
   const fillers = cell === "same-service" ? 3 : 0;
   const backgroundClients = cell === "idle" ? 0 : cell === "all-saturated" ? 4 : 1;
@@ -214,7 +234,9 @@ if (!isMainThread) {
   const pending = new Set<(error: Error) => void>();
   const fail = () => {
     failure ??= new Error("Synthetic production topology operation failed");
-    for (const reject of pending) reject(failure);
+    for (const reject of pending) {
+      reject(failure);
+    }
     pending.clear();
   };
   const phase = () => ({ cpu: process.cpuUsage(), mainCpu: process.threadCpuUsage() });
@@ -251,58 +273,73 @@ if (!isMainThread) {
           if (message.ready) {
             pending.delete(reject);
             resolve();
-          } else if (message.firstRequest)
+          } else if (message.firstRequest) {
             firstRequestMs.push({ client: message.client, milliseconds: message.milliseconds });
-          else {
+          } else {
             const request = requests.get(message.id);
-            if (!request) return;
+            if (!request) {
+              return;
+            }
             pending.delete(request.reject);
             requests.delete(message.id);
-            if (message.failed)
+            if (message.failed) {
               request.reject(new Error("Synthetic production topology query failed"));
-            else request.resolve(message.result);
+            } else {
+              request.resolve(message.result);
+            }
           }
         });
       });
       worker.on("error", fail);
       worker.on("exit", () => {
-        if (!closing) fail();
+        if (!closing) {
+          fail();
+        }
       });
       workers.push(worker);
-      endpoints.push({
+      const endpoint = {
         request(operation, extra = {}) {
-          if (failure) return Promise.reject(failure);
+          if (failure) {
+            return Promise.reject(failure);
+          }
           return new Promise((resolve, reject) => {
             const id = ++nextId;
             requests.set(id, { resolve, reject });
             pending.add(reject);
-            worker.postMessage({ ...extra, operation, id });
+            worker.postMessage({ ...extra, operation, id }, []);
           });
         },
-      });
+      } satisfies (typeof endpoints)[number];
+      endpoints.push(endpoint);
       await ready;
       // Sequential connection admission fixes placement: same-service primaries
       // occupy ordinals 0,4,8,12 with the real, unmodified round-robin allocator.
-      const opened = (await endpoints[client].request("open")) as { counters: Counter[] };
-      for (const counter of opened.counters) counters.set(counter.threadId, counter.count);
+      const opened = (await endpoint.request("open")) as { counters: Counter[] };
+      for (const counter of opened.counters) {
+        counters.set(counter.threadId, counter.count);
+      }
     }
-    for (const counter of bridgeCounters()) counters.set(counter.threadId, counter.count);
+    for (const counter of bridgeCounters()) {
+      counters.set(counter.threadId, counter.count);
+    }
     const startupCpu = delta(initialCpu);
     const readyMs = performance.now() - started;
     const startupBridgeLaunches = [...counters.values()].reduce(
       (sum, count) => sum + Atomics.load(count, 0),
       0,
     );
-    if (startupBridgeLaunches !== (pool ? 4 : activeClients * (fillers + 1)))
+    if (startupBridgeLaunches !== (pool ? 4 : activeClients * (fillers + 1))) {
       throw new Error("Synthetic bridge census did not match the physical topology");
+    }
     await Promise.all(endpoints.map((endpoint) => endpoint.request("warm")));
     await delay(idleMs);
     const backend = await monitor.query<{ count: string }>(
       "SELECT count(*) AS count FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'openclaw-pg-pool-topology'",
     );
-    const databaseBackends = Number(backend.rows[0].count);
-    if (databaseBackends !== activeClients * (fillers + 1))
+    const databaseBackends = Number(backend.rows.at(0)?.count);
+    if (databaseBackends !== activeClients * (fillers + 1)) {
       throw new Error("Synthetic connection census did not match admitted clients");
+    }
     const threads =
       process.platform === "darwin"
         ? execFileSync("ps", ["-M", "-p", String(process.pid), "-o", "pid="], { encoding: "utf8" })
@@ -343,7 +380,9 @@ if (!isMainThread) {
       );
       const complete = Promise.all(running);
       while (Atomics.load(control, 0) !== activeClients) {
-        if (failure) throw failure;
+        if (failure) {
+          throw failure;
+        }
         await delay(1);
       }
       Atomics.store(control, 1, 1);

@@ -36,6 +36,8 @@ const ownValue = (value, key) =>
     : undefined;
 const bridgePorts = new WeakSet();
 const bridgeOperations = new Set(["connect", "close", "release", "recovery-generation", "query"]);
+// Capture the native method; Reflect.apply below preserves each port's receiver.
+// oxlint-disable-next-line typescript/unbound-method
 const nativePortPostMessage = MessagePort.prototype.postMessage;
 MessagePort.prototype.postMessage = function (message, ...args) {
   const connection = ownValue(message, "connection");

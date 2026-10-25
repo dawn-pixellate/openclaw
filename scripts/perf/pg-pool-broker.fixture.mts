@@ -28,7 +28,9 @@ export function createSqliteWorkerBackend(
         assert.match(command.input.marker ?? "", /^[a-f0-9]+$/);
         db!.query(`SELECT pg_sleep(30) /* ${command.input.marker} */`);
       }
-      if (db) assert.equal(db.prepare("SELECT 1 AS ok").get()?.ok, 1);
+      if (db) {
+        assert.equal(db.prepare("SELECT 1 AS ok").get()?.ok, 1);
+      }
       return { worker: threadId, postgres: db !== undefined };
     },
     close() {
