@@ -354,33 +354,25 @@ describe("personal model account CLI over an identified Gateway connection", () 
 
   it.each([
     {
-      run: (port: string, output: ReturnType<typeof runtime>) =>
-        modelsAccountsUpdateDefaultCommand(
-          { port, action: "use", authProfileId: ACCOUNT_ID },
-          output,
-        ),
+      options: { action: "use" as const, authProfileId: ACCOUNT_ID },
       method: "users.selectModelAccount",
       params: { profileId: PROFILE_ID, authProfileId: ACCOUNT_ID },
       note: "Existing sessions keep",
     },
     {
-      run: (port: string, output: ReturnType<typeof runtime>) =>
-        modelsAccountsUpdateDefaultCommand(
-          { port, action: "clear-default", provider: "openai" },
-          output,
-        ),
+      options: { action: "clear-default" as const, provider: "openai" },
       method: "users.unlinkAuthProfile",
       params: { profileId: PROFILE_ID, provider: "openai" },
       note: "Saved credentials and existing session accounts are unchanged",
     },
   ])(
     "binds $method to the authenticated person without changing sessions",
-    async ({ run, method, params, note }) => {
+    async ({ options, method, params, note }) => {
       const output = runtime();
       await withGateway(
         (request) => (request.method === method ? { links: connected.links } : undefined),
         async ({ port, url, requests, connections }) => {
-          await run(port, output);
+          await modelsAccountsUpdateDefaultCommand({ port, ...options }, output);
           expect(requestData(requests)).toEqual([rpc("users.self"), rpc(method, params)]);
           expect(connections).toHaveLength(1);
           expectPersonalContext(output, url);

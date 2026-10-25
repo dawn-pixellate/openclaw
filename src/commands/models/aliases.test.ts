@@ -216,13 +216,13 @@ it.each([{}, { plain: true }])("keeps alias reports on one terminal line (%j)", 
   expect(JSON.parse(runtime.logs[0] ?? "").aliases).toEqual({ [alias]: target });
 });
 
-it("removes every case-colliding alias from an existing config", async () => {
+it("removes every case-colliding user alias even when it shadows a built-in", async () => {
   configureModels({
-    "openai/gpt-5.4-mini": { alias: "Fast" },
-    "openai/gpt-5.6-sol": { alias: "fast" },
+    "openai/gpt-5.4-mini": { alias: "Gpt-Mini" },
+    "openai/gpt-5.6-sol": { alias: "gpt-mini" },
     "anthropic/claude-sonnet-4-6": { alias: "steady" },
   });
-  await modelsAliasesRemoveCommand("FAST", runtime);
+  await modelsAliasesRemoveCommand("GPT-MINI", runtime);
   expect(mocks.replaceConfigFile).toHaveBeenCalledOnce();
   expect(writtenConfig().agents?.defaults?.models).toEqual({
     "openai/gpt-5.4-mini": { alias: undefined },
@@ -248,13 +248,6 @@ it.each([
   expect(mocks.replaceConfigFile).not.toHaveBeenCalled();
 });
 
-it("removes a user alias that shadows a built-in name (user-set wins)", async () => {
-  configureModels({ "openai/gpt-5.4-nano": { alias: "gpt-mini" } });
-  await modelsAliasesRemoveCommand("gpt-mini", runtime);
-  expect(mocks.replaceConfigFile).toHaveBeenCalledOnce();
-  const written = writtenConfig();
-  expect(written.agents?.defaults?.models?.["openai/gpt-5.4-nano"]?.alias).toBeUndefined();
-});
 it("does not make an unlisted model override invalid on a fresh config", async () => {
   const cfg: OpenClawConfig = {};
   configure(cfg);
