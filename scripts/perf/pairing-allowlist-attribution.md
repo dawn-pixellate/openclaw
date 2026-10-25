@@ -56,3 +56,34 @@ change. Runtime MAIN must remain zero and total work must not increase.
 After design approval, the Reef count target is two pairing SELECTs/requests
 per 30-second tick becoming one (four/minute to two/minute). No production
 change or measured saving is claimed by this preregistration.
+
+## Approved cutover and deterministic owner proof
+
+The October 25 design decision approved one invocation-local pairing inventory
+inside the existing Reef friend-manager mutation lock. Reconciliation now owns
+optional candidate surfacing. Both relay listings and fresh surface-phase trust
+snapshots remain; the standalone surfacing method is removed. Every resolved
+removal, including `false`, removes its entry from the local inventory. Current
+one-shot consumption still gates relay acceptance and trust pinning; persisted
+trust revisions and ingress authority remain unchanged.
+
+The accepted edge is that approvals added after the initial inventory read may
+wait until the next 30-second tick. Explicit approval notification reconciles
+fresh. Other manager mutations queue through the second fetch and surfacing.
+
+The empty and pending tick regressions failed on the original two-call lifecycle
+with two pairing reads, then passed with one. Each retains two relay listings.
+All 106 tests in the six affected Reef owner suites passed, including token/trust
+revocation, revision-checked commits, independent relay objects and cancellation
+of either relay fetch. Actual SQLite and PostgreSQL owner probes also passed for
+empty, pending, accepted and revoked-token scenarios; PostgreSQL canonical schema,
+migration and trigger conformance passed with zero unexplained differences.
+
+This proves one fewer invocation of the unchanged pairing SELECT and state-read
+worker request per tick. It does not measure whole-Gateway totals or latency.
+The earlier channel matrix is diagnostic attribution only: 14 completed idle/status
+windows, 13 completed injections and 11 pairing-mode ingress cases; LINE/SMS used
+allowlist policy, Mattermost injection and Zalo readiness failed, and Google Chat
+and Zalo User lacked authentication. Reconnect and active verification were not
+covered. The deterministic-owner proof route applies while the supported
+exact-head Gateway build fix is unmerged; no adapted build is acceptance evidence.
