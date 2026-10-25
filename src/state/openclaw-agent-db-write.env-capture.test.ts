@@ -73,6 +73,7 @@ vi.mock("./openclaw-agent-execution.js", () => ({
 vi.mock("./openclaw-agent-write-admission.js", () => ({
   runOpenClawAgentWriteAdmission: boundary.admit,
 }));
+// mock-isolation: Admission uses the fixture's pending-open cache without real lifecycle state.
 vi.mock("./openclaw-agent-db-lifecycle.js", () => ({
   agentDatabaseLifecycle: boundary.cache,
 }));

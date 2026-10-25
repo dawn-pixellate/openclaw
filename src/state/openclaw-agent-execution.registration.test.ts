@@ -140,6 +140,7 @@ vi.mock("./openclaw-agent-db-lease.js", () => ({
 vi.mock("./openclaw-agent-db-borrower.js", () => ({
   retainAgentDatabase: () => edge.releaseAgent,
 }));
+// mock-isolation: Retirement closes only the synthetic handle; native lifecycle work is forbidden.
 vi.mock("./openclaw-agent-db-lifecycle.js", () => ({
   closeOpenClawAgentDatabaseByPath: edge.nativeClose,
 }));

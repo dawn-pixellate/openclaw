@@ -67,6 +67,7 @@ vi.mock("./openclaw-agent-db-identity.js", () => ({
 }));
 // mock-isolation: Synthetic admission owns the handle; this fixture observes borrow release only.
 vi.mock("./openclaw-agent-db-borrower.js", () => ({ retainAgentDatabase: () => () => {} }));
+// mock-isolation: Synthetic worker resources must not register with the real database lifecycle.
 vi.mock("./openclaw-agent-db-lifecycle.js", () => ({
   registerOpenClawAgentDatabaseAsyncResource: () => () => {},
 }));
