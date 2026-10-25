@@ -180,7 +180,9 @@ it.each(["load", "save", "default"])(
   async (operation) => {
     const storePath = `/synthetic/cron-unavailable-${operation}/jobs.json`;
     const failure = new Error("worker result unavailable");
-    vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation").mockRejectedValue(failure);
+    vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation").mockImplementation(
+      async (_context, execute) => execute({ execute: vi.fn().mockRejectedValue(failure) }),
+    );
     if (operation === "default") {
       noteCronJobsStoreCommit(storePath);
     }
@@ -755,9 +757,15 @@ it.each(["unchanged", "intervening", "evicted before reply", "evicted after repl
   async (change) => {
     const storePath = `/synthetic/cron-save-revision-${change}/jobs.json`;
     const pending = createDeferred<CronStoreSaveWorkerOperations["cron.save"]["output"]>();
+    const admitted = createDeferred<void>();
     vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation").mockImplementation(
       async (_context, operation) =>
-        operation({ execute: vi.fn().mockReturnValue(pending.promise) }),
+        operation({
+          execute: vi.fn().mockImplementation(() => {
+            admitted.resolve();
+            return pending.promise;
+          }),
+        }),
     );
     const evictPartition = () => {
       for (let index = 0; index < 65; index += 1) {
@@ -766,6 +774,7 @@ it.each(["unchanged", "intervening", "evicted before reply", "evicted after repl
     };
     const before = getCronJobsStoreRevision(storePath);
     const save = saveCronJobsStoreWithRevision(storePath, { version: 1, jobs: [] });
+    await admitted.promise;
     if (change !== "unchanged") {
       noteCronJobsStoreCommit(storePath);
     }

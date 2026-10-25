@@ -418,7 +418,8 @@ export async function saveCronJobsStoreWithRevision(
   }
   const context = captureOpenClawStateWorkerContext();
   const { transactionHooks, ...options } = opts ?? {};
-  const input = structuredClone({ store, options });
+  // Native hooks can edit the caller's jobs; only worker-bound saves need a snapshot.
+  const input = transactionHooks ? { store, options } : structuredClone({ store, options });
   const storeKey = await prepareMutableCronStoreKey(storePath, context);
   if (transactionHooks) {
     return saveCronJobsStoreWithRevisionNative(storeKey, input.store, {
