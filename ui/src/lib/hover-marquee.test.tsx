@@ -186,19 +186,6 @@ describe("hover marquee measurement budget", () => {
     expect(label.textContent).toBe("Short");
   });
 
-  it("reads a dense title batch before writing overflow styles", () => {
-    const { clock, labels, operations } = denseTitles(100);
-    reveal(clock);
-    expect(labels.every(overflows)).toBe(true);
-    expect(operations.lastIndexOf("read")).toBeLessThan(operations.indexOf("write"));
-    Object.defineProperty(labels[0]!, "clientWidth", { configurable: true, value: 0 });
-    operations.length = 0;
-    clock.resize(labels[0]!, labels[1]!);
-    expect(overflows(labels[0]!)).toBe(false);
-    expect(overflows(labels[1]!)).toBe(true);
-    expect(operations).toEqual(["read", "write", "write"]);
-  });
-
   it("avoids style resolution at zero width and resumes through the existing resize observer", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const { clock, label, host } = denseTitles();
@@ -247,9 +234,11 @@ describe("hover marquee measurement budget", () => {
     }
   });
 
-  it("skips unchanged titles but refreshes content, class, direction, and viewport changes", async () => {
+  it("batches geometry reads and only remeasures invalidated titles", async () => {
     const { clock, show, labels, operations, host } = denseTitles(100);
     reveal(clock);
+    expect(labels.every(overflows)).toBe(true);
+    expect(operations.lastIndexOf("read")).toBeLessThan(operations.indexOf("write"));
     operations.length = 0;
     for (let index = 0; index < 5; index += 1) {
       show();

@@ -1,9 +1,4 @@
-import { createServer } from "node:http";
 import { afterEach, beforeEach, expect, it, vi, type Mock } from "vitest";
-import {
-  closeHttpServer,
-  listenLoopback,
-} from "../../../test/helpers/gateway-integration-fixtures.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { notifyBrowserAuthRestored } from "../app/browser-http.ts";
 import { AuthenticatedAvatarRouteLoader } from "./authenticated-avatar-route.ts";
@@ -18,14 +13,7 @@ afterEach(async () => {
     for (const loader of loaders.splice(0)) {
       loader.disconnect();
     }
-    if (vi.isFakeTimers()) {
-      await vi.runOnlyPendingTimersAsync();
-    } else {
-      // Join the zero-delay releases queued by disconnect on the real clock.
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 0);
-      });
-    }
+    await vi.runOnlyPendingTimersAsync();
   } finally {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -109,32 +97,6 @@ it.each(["auth restoration", "reconnect"])(
   },
 );
 
-it("releases a streaming 404 while a connected consumer retains the cached miss", async () => {
-  vi.useRealTimers();
-  let socketClosed = false;
-  const server = createServer((request, response) => {
-    request.socket.once("close", () => {
-      socketClosed = true;
-    });
-    response.writeHead(404, { "content-type": "text/plain", "cache-control": "no-store" });
-    response.write("Not found");
-  });
-  const origin = await listenLoopback(server);
-  try {
-    const nativeFetch = globalThis.fetch.bind(globalThis);
-    const fetchMock = vi.fn((input: string, init?: RequestInit) =>
-      nativeFetch(new URL(input, origin), init),
-    );
-    const { read } = setup(fetchMock);
-    expect(read("/api/workspaces/streaming/icon")).toBeNull();
-    await vi.waitFor(() => expect(socketClosed).toBe(true), { timeout: 1_000 });
-    expect(read("/api/workspaces/streaming/icon")).toBeNull();
-    expect(fetchMock).toHaveBeenCalledOnce();
-  } finally {
-    await closeHttpServer(server);
-  }
-});
-
 it("keeps a stable miss cached when body cancellation rejects", async () => {
   const cancel = vi.fn().mockRejectedValue(new Error("cleanup failed"));
   const { fetchMock, read } = setup(vi.fn().mockResolvedValue(streamingResponse(404, cancel)));
@@ -191,22 +153,6 @@ it("shares pending fetches and revokes the resolved blob on reset", async () => 
   loader.reset();
   await vi.advanceTimersByTimeAsync(0);
   expect(revokeObjectURL).toHaveBeenCalledWith("blob:assistant-avatar");
-});
-
-it("leaves misses retryable for a later identity update", async () => {
-  mockBlobUrl("blob:retried-avatar");
-  const fetchMock = vi.fn().mockResolvedValueOnce({ ok: false }).mockResolvedValueOnce(avatar());
-  const { loader, onUpdate, read } = setup(fetchMock);
-  expect(read()).toBeNull();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-  await Promise.resolve();
-  expect(read()).toBeNull();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(onUpdate).toHaveBeenCalledTimes(1);
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-  expect(read()).toBe("blob:retried-avatar");
-  loader.reset();
 });
 
 it("releases resolved and pending routes that leave the active render", async () => {

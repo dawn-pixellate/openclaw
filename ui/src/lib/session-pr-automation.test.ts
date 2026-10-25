@@ -130,17 +130,7 @@ it("creates the selected declarative job and keeps its returned identity", async
   const created = job("autoArchive");
   request.mockResolvedValueOnce({ created: true, job: created });
   expect(await set("autoArchive", true)).toEqual(created);
-  expect(request).toHaveBeenCalledExactlyOnceWith(
-    "cron.add",
-    expect.objectContaining({
-      agentId: "main",
-      sessionKey: target.sessionKey,
-      sessionTarget: "isolated",
-      owner: { agentId: "main", sessionKey: target.sessionKey },
-      enabled: true,
-      payload: { kind: "agentTurn", message: expect.stringContaining(target.sessionId) },
-    }),
-  );
+  expect(request).toHaveBeenCalledExactlyOnceWith("cron.add", jobSpec(target, "autoArchive"));
 });
 
 it.each(["autoFix", "autoMerge"] as const)(
