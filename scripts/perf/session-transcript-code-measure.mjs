@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,6 +92,39 @@ assert(
   !baselineDir || baselineFiles.length,
   "Baseline needs changed files or --baseline-file selections",
 );
+const transformedFiles = { baseline: [], candidate: [] };
+let compiler;
+async function prepareSources(sourceRoot, side) {
+  const directory = path.join(output, `prepared-${side}-source`);
+  for (const file of baselineFiles) {
+    const input = await fs.readFile(path.join(sourceRoot, file), "utf8");
+    let source = input;
+    try {
+      stripTypeScriptTypes(input);
+    } catch (error) {
+      if (error.code !== "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") {
+        throw error;
+      }
+      // Parameter properties need the repository's compiler. Keep it outside measured isolates.
+      compiler ??= await import("esbuild");
+      source = compiler.transformSync(input, {
+        loader: "ts",
+        format: "esm",
+        target: "esnext",
+        sourcefile: path.join(root, file),
+        tsconfigRaw: JSON.parse(await fs.readFile(path.join(root, "tsconfig.json"), "utf8")),
+      }).code;
+      transformedFiles[side].push(file);
+    }
+    await fs.mkdir(path.dirname(path.join(directory, file)), { recursive: true });
+    await fs.writeFile(path.join(directory, file), source);
+  }
+  return directory;
+}
+const preparedBaselineDir = baselineDir ? await prepareSources(baselineDir, "baseline") : undefined;
+const preparedCandidateDir = baselineFiles.length
+  ? await prepareSources(root, "candidate")
+  : undefined;
 const env = {
   PATH: process.env.PATH,
   HOME: path.join(output, "home"),
@@ -198,6 +232,12 @@ const report = {
   baselineRef,
   baselineDir,
   baselineFiles,
+  preparedSources: {
+    baseline: preparedBaselineDir,
+    candidate: preparedCandidateDir,
+    transformedFiles,
+    ...(compiler ? { compiler: `esbuild ${compiler.version}` } : {}),
+  },
   diffSha256: createHash("sha256").update(diff).digest("hex"),
   fixture: {
     sessions: 1,
@@ -238,7 +278,8 @@ for (let sample = 0; sample < samples; sample++) {
             ).href,
             prewarmHistory,
             diagnostics: diagnostics.port2,
-            baselineDir: values.control || side === "baseline" ? baselineDir : undefined,
+            baselineDir:
+              values.control || side === "baseline" ? preparedBaselineDir : preparedCandidateDir,
             baselineFiles,
           },
           transferList: [diagnostics.port2],
