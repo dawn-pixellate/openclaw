@@ -34,6 +34,13 @@ const enApprovals = {
     reviewOnly: en.execApproval.reviewOnly,
     deny: "Deny",
     details: "Details",
+    requestDetails: "Request details",
+    agentRunCommand: "{agent} wants to run a command",
+    agentStartWatcher: "{agent} wants to start “{name}”",
+    agentChangeWatcher: "{agent} wants to change “{name}”",
+    securityFull: "Unrestricted",
+    securityAllowlist: "Allowlist",
+    securityDeny: "Locked",
     labels: {
       host: "Host",
       session: "Session",

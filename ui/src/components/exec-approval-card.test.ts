@@ -145,6 +145,32 @@ describe("exec approval card", () => {
     view.unmount();
   });
 
+  it("identifies the pending command decision and restores actions after an error", async () => {
+    const pending = createDeferred();
+    const onDecision = vi.fn(() => pending.promise);
+    const request = approval({ kind: "exec", request: { command: "echo review" } });
+    const view = mountUpdatingCard(request, { onDecision });
+    const deny = view.getByRole<HTMLButtonElement>("button", { name: "Deny" });
+    const allow = view.getByRole<HTMLButtonElement>("button", { name: "Allow once" });
+    deny.click();
+    await waitForSolid(() => {
+      expect(deny.getAttribute("aria-busy")).toBe("true");
+      expect(deny.disabled).toBe(true);
+      expect(allow.disabled).toBe(true);
+      expect(allow.hasAttribute("aria-busy")).toBe(false);
+    });
+    expect(onDecision).toHaveBeenCalledExactlyOnceWith(request.id, "deny");
+    view.update({ error: "Could not record your decision. Try again." });
+    pending.resolve();
+    await waitForSolid(() => {
+      expect(view.getByRole("alert").textContent).toContain("Could not record your decision");
+      expect(deny.hasAttribute("aria-busy")).toBe(false);
+      expect(deny.disabled).toBe(false);
+      expect(allow.disabled).toBe(false);
+    });
+    view.unmount();
+  });
+
   it("maps plugin error severity to the danger accent", () => {
     const card = renderCard(approval({ pluginSeverity: "error" }));
     expect(card?.classList.contains("exec-approval-card--severity-danger")).toBe(true);
@@ -268,10 +294,9 @@ describe("exec approval card", () => {
           expect(note, surface).toBeDefined();
           expect(note?.closest("details")).toBeNull();
           expect(container.querySelector("script")).toBeNull();
-          expect(actions.map((button) => button.textContent?.trim())).toEqual([
-            "Allow once",
-            "Deny",
-          ]);
+          expect(actions.map((button) => button.textContent?.trim())).toEqual(
+            surface === "inline" ? ["Deny", "Allow once"] : ["Allow once", "Deny"],
+          );
           expect(
             Boolean(
               note &&
@@ -414,13 +439,18 @@ describe("exec approval card", () => {
       }),
       "inline",
     );
-    const details = card?.querySelector<HTMLDetailsElement>(".exec-approval-details");
-    expect(card?.querySelector(".exec-approval-meta")?.textContent).toContain("gateway");
-    expect(card?.querySelector(".exec-approval-meta")?.textContent).toContain("/workspace");
-    expect(details?.open).toBe(false);
+    const details = card?.querySelector(".exec-approval-details");
+    expect(card?.querySelector(".exec-approval-prompt")?.textContent).toContain("gateway");
+    expect(card?.querySelector(".exec-approval-prompt")?.textContent).toContain("/workspace");
+    expect(
+      card?.querySelector('[aria-label="Request details"]')?.getAttribute("aria-expanded"),
+    ).toBe("false");
     expect(details?.textContent).toContain("Resolved");
-    expect(details?.textContent).toContain("Security");
+    expect(details?.textContent).toContain("/usr/bin/pnpm");
     expect(details?.textContent).toContain("Ask");
+    expect(card?.querySelector('[title="Security: allowlist"]')?.textContent).toContain(
+      "Allowlist",
+    );
     expect(card?.querySelector('[data-approval-chip="agent"]')).toBeNull();
     expect(card?.textContent).not.toContain("agent:main:session-1");
   });

@@ -1,5 +1,6 @@
 import type { Page } from "playwright";
 import { expect, it } from "vitest";
+import { waitForControlUiProofSurface } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import { controlUiSessionUrl, installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
@@ -61,6 +62,45 @@ suite.define(() => {
     await inboxPanel.locator('[data-approval-id="approval-other"]').waitFor();
     await expect.poll(() => inboxPanel.locator("[data-approval-id]").count()).toBe(2);
     await inboxPanel.getByRole("tab", { name: "Approvals 2" }).waitFor();
+  });
+
+  it("reviews command details without moving or resolving the pending decision", async () => {
+    const { page, gateway } = await openChat({ sessionKey: activeSessionKey });
+    const request = approval("approval-details", "printf '%s\\n' 'review me'", Date.now());
+    await gateway.emitGatewayEvent("exec.approval.requested", {
+      ...request,
+      request: {
+        ...request.request,
+        host: "gateway",
+        cwd: "/workspace/openclaw",
+        resolvedPath: "/usr/bin/printf",
+        security: "allowlist",
+        ask: "on-miss",
+        warningText: "Review the output destination before running this command.",
+      },
+    });
+    const card = inlineApproval(page, request.id);
+    const allow = card.getByRole("button", { name: "Allow once", exact: true });
+    await allow.waitFor();
+    expect(await card.locator(".exec-approval-command").textContent()).toBe(
+      request.request.command,
+    );
+    await waitForControlUiProofSurface(card, [allow]);
+    const actionsBefore = await card.locator(".exec-approval-actions").boundingBox();
+    await card.getByRole("button", { name: "Request details", exact: true }).click();
+    const details = page.getByRole("dialog", { name: "Request details", exact: true });
+    await details.getByText("/usr/bin/printf", { exact: true }).waitFor();
+    expect(await card.locator(".exec-approval-actions").boundingBox()).toEqual(actionsBefore);
+    expect(await gateway.getRequests("exec.approval.resolve")).toHaveLength(0);
+    await page.keyboard.press("Escape");
+    await details.waitFor({ state: "hidden" });
+    await gateway.deferNext("exec.approval.resolve", { id: request.id });
+    await allow.click();
+    const decision = await gateway.waitForRequest("exec.approval.resolve");
+    expect(decision.params).toEqual({ id: request.id, decision: "allow-once" });
+    await expect.poll(() => allow.isDisabled()).toBe(true);
+    await gateway.resolveDeferred("exec.approval.resolve");
+    await card.waitFor({ state: "detached" });
   });
 
   it("keeps no-auth Inbox approvals readable while blocking decisions", async () => {

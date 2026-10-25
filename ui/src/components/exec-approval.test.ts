@@ -174,7 +174,6 @@ describe("openclaw-exec-approval", () => {
     const actions = card.querySelector(".exec-approval-actions")!;
     const pending = container.querySelector(".exec-approval-list")!;
     expect(card.contains(pending)).toBe(true);
-    expect(card.lastElementChild).toBe(actions);
     expect(
       pending.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
