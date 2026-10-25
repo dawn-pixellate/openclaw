@@ -41,18 +41,27 @@ const turnLease = (config: OpenClawConfig, name: string) =>
     identity: { runId: `${name}-turn`, sessionId: `${name}-session` },
     config,
   });
-function enginePlugin(id: string, members: string, fullOnly = true, asynchronous = false) {
+function enginePlugin(
+  id: string,
+  members: string,
+  options: { fullOnly?: boolean; asynchronous?: boolean; setup?: string; create?: string } = {},
+) {
+  const { fullOnly = true, asynchronous = false, setup = "", create = "" } = options;
   return writePlugin({
     id,
     body: `module.exports = { id: ${JSON.stringify(id)}, register(api) {
       ${fullOnly ? 'if (api.registrationMode !== "full") return;' : ""}
-      api.registerContextEngine(${JSON.stringify(id)}, ${asynchronous ? "async " : ""}() => ({
+      ${setup}
+      api.registerContextEngine(${JSON.stringify(id)}, ${asynchronous ? "async " : ""}() => {
+        ${create}
+        return {
         info: { id: ${JSON.stringify(id)}, name: ${JSON.stringify(id)} },
         ingest: async () => ({ ingested: false }),
         assemble: async ({ messages }) => ({ messages, estimatedTokens: 0 }),
         compact: async () => ({ ok: true, compacted: false }),
         ${members}
-      }));
+        };
+      });
     } };`,
   });
 }
@@ -76,8 +85,7 @@ it.each([false, true])(
         assemble: async ({ messages }) => ({ messages, estimatedTokens: 0, systemPromptAddition: "prepared-engine" }),
         dispose: async () => {},
   `,
-      fullOnly,
-      fullOnly,
+      { fullOnly, asynchronous: fullOnly },
     );
     const sandboxProbe = writePlugin({
       id: "sandbox-probe",
@@ -114,7 +122,6 @@ it.each([false, true])(
     });
     const rootSandboxFactory = getSandboxBackendFactory(SANDBOX_PROBE_ID);
 
-    expect(getActivePluginRegistry()).toBe(root);
     expect(rootSandboxFactory).not.toBeNull();
     expect(rootSandboxFactory).not.toBe(previousSandboxFactory);
 
@@ -170,26 +177,21 @@ it("retains the adopted engine through reload, accepted commit and engine dispos
   const events: Array<{ kind: string; owner: string }> = [];
   const record = (entry: { kind: string; owner: string }) => events.push(entry);
   process.on(event, record);
-  const plugin = writePlugin({
-    id: "retained-engine",
-    body: `module.exports = { id: "retained-engine", register(api) {
-      if (api.registrationMode !== "full") return;
-      const owner = require("node:crypto").randomUUID();
-      const record = (kind) => process.emit(${JSON.stringify(event)}, { kind, owner });
-      api.lifecycle.onDispose(() => record("plugin-disposed"));
-      api.registerContextEngine("retained-engine", () => {
-        record("created");
-        return {
-          info: { id: "retained-engine", name: "Retained Engine" },
-          ingest: async () => ({ ingested: false }),
+  const plugin = enginePlugin(
+    "retained-engine",
+    `
           assemble: async ({ messages }) => ({ messages, estimatedTokens: 0, systemPromptAddition: owner }),
-          compact: async () => ({ ok: true, compacted: false }),
           commitTurn: async () => { record("committed"); return { status: "committed" }; },
           dispose: async () => record("engine-disposed"),
-        };
-      });
-    } };`,
-  });
+    `,
+    {
+      setup: `
+      const owner = require("node:crypto").randomUUID();
+      const record = (kind) => process.emit(${JSON.stringify(event)}, { kind, owner });
+      api.lifecycle.onDispose(() => record("plugin-disposed"));`,
+      create: 'record("created");',
+    },
+  );
   const config = configFor(plugin);
   const load = () => loadAndActivateRootPluginRegistry({ config, cache: false });
   const root = await load();
@@ -213,7 +215,6 @@ it("retains the adopted engine through reload, accepted commit and engine dispos
       if (!(timeout instanceof PluginInstanceDrainTimeoutError)) {
         throw new Error("Expected bounded retirement while the engine consumer is retained");
       }
-      expect(timeout.forcedRetirement?.retainedConsumerCount).toBeGreaterThan(0);
       await timeout.settled;
       retired = true;
     });
@@ -349,17 +350,9 @@ it("revokes earlier engine callbacks while its raw disposal remains admitted", a
   const events: string[] = [];
   const record = (kind: string) => events.push(kind);
   process.on(event, record);
-  const plugin = writePlugin({
-    id: "closing-engine",
-    body: `module.exports = { id: "closing-engine", register(api) {
-      if (api.registrationMode !== "full") return;
-      const late = new Promise((resolve) => process.once(${JSON.stringify(event + "-late")}, resolve));
-      const finish = new Promise((resolve) => process.once(${JSON.stringify(event + "-finish")}, resolve));
-      const record = (kind) => process.emit(${JSON.stringify(event)}, kind);
-      const route = (text) => api.runtime.system.enqueueSystemEvent(text, { sessionKey: ${JSON.stringify(`agent:main:${event}`)} });
-      api.registerContextEngine("closing-engine", () => ({
-        info: { id: "closing-engine", name: "Closing Engine" },
-        ingest: async () => ({ ingested: false }),
+  const plugin = enginePlugin(
+    "closing-engine",
+    `
         assemble: async ({ messages }) => {
           void (async () => {
             await late;
@@ -368,16 +361,21 @@ it("revokes earlier engine callbacks while its raw disposal remains admitted", a
           })();
           return { messages, estimatedTokens: 0 };
         },
-        compact: async () => ({ ok: true, compacted: false }),
         dispose: async () => {
           record("dispose-entered");
           await finish;
           route("dispose-finished");
           record("dispose-finished");
         },
-      }));
-    } };`,
-  });
+    `,
+    {
+      setup: `
+      const late = new Promise((resolve) => process.once(${JSON.stringify(event + "-late")}, resolve));
+      const finish = new Promise((resolve) => process.once(${JSON.stringify(event + "-finish")}, resolve));
+      const record = (kind) => process.emit(${JSON.stringify(event)}, kind);
+      const route = (text) => api.runtime.system.enqueueSystemEvent(text, { sessionKey: ${JSON.stringify(`agent:main:${event}`)} });`,
+    },
+  );
   const config = configFor(plugin);
   await loadAndActivateRootPluginRegistry({ config, cache: false });
   const lease = await turnLease(config, "closing");

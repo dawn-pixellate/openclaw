@@ -2,7 +2,6 @@ import {
   type AssistantMessage,
   AssistantMessageEventStream,
   type Message,
-  type Model,
 } from "openclaw/plugin-sdk/llm";
 import { Type } from "typebox";
 import { expect, it, onTestFinished, vi } from "vitest";
@@ -23,19 +22,17 @@ import { prepareEmbeddedRunTerminal } from "./embedded-agent-runner/run/terminal
 import { createUsageAccumulator } from "./embedded-agent-runner/usage-accumulator.js";
 import { createSubscribedSessionHarness } from "./embedded-agent-subscribe.e2e-harness.js";
 import { makeEmbeddedRunnerAttempt } from "./test-helpers/embedded-agent-runner-e2e-fixtures.js";
+import { makeProviderModelFixture } from "./test-helpers/provider-model-fixture.js";
 
-const model: Model<"openai-responses"> = {
+const model = makeProviderModelFixture<"openai-responses">({
   id: "gpt-6-astra",
-  name: "GPT-6 Astra",
   api: "openai-responses",
   provider: "openai",
   baseUrl: "https://api.openai.com/v1",
   reasoning: true,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   contextWindow: 200000,
   maxTokens: 8192,
-};
+});
 const lookupCall = {
   type: "function_call" as const,
   id: "fc_lookup",
@@ -131,12 +128,14 @@ type Scenario = {
   quiet?: boolean;
   reasoning?: boolean;
 };
+const answer = "Use counter B.";
+const visible = (text: string): Scenario["reply"] => ({ disposition: "visible", text });
 const scenario = (name: string, overrides: Partial<Omit<Scenario, "name">> = {}): Scenario => ({
   name,
   delivery: "deferred",
   requests: [answered, "NO_REPLY"],
-  delivered: ["Use counter B."],
-  reply: { disposition: "visible", text: "Use counter B." },
+  delivered: [answer],
+  reply: visible(answer),
   ...overrides,
 });
 it.each([
@@ -156,7 +155,7 @@ it.each([
       "NO_REPLY",
     ],
     delivered: ["Alpha."],
-    reply: { disposition: "visible", text: "Alpha." },
+    reply: visible("Alpha."),
   }),
   scenario("live blocks of a two-item terminal answer are not resent", {
     delivery: "live",
@@ -164,7 +163,7 @@ it.each([
       [finalAnswer("msg_first", "First part."), finalAnswer("msg_second", "Second part.")],
     ],
     delivered: ["First part.", "Second part."],
-    reply: { disposition: "visible", text: "First part.Second part." },
+    reply: visible("First part.Second part."),
   }),
   scenario("a repeated answer is delivered once", {
     requests: [answered, "Use counter B."],
@@ -276,11 +275,8 @@ it.each([
     {
       model,
       convertToLlm: (history) =>
-        history.filter(
-          (message): message is Message =>
-            message.role === "user" ||
-            message.role === "assistant" ||
-            message.role === "toolResult",
+        history.filter((message): message is Message =>
+          ["user", "assistant", "toolResult"].includes(message.role),
         ),
     },
     async (event) => {
