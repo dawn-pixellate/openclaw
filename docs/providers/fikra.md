@@ -21,7 +21,7 @@ Fikra API is an OpenAI-compatible inference endpoint with pinned DeepSeek builds
 - `deepseek-v4.1-flash`
 - `deepseek-v4-flash-0731`
 
-Read the live limits from `https://api.fikraapi.co.ke/v1/models`. The 1017 build currently exposes 1,048,576 context and 393,216 max output.
+Read the live limits from [`GET /v1/models`](https://api.fikraapi.co.ke/v1/models). The 1017 build currently exposes 1,048,576 context and 393,216 max output.
 
 ## Setup
 
@@ -31,4 +31,4 @@ If your build requires a provider plugin, install the OpenAI-compatible provider
 
 ## Agent accounts
 
-An agent can create a provisional account for a human with `POST https://api.fikraapi.co.ke/v1/agents/accounts`, get a 6-hour delegated token, create a key and top up. See https://fikraapi.co.ke/for-agents.
+An agent can create a provisional account for a human with `POST https://api.fikraapi.co.ke/v1/agents/accounts`, get a 6-hour delegated token, create a key and top up. See the [agent guide](https://fikraapi.co.ke/for-agents).
