@@ -294,16 +294,16 @@ export class ReefFriendManager {
       }
 
       if (issue) {
-        const { friendships } = await this.transport.listFriends(signal);
+        const { friendships: surfaceFriends } = await this.transport.listFriends(signal);
         signal?.throwIfAborted();
-        const approvals = await loadApprovals(friendships);
+        const surfaceApprovals = await loadApprovals(surfaceFriends);
 
-        for (const friend of friendships) {
+        for (const friend of surfaceFriends) {
           if (friend.status === "blocked") {
             continue;
           }
           const snapshot = await this.trust.snapshot(friend.peer);
-          const approval = approvals.get(friend.peer);
+          const approval = surfaceApprovals.get(friend.peer);
           if (approval?.trustRevision === snapshot.revision) {
             continue;
           }
@@ -311,7 +311,7 @@ export class ReefFriendManager {
             await remove(approval.entry);
           }
           const local = snapshot.trust;
-          const changed = local ? keysChanged(local, friend) : false;
+          const changedKeys = local ? keysChanged(local, friend) : false;
           const inboundPending =
             friend.status === "pending" && friend.initiated_by !== this.transport.handle;
           const missingLocalApproval =
@@ -321,7 +321,7 @@ export class ReefFriendManager {
           const needsReapproval =
             friend.status === "reapprove_required" ||
             (friend.status === "active" &&
-              Boolean(local && (changed || local.safetyNumberChanged)));
+              Boolean(local && (changedKeys || local.safetyNumberChanged)));
           if (!inboundPending && !missingLocalApproval && !needsReapproval) {
             continue;
           }

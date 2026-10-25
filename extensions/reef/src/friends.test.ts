@@ -46,6 +46,7 @@ function trust(signal?: AbortSignal) {
 
 function approvals(...initial: string[]): ConstructorParameters<typeof ReefFriendManager>[2] & {
   values: Set<string>;
+  list: ReturnType<typeof vi.fn>;
   remove: ReturnType<typeof vi.fn>;
 } {
   const values = new Set(initial);
