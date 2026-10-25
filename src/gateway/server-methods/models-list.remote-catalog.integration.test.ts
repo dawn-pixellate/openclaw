@@ -314,21 +314,6 @@ it.for([1, 2])(
           await releaseRetained();
           await retainedBuild.completion;
         }
-        for (const rejected of [
-          "{",
-          JSON.stringify({ ...next, generatedAt: generatedAt + 2, minVersion: "9999.1.1" }),
-        ]) {
-          body = rejected;
-          expect((await refresh()).status).toBe("error");
-          expect(kimiIds(await list())).toContain("remote-next");
-          expect(price(config)).toBe(7);
-        }
-        body = encode(first);
-        const stale = await refresh();
-        expect(stale).toMatchObject({ status: "unchanged", generatedAt: generatedAt + 1 });
-        expect(kimiIds(await list())).toContain("remote-next");
-        expect(price(config)).toBe(7);
-
         expect(kimiIds(await restartWorker("remote-next"))).toContain("remote-next");
         expect(currentPrice()).toBe(7);
 

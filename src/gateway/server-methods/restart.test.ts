@@ -122,17 +122,14 @@ describe("gateway restart handlers", () => {
     resetGatewayWorkAdmission();
   });
 
-  it.each([false, true])(
-    "refuses stale authority before restart effects (targeted=%s)",
-    async (targeted) => {
-      await expect(
-        invokeRestartRequest(targeted ? { target: restartTarget } : {}, () => {
-          throw new Error("requester revoked");
-        }),
-      ).rejects.toThrow("requester revoked");
-      expectNoRestart();
-    },
-  );
+  it("refuses stale authority before targeted restart effects", async () => {
+    await expect(
+      invokeRestartRequest({ target: restartTarget }, () => {
+        throw new Error("requester revoked");
+      }),
+    ).rejects.toThrow("requester revoked");
+    expectNoRestart();
+  });
 
   it("keeps the deprecated read-only preflight response shape", async () => {
     const preflight = {

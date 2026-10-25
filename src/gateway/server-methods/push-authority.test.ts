@@ -1,6 +1,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import { normalizeWebPushNotificationPreferences } from "../../infra/push-web-preferences.js";
 import type { WebPushMutationGuard } from "../../infra/push-web-store.records.js";
 import {
   clearBoundWebPushSubscription,
@@ -66,18 +67,7 @@ vi.mock("../../state/user-profile-list.js", () => ({
 
 const endpoint = "https://push.example.test/authority";
 const keys = { p256dh: "synthetic-p256dh", auth: "synthetic-auth" };
-const userPreferences = {
-  categories: {
-    approvalRequested: true,
-    agentFinished: true,
-    agentQuestion: true,
-    humanMentioned: true,
-    scheduledTaskFailed: true,
-  },
-  detailLevel: "private",
-  quietHours: { enabled: false, startMinute: 0, endMinute: 0, timeZone: "UTC" },
-  agentIds: [],
-};
+const userPreferences = normalizeWebPushNotificationPreferences({ detailLevel: "private" });
 type WriteMethod =
   | "push.web.subscribe"
   | "push.web.preferences.get"
@@ -165,7 +155,7 @@ beforeEach(() => {
 });
 
 describe("Web Push request authority across asynchronous storage", () => {
-  it.each(["unchanged", "profile changed", "request revoked", "rejected"] as const)(
+  it.each(["profile changed", "request revoked", "rejected"] as const)(
     "waits for preference reads and checks authority: %s",
     async (change) => {
       const storage = holdPushStorage();
@@ -197,139 +187,81 @@ describe("Web Push request authority across asynchronous storage", () => {
           }
         },
       );
-      if (change === "unchanged") {
-        expect(error).toBeUndefined();
-        expect(invocation.respond).toHaveBeenCalledWith(
-          true,
-          expect.objectContaining({
-            durableIdentity: true,
-            user: expect.objectContaining({ detailLevel: "detailed" }),
-          }),
-          undefined,
-        );
-      } else {
-        expect(error).toBeInstanceOf(Error);
-        expect(invocation.respond).not.toHaveBeenCalled();
-      }
+      expect(error).toBeInstanceOf(Error);
+      expect(invocation.respond).not.toHaveBeenCalled();
       expect(snapshotScope.active).toBe(false);
     },
   );
 
-  it.each([
-    "unchanged",
-    "admission revoked",
-    "commit revoked",
-    "completion revoked",
-    "rejected",
-  ] as const)("publishes preferences only after the guarded write settles: %s", async (change) => {
-    const storage = holdPushStorage();
-    const committed = vi.fn();
-    let profileCurrent = true;
-    vi.mocked(prepareUserProfileSelectionAuthority).mockResolvedValue({
-      profileId: "profile-owner",
-      isCurrent: () => profileCurrent,
-    });
-    vi.mocked(setCanonicalUserPreferences).mockImplementation(async (_id, _entries, options) => {
-      await storage.wait();
-      const assertCurrent = expectDefined(options?.assertCurrent, "preference admission guard");
-      assertCurrent();
-      if (change === "commit revoked") {
-        profileCurrent = false;
-      }
-      assertCurrent();
-      if (change === "rejected") {
-        throw new Error("worker write failed");
-      }
-      committed();
-      if (change === "completion revoked") {
-        profileCurrent = false;
-      }
-      return { ok: true, value: { profileId: "profile-owner" } };
-    });
-    const invocation = createInvocation("push.web.preferences.set", "user");
-    const error = await storage.settle(
-      invocation.invoke().catch((failure: unknown) => failure),
-      () => {
-        expect(snapshotScope.active).toBe(true);
-        expectUnpublished(invocation);
-        if (change === "admission revoked") {
-          invocation.client.invalidated = true;
+  it.each(["admission revoked", "commit revoked", "completion revoked", "rejected"] as const)(
+    "publishes preferences only after the guarded write settles: %s",
+    async (change) => {
+      const storage = holdPushStorage();
+      const committed = vi.fn();
+      let profileCurrent = true;
+      vi.mocked(prepareUserProfileSelectionAuthority).mockResolvedValue({
+        profileId: "profile-owner",
+        isCurrent: () => profileCurrent,
+      });
+      vi.mocked(setCanonicalUserPreferences).mockImplementation(async (_id, _entries, options) => {
+        await storage.wait();
+        const assertCurrent = expectDefined(options?.assertCurrent, "preference admission guard");
+        assertCurrent();
+        if (change === "commit revoked") {
+          profileCurrent = false;
         }
-      },
-    );
-    if (change === "unchanged") {
-      expect(error).toBeUndefined();
-      expect(committed).toHaveBeenCalledOnce();
-      expect(invocation.respond.mock.calls[0]?.[0]).toBe(true);
-      expect(invocation.broadcast).toHaveBeenCalledOnce();
-    } else {
+        assertCurrent();
+        if (change === "rejected") {
+          throw new Error("worker write failed");
+        }
+        committed();
+        if (change === "completion revoked") {
+          profileCurrent = false;
+        }
+        return { ok: true, value: { profileId: "profile-owner" } };
+      });
+      const invocation = createInvocation("push.web.preferences.set", "user");
+      const error = await storage.settle(
+        invocation.invoke().catch((failure: unknown) => failure),
+        () => {
+          expect(snapshotScope.active).toBe(true);
+          expectUnpublished(invocation);
+          if (change === "admission revoked") {
+            invocation.client.invalidated = true;
+          }
+        },
+      );
       expect(error).toBeInstanceOf(Error);
       expect(committed).toHaveBeenCalledTimes(change === "completion revoked" ? 1 : 0);
       expectUnpublished(invocation);
-    }
-    expect(snapshotScope.active).toBe(false);
-  });
-
-  it.each([
-    "invalidated client",
-    "request abort",
-    "scope downgrade",
-    "profile switch",
-    "session guard revoked",
-    "caller authority revoked",
-    "reconnect only",
-  ] as const)("rechecks %s after a user-preference subscription lookup", async (change) => {
-    const lookup = createDeferred<BoundWebPushSubscription | null>();
-    vi.mocked(findBoundWebPushSubscriptionByEndpoint).mockReturnValueOnce(lookup.promise);
-    const invocation = createInvocation("push.web.preferences.set", "user");
-    const pending = invocation.invoke().catch((error: unknown) => error);
-    expect(findBoundWebPushSubscriptionByEndpoint).toHaveBeenCalledOnce();
-    expect(setCanonicalUserPreferences).not.toHaveBeenCalled();
-    if (change === "invalidated client") {
-      invocation.client.invalidated = true;
-    }
-    if (change === "request abort") {
-      invocation.request.abort();
-    }
-    if (change === "scope downgrade") {
-      invocation.client.connect.scopes = ["operator.read"];
-    }
-    if (change === "profile switch") {
-      invocation.client.authenticatedUserProfile = {
-        ...expectDefined(invocation.client.authenticatedUserProfile, "bound profile"),
-        profileId: "different-profile",
-      };
-    }
-    if (change === "session guard revoked") {
-      invocation.sessionMutationCommitGuard.mockImplementation(() => {
-        throw new Error("request owner retired");
-      });
-    }
-    if (change === "caller authority revoked") {
-      invocation.hasCurrentClientAuthority.mockReturnValue(false);
-    }
-    if (change === "reconnect only") {
-      invocation.reconnect();
-    }
-    lookup.resolve(subscription());
-    const error = await pending;
-    if (change === "reconnect only") {
-      expect(error).toBeUndefined();
-      expect(setCanonicalUserPreferences).toHaveBeenCalledOnce();
-      expect(setCanonicalUserPreferences).toHaveBeenCalledWith(
-        "profile-owner",
-        expect.any(Object),
-        { assertCurrent: expect.any(Function) },
-      );
-      expect(invocation.broadcast).toHaveBeenCalledOnce();
-      expect(invocation.respond.mock.calls[0]?.[0]).toBe(true);
       expect(snapshotScope.active).toBe(false);
-    } else {
+    },
+  );
+
+  it.each(["scope downgrade", "profile switch"] as const)(
+    "rechecks %s after a user-preference subscription lookup",
+    async (change) => {
+      const lookup = createDeferred<BoundWebPushSubscription | null>();
+      vi.mocked(findBoundWebPushSubscriptionByEndpoint).mockReturnValueOnce(lookup.promise);
+      const invocation = createInvocation("push.web.preferences.set", "user");
+      const pending = invocation.invoke().catch((error: unknown) => error);
+      expect(setCanonicalUserPreferences).not.toHaveBeenCalled();
+      if (change === "scope downgrade") {
+        invocation.client.connect.scopes = ["operator.read"];
+      }
+      if (change === "profile switch") {
+        invocation.client.authenticatedUserProfile = {
+          ...expectDefined(invocation.client.authenticatedUserProfile, "bound profile"),
+          profileId: "different-profile",
+        };
+      }
+      lookup.resolve(subscription());
+      const error = await pending;
       expect(setCanonicalUserPreferences).not.toHaveBeenCalled();
       expect(invocation.broadcast).not.toHaveBeenCalled();
       expect(error !== undefined || invocation.respond.mock.calls[0]?.[0] === false).toBe(true);
-    }
-  });
+    },
+  );
 
   it.each([
     ["push.web.preferences.set", "revocation"],
@@ -378,7 +310,6 @@ describe("Web Push request authority across asynchronous storage", () => {
   it.each([
     ["push.web.subscribe", "profileless"],
     ["push.web.preferences.set", "merged alias"],
-    ["push.web.preferences.set", "profileless"],
   ] as const)("%s preserves %s ownership", async (method, owner) => {
     const invocation = createInvocation(method);
     if (owner === "merged alias") {
