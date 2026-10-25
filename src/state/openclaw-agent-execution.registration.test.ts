@@ -136,9 +136,12 @@ vi.mock("./openclaw-agent-db-identity.js", () => ({
 vi.mock("./openclaw-agent-db-lease.js", () => ({
   prepareOpenClawAgentDatabaseWorkerLease: () => ({ receipt: { leaseId: "fixture" } }),
 }));
+// mock-isolation: Synthetic admission owns the handle; this fixture observes borrow release only.
+vi.mock("./openclaw-agent-db-borrower.js", () => ({
+  retainAgentDatabase: () => edge.releaseAgent,
+}));
 vi.mock("./openclaw-agent-db-lifecycle.js", () => ({
   closeOpenClawAgentDatabaseByPath: edge.nativeClose,
-  retainAgentDatabase: () => edge.releaseAgent,
 }));
 vi.mock("./openclaw-state-db.js", () => ({
   openOpenClawStateDatabase: () => ({ db: { isOpen: true, isTransaction: false } }),

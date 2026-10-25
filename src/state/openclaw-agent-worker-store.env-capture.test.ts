@@ -65,9 +65,10 @@ vi.mock("./openclaw-agent-db-identity.js", () => ({
   }),
   isOpenClawAgentDatabasePathCurrent: () => true,
 }));
+// mock-isolation: Synthetic admission owns the handle; this fixture observes borrow release only.
+vi.mock("./openclaw-agent-db-borrower.js", () => ({ retainAgentDatabase: () => () => {} }));
 vi.mock("./openclaw-agent-db-lifecycle.js", () => ({
   registerOpenClawAgentDatabaseAsyncResource: () => () => {},
-  retainAgentDatabase: () => () => {},
 }));
 vi.mock("./openclaw-agent-db.js", () => ({ getOpenClawAgentDatabaseIfOpen: boundary.current }));
 // mock-isolation: Capture worker admission timing without entering real writer queues.

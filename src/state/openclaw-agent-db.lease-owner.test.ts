@@ -432,25 +432,42 @@ describe("openclaw agent database handle cache", () => {
     expect(database.db.isOpen).toBe(false);
   });
 
-  it("pins a completion's exact database until its final claim is released", () => {
+  it("shares idle custody between read claims and the writable borrower", () => {
     const options = { agentId: "completion", env };
     const database = openOpenClawAgentDatabase(options);
     const retained = retainOpenClawAgentDatabaseReadOnly(options);
     if (!retained.found) {
       throw new Error("expected the cached database");
     }
+    const second = retainOpenClawAgentDatabaseReadOnly(options);
+    if (!second.found) {
+      throw new Error("expected the cached database");
+    }
+    const writer = borrowOpenClawAgentDatabase(options);
     try {
+      expect(retained.database.db).toBe(database.db);
+      expect(second.database.db).toBe(writer.db);
       vi.advanceTimersByTime(SQLITE_IDLE_HANDLE_TTL_MS);
       expect(retained.claim.isCurrent()).toBe(true);
       expect(database.db.isOpen).toBe(true);
       retained.claim.release();
+      vi.advanceTimersByTime(SQLITE_IDLE_HANDLE_TTL_MS);
+      expect(second.claim.isCurrent()).toBe(true);
+      second.claim.release();
+      vi.advanceTimersByTime(SQLITE_IDLE_HANDLE_TTL_MS);
+      expect(database.db.isOpen).toBe(true);
+      expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env })).toHaveLength(1);
+      writer.release();
       vi.advanceTimersByTime(SQLITE_IDLE_HANDLE_TTL_MS - 1);
       expect(database.db.isOpen).toBe(true);
       vi.advanceTimersByTime(1);
       expect(database.db.isOpen).toBe(false);
       expect(retained.claim.isCurrent()).toBe(false);
+      expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env })).toEqual([]);
     } finally {
       retained.claim.release();
+      second.claim.release();
+      writer.release();
     }
   });
 
