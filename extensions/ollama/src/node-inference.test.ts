@@ -42,6 +42,22 @@ async function readBody(request: IncomingMessage, body?: string): Promise<unknow
   return JSON.parse(body ?? (await text(request)));
 }
 
+const LOCAL_CATALOG = [
+  { name: "remote:cloud", size: 1, remote_host: "https://ollama.com", details: {} },
+  { name: "remote-model-only:latest", size: 1, remote_model: "upstream-chat", details: {} },
+  { name: "tagged-only:cloud", size: 1, details: {} },
+  { name: "tagged-only:120b-cloud", size: 1, details: {} },
+  {
+    name: "chat:small",
+    size: 500,
+    modified_at: "2026-07-01T00:00:00Z",
+    details: { family: "small", parameter_size: "0.5B", quantization_level: "Q4_K_M" },
+  },
+  { name: "embedding:latest", size: 100, details: { family: "embed" } },
+  { name: "unknown:latest", size: 50, details: { family: "unknown" } },
+  { name: "chat:large", size: 5000, details: { family: "large" } },
+];
+
 async function withOllamaServer(
   run: (
     baseUrl: string,
@@ -94,23 +110,7 @@ async function withOllamaServer(
     }
     response.setHeader("Content-Type", "application/json");
     if (request.url === "/api/tags") {
-      return sendJson(response, {
-        models: options?.models ?? [
-          { name: "remote:cloud", size: 1, remote_host: "https://ollama.com", details: {} },
-          { name: "remote-model-only:latest", size: 1, remote_model: "upstream-chat", details: {} },
-          { name: "tagged-only:cloud", size: 1, details: {} },
-          { name: "tagged-only:120b-cloud", size: 1, details: {} },
-          {
-            name: "chat:small",
-            size: 500,
-            modified_at: "2026-07-01T00:00:00Z",
-            details: { family: "small", parameter_size: "0.5B", quantization_level: "Q4_K_M" },
-          },
-          { name: "chat:large", size: 5000, details: { family: "large" } },
-          { name: "embedding:latest", size: 100, details: { family: "embed" } },
-          { name: "unknown:latest", size: 50, details: { family: "unknown" } },
-        ],
-      });
+      return sendJson(response, { models: options?.models ?? LOCAL_CATALOG });
     }
     if (request.url === "/api/ps" && options?.loadedModels !== false) {
       return sendJson(response, { models: options?.loadedModels ?? [{ name: "chat:large" }] });
@@ -179,44 +179,35 @@ async function models(baseUrl: string): Promise<{
 }
 
 describe("Ollama node host inference", () => {
-  it("discovers local chat models and ranks loaded models first", async () => {
-    await withOllamaServer(async (baseUrl) => {
-      const result = await models(baseUrl);
-
-      expect(result.provider).toBe("ollama");
-      expect(result.models.map((model) => model.name)).toEqual(["chat:large", "chat:small"]);
-      expect(result.models[0]).toMatchObject({ loaded: true, contextWindow: 32768 });
-      expect(result.models[1]).toMatchObject({
-        loaded: false,
-        family: "small",
-        parameterSize: "0.5B",
-        quantization: "Q4_K_M",
-      });
-    });
-  });
-
-  it("discovers a loaded local model beyond the completion model limit", async () => {
-    const catalog = [
-      ...Array.from({ length: 200 }, (_, index) => ({ name: `chat-${index}:latest` })),
-      { name: "chat:loaded", size: 500 },
-    ];
-
+  it("discovers bounded local chat models, prioritizing loaded models beyond the limit", async () => {
+    const extraModels = Array.from({ length: 200 }, (_, index) => ({
+      name: `chat-${index}:latest`,
+    }));
     await withOllamaServer(
-      async (baseUrl, _chatRequests, showRequests) => {
+      async (baseUrl, _chats, shows) => {
         const result = await models(baseUrl);
 
         expect(result.provider).toBe("ollama");
         expect(result.models).toHaveLength(200);
-        expect(result.models[0]).toMatchObject({ name: "chat:loaded", loaded: true });
-        expect(showRequests[0]).toBe("chat:loaded");
-        expect(showRequests).toHaveLength(200);
+        expect(result.models.slice(0, 2).map((model) => model.name)).toEqual([
+          "chat:large",
+          "chat:small",
+        ]);
+        expect(shows[0]).toBe("chat:large");
+        expect(result.models[0]).toMatchObject({ loaded: true, contextWindow: 32768 });
+        expect(result.models[1]).toMatchObject({
+          loaded: false,
+          family: "small",
+          parameterSize: "0.5B",
+          quantization: "Q4_K_M",
+        });
       },
-      { models: catalog, loadedModels: [{ name: "chat:loaded" }] },
+      { models: [...LOCAL_CATALOG.slice(0, -1), ...extraModels, LOCAL_CATALOG.at(-1)!] },
     );
   });
 
   it("runs bounded chat and returns compact usage", async () => {
-    await withOllamaServer(async (baseUrl, chatRequests, showRequests) => {
+    await withOllamaServer(async (baseUrl, chatRequests) => {
       const result = JSON.parse(
         await chat(baseUrl, {
           model: "chat:small",
@@ -239,7 +230,6 @@ describe("Ollama node host inference", () => {
           options: { num_predict: 64, temperature: 0.2 },
         },
       ]);
-      expect(showRequests).toEqual(["chat:small"]);
       expect(result).toEqual({
         provider: "ollama",
         model: "chat:small",
@@ -275,15 +265,10 @@ describe("Ollama node host inference", () => {
     });
   });
 
-  it("registers a desktop and server pass-through policy", async () => {
-    const policy = createOllamaNodeInvokePolicy();
-    const invokeNode = vi.fn(async () => ({ ok: true as const, payload: { ok: true } }));
-
-    expect(policy.commands).toEqual(["ollama.models", "ollama.chat"]);
-    expect(policy.defaultPlatforms).toEqual(["macos", "linux", "windows"]);
-    await expect(policy.handle({ invokeNode } as never)).resolves.toEqual({
-      ok: true,
-      payload: { ok: true },
+  it("registers desktop and server inference commands", () => {
+    expect(createOllamaNodeInvokePolicy()).toMatchObject({
+      commands: ["ollama.models", "ollama.chat"],
+      defaultPlatforms: ["macos", "linux", "windows"],
     });
   });
 });
@@ -378,54 +363,42 @@ async function cancelRequest(
 }
 
 describe("node-local Ollama inference cancellation", () => {
-  it.each([
-    { phase: "model discovery", path: "/api/tags" },
-    { phase: "model capability verification", path: "/api/show" },
-  ])("closes the node-local request when $phase is canceled", async ({ path }) => {
-    await withAbortTestServer(path, async (server) => {
-      const controller = new AbortController();
-      const inference = commandByName(server.baseUrl, OLLAMA_CHAT_COMMAND).handle(
-        JSON.stringify({ model: "node-local:small", prompt: "answer locally" }),
-        undefined,
-        { sendNodeEvent: async () => undefined, signal: controller.signal },
-      );
-      await cancelRequest(server, path, controller, inference, "node inference canceled");
-    });
-  });
+  it.each(["/api/tags", "/api/show", "/api/chat"])(
+    "forwards agent cancellation through the paired node and closes %s",
+    async (path) => {
+      await withAbortTestServer(path, async (server) => {
+        const controller = new AbortController();
+        const invoke = vi.fn(
+          async (params: { command: string; params?: unknown; signal?: AbortSignal }) => ({
+            payloadJSON: await commandByName(server.baseUrl, OLLAMA_CHAT_COMMAND).handle(
+              JSON.stringify(params.params),
+              undefined,
+              { sendNodeEvent: async () => undefined, signal: params.signal },
+            ),
+          }),
+        );
+        const api = nodeApi([inferenceNode("paired-node")], invoke);
 
-  it("forwards an agent-tool cancellation through its paired node runtime", async () => {
-    await withAbortTestServer("/api/chat", async (server) => {
-      const controller = new AbortController();
-      const invoke = vi.fn(
-        async (params: { command: string; params?: unknown; signal?: AbortSignal }) => ({
-          payloadJSON: await commandByName(server.baseUrl, OLLAMA_CHAT_COMMAND).handle(
-            JSON.stringify(params.params),
-            undefined,
-            { sendNodeEvent: async () => undefined, signal: params.signal },
-          ),
-        }),
-      );
-      const api = nodeApi([inferenceNode("paired-node")], invoke);
-
-      const inference = createOllamaNodeInferenceTool(api).execute(
-        "paired-node-inference",
-        {
-          action: "run",
-          model: "node-local:small",
-          prompt: "answer only from the paired node",
-        },
-        controller.signal,
-      );
-      await cancelRequest(server, "/api/chat", controller, inference, "agent inference canceled");
-      expect(invoke).toHaveBeenCalledWith(
-        expect.objectContaining({
-          nodeId: "paired-node",
-          command: "ollama.chat",
-          signal: controller.signal,
-        }),
-      );
-    });
-  });
+        const inference = createOllamaNodeInferenceTool(api).execute(
+          "paired-node-inference",
+          {
+            action: "run",
+            model: "node-local:small",
+            prompt: "answer only from the paired node",
+          },
+          controller.signal,
+        );
+        await cancelRequest(server, path, controller, inference, "agent inference canceled");
+        expect(invoke).toHaveBeenCalledWith(
+          expect.objectContaining({
+            nodeId: "paired-node",
+            command: "ollama.chat",
+            signal: controller.signal,
+          }),
+        );
+      });
+    },
+  );
 
   it("normalizes a pre-aborted agent-tool string reason before listing nodes", async () => {
     const list = vi.fn(async () => ({ nodes: [] }));

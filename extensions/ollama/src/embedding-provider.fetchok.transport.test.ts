@@ -194,20 +194,21 @@ describe("Ollama embedding provider real transport", () => {
     expectRedacted(error, safeMarker, retainedPrefix, proxyAuth);
   });
 
-  it("returns normalized vectors on a successful response", async () => {
+  it.each([undefined, 2])("normalizes vectors with outputDimensionality=%s", async (dimensions) => {
     const apiKey = "ollama_test_success_credential";
     const proxyAuth = "ollama_test_success_proxy_credential";
-    const server = await startOllamaServer(200, () => ({ embeddings: [[3, 4]] }));
-    const { provider } = await createOllamaEmbeddingProvider(
-      createOptions(server.baseUrl, {
-        apiKey,
-        headers: { "X-Proxy-Auth": proxyAuth },
-      }),
-    );
+    const server = await startOllamaServer(200, () => ({
+      embeddings: [dimensions === undefined ? [3, 4] : [3, 4, 12]],
+    }));
+    const { provider } = await createOllamaEmbeddingProvider({
+      ...createOptions(server.baseUrl, { apiKey, headers: { "X-Proxy-Auth": proxyAuth } }),
+      dimensions,
+    });
 
     const vector = await provider.embed("hello", { inputType: "query" });
 
     expectRequest(server, { authorization: `Bearer ${apiKey}`, proxyAuth });
+    expect(vector).toHaveLength(2);
     expect(vector[0]).toBeCloseTo(0.6, 5);
     expect(vector[1]).toBeCloseTo(0.8, 5);
   });

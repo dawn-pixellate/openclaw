@@ -35,7 +35,10 @@ async function waitForSocketClose(closed: Promise<void> | undefined): Promise<vo
   });
 }
 
-afterEach(() => fetchWithSsrFGuardMock.mockReset());
+afterEach(() => {
+  fetchWithSsrFGuardMock.mockReset();
+  vi.useRealTimers();
+});
 
 describe("Ollama setup response cleanup", () => {
   it.each([
@@ -81,11 +84,9 @@ describe("Ollama setup response cleanup", () => {
   it("joins sibling model-probe cleanup before rejecting with the original cancellation", async () => {
     const controller = new AbortController();
     const cancellation = new Error("model discovery canceled");
-    const firstCleanup = createDeferred<void>();
-    const siblingCleanup = createDeferred<void>();
-    const firstRelease = vi.fn(() => firstCleanup.promise);
-    const siblingRelease = vi.fn(() => siblingCleanup.promise);
-    for (const release of [firstRelease, siblingRelease]) {
+    const cleanups = [createDeferred<void>(), createDeferred<void>()] as const;
+    const releases = cleanups.map((cleanup) => vi.fn(() => cleanup.promise));
+    for (const release of releases) {
       fetchWithSsrFGuardMock.mockResolvedValueOnce({
         response: jsonResponse({ capabilities: ["completion"] }),
         finalUrl: "http://127.0.0.1:11434/api/show",
@@ -93,38 +94,32 @@ describe("Ollama setup response cleanup", () => {
       });
     }
     let settled = false;
-    let failure: unknown;
     const completed = enrichOllamaModelsWithContext(
       "http://127.0.0.1:11434",
       [{ name: "first-model" }, { name: "sibling-model" }],
       { signal: controller.signal },
-    ).then(
-      () => {
-        settled = true;
-      },
-      (error: unknown) => {
-        failure = error;
-        settled = true;
-      },
-    );
+    ).finally(() => {
+      settled = true;
+    });
+    const rejected = expect(completed).rejects.toBe(cancellation);
     try {
       await vi.waitFor(() => {
-        expect(firstRelease).toHaveBeenCalledOnce();
-        expect(siblingRelease).toHaveBeenCalledOnce();
+        for (const release of releases) {
+          expect(release).toHaveBeenCalledOnce();
+        }
       });
       controller.abort(cancellation);
-      firstCleanup.reject(new Error("first request closed"));
+      cleanups[0].reject(new Error("first request closed"));
       await nextTurn();
       expect(settled).toBe(false);
 
-      siblingCleanup.reject(new Error("sibling request closed"));
-      await completed;
-      expect(settled).toBe(true);
-      expect(failure).toBe(cancellation);
+      cleanups[1].reject(new Error("sibling request closed"));
+      await rejected;
     } finally {
-      firstCleanup.resolve();
-      siblingCleanup.resolve();
-      await completed;
+      for (const cleanup of cleanups) {
+        cleanup.resolve();
+      }
+      await rejected;
     }
   });
 
@@ -185,12 +180,24 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
 });
 
 describe("Ollama onboarding model pulls", () => {
-  it("uses the canonical Ollama model request field and requires its success terminal", async () => {
-    const check = mockPull('{"status":"pulling manifest"}\n{"status":"success"}\n');
-    await check(true);
+  it("clears the response timer after a successful pull", async () => {
+    vi.useFakeTimers();
+    await mockPull('{"status":"success"}\n')(true);
+    const signal: AbortSignal = fetchWithSsrFGuardMock.mock.calls[0][0].signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(signal.aborted).toBe(false);
+  });
 
-    const request = fetchWithSsrFGuardMock.mock.calls[0]?.[0] as { init?: { body?: string } };
-    expect(JSON.parse(request.init?.body ?? "null")).toEqual({ model: "gemma4:e2b" });
+  it("fails a stalled stream at the idle deadline", async () => {
+    vi.useFakeTimers();
+    const check = mockPull(new ReadableStream<Uint8Array>());
+    const result = check(
+      false,
+      "Failed to download gemma4:e2b: Ollama pull stalled: no data received for 300s",
+    );
+    await vi.advanceTimersByTimeAsync(300_000);
+    await result;
   });
 
   it.each([

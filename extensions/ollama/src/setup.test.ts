@@ -2,7 +2,7 @@ import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import type { WizardPrompter } from "openclaw/plugin-sdk/setup";
 import { jsonResponse, requestBodyText, requestUrl } from "openclaw/plugin-sdk/test-env";
 import { oversizedJsonResponse } from "openclaw/plugin-sdk/test-fixtures";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ensureOllamaModelPulled, promptAndConfigureOllama } from "./setup.js";
 import { checkOllamaCloudAuth } from "./setup.runtime.js";
 import {
@@ -124,24 +124,40 @@ describe("ollama setup", () => {
     );
   });
 
-  it("puts hybrid cloud model suggestions after the local default when signed in", async () => {
-    const { result } = await configureInteractive(
-      { tags: ["llama3:8b"], meResponse: jsonResponse({ user: "signed-in" }) },
-      { select: vi.fn().mockResolvedValueOnce("cloud-local") },
-    );
-    const modelIds = result.config.models?.providers?.ollama?.models?.map((m) => m.id);
-
-    expect(modelIds).toEqual([
-      "gemma4",
-      "minimax-m2.7:cloud",
-      "minimax-m3:cloud",
-      "kimi-k3:cloud",
-      "glm-5.2:cloud",
-      "llama3:8b",
-    ]);
-    expect(result.config.models?.providers?.ollama?.baseUrl).toBe("http://127.0.0.1:11434");
-    expect(result.config.models?.providers?.ollama?.apiKey).toBe("ollama-local");
-  });
+  it.each([true, false])(
+    "uses hybrid cloud suggestions only when signed in: %s",
+    async (signedIn) => {
+      const { result, prompter } = await configureInteractive(
+        {
+          tags: ["llama3:8b"],
+          meResponse: signedIn
+            ? jsonResponse({ user: "signed-in" })
+            : Response.json({ signin_url: "https://ollama.com/signin" }, { status: 401 }),
+        },
+        { select: vi.fn().mockResolvedValueOnce("cloud-local") },
+      );
+      const provider = result.config.models?.providers?.ollama;
+      expect(provider?.models?.map((m) => m.id)).toEqual(
+        signedIn
+          ? [
+              "gemma4",
+              "minimax-m2.7:cloud",
+              "minimax-m3:cloud",
+              "kimi-k3:cloud",
+              "glm-5.2:cloud",
+              "llama3:8b",
+            ]
+          : ["gemma4", "llama3:8b"],
+      );
+      expect(provider).toMatchObject({ baseUrl: "http://127.0.0.1:11434", apiKey: "ollama-local" });
+      if (!signedIn) {
+        expect(prompter.note).toHaveBeenCalledWith(
+          expect.stringContaining("https://ollama.com/signin"),
+          "Ollama Cloud + Local",
+        );
+      }
+    },
+  );
 
   it("reports the configured host when the retry is still unreachable", async () => {
     const prompter = createLocalPrompter();
@@ -156,73 +172,53 @@ describe("ollama setup", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("cloud + local mode falls back to local models when ollama signin is missing", async () => {
-    const { result, prompter } = await configureInteractive(
-      {
-        tags: ["llama3:8b"],
-        meResponse: Response.json({ signin_url: "https://ollama.com/signin" }, { status: 401 }),
-      },
-      { select: vi.fn().mockResolvedValueOnce("cloud-local") },
-    );
+  it.each([true, false])(
+    "offers a recommended pull and honors acceptance: %s",
+    async (accepted) => {
+      const progress = { update: vi.fn(), stop: vi.fn() };
+      const { result, prompter, fetchMock } = await configureInteractive(
+        {
+          tags: ["llama3:8b"],
+          show: { "gemma4:e4b": 131072 },
+          capabilities: { "llama3:8b": ["generate"], "gemma4:e4b": ["tools"] },
+          pullResponse: new Response(
+            [
+              '{"status":"pulling sha256:12345678","total":100,"completed":50}',
+              '{"status":"pulling sha256:12345678","total":100,"completed":100}',
+              '{"status":"success"}',
+              "",
+            ].join("\n"),
+            { status: 200 },
+          ),
+        },
+        {
+          confirm: vi.fn().mockResolvedValueOnce(accepted),
+          progress: vi.fn(() => progress),
+        },
+      );
 
-    expect(result.config.models?.providers?.ollama?.models?.map((m) => m.id)).toEqual([
-      "gemma4",
-      "llama3:8b",
-    ]);
-    expect(prompter.note).toHaveBeenCalledWith(
-      expect.stringContaining("https://ollama.com/signin"),
-      "Ollama Cloud + Local",
-    );
-  });
-
-  it("offers and streams a recommended pull when no installed model supports tools", async () => {
-    const progress = { update: vi.fn(), stop: vi.fn() };
-    const { result, prompter, fetchMock } = await configureInteractive(
-      {
-        tags: ["llama3:8b"],
-        show: { "gemma4:e4b": 131072 },
-        capabilities: { "llama3:8b": ["generate"], "gemma4:e4b": ["tools"] },
-        pullResponse: new Response(
-          [
-            '{"status":"pulling sha256:12345678","total":100,"completed":50}',
-            '{"status":"pulling sha256:12345678","total":100,"completed":100}',
-            '{"status":"success"}',
-            "",
-          ].join("\n"),
-          { status: 200 },
-        ),
-      },
-      {
-        confirm: vi.fn().mockResolvedValueOnce(true),
-        progress: vi.fn(() => progress),
-      },
-    );
-
-    expect(prompter.confirm).toHaveBeenCalledOnce();
-    expect(prompter.confirm).toHaveBeenCalledWith(expect.objectContaining({ initialValue: false }));
-    const pullCall = fetchMock.mock.calls.find((call) => requestUrl(call[0]).endsWith("/api/pull"));
-    expect(pullCall).toBeDefined();
-    expect(JSON.parse(requestBodyText(pullCall?.[1]?.body))).toEqual({ model: "gemma4:e4b" });
-    expect(progress.update).toHaveBeenCalledWith("Downloading gemma4:e4b - pulling part - 50%");
-    expect(progress.stop).toHaveBeenCalledWith("Downloaded gemma4:e4b");
-    expect(configuredModel(result.config, "gemma4:e4b")).toMatchObject({
-      contextWindow: 131072,
-      compat: { supportsTools: true },
-    });
-    expect(result.defaultModel).toBe("ollama/gemma4:e4b");
-  });
-
-  it("does not pull the recommended Ollama model when declined", async () => {
-    const { prompter, fetchMock } = await configureInteractive(
-      { tags: ["llama3:8b"], capabilities: { "llama3:8b": ["generate"] } },
-      { confirm: vi.fn().mockResolvedValueOnce(false) },
-    );
-
-    expect(prompter.confirm).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls.map((call) => requestUrl(call[0]))).not.toContain(
-      "http://127.0.0.1:11434/api/pull",
-    );
-  });
+      expect(prompter.confirm).toHaveBeenCalledOnce();
+      expect(prompter.confirm).toHaveBeenCalledWith(
+        expect.objectContaining({ initialValue: false }),
+      );
+      const pullCall = fetchMock.mock.calls.find((call) =>
+        requestUrl(call[0]).endsWith("/api/pull"),
+      );
+      if (!accepted) {
+        expect(pullCall).toBeUndefined();
+        return;
+      }
+      expect(pullCall).toBeDefined();
+      expect(JSON.parse(requestBodyText(pullCall?.[1]?.body))).toEqual({ model: "gemma4:e4b" });
+      expect(progress.update).toHaveBeenCalledWith("Downloading gemma4:e4b - pulling part - 50%");
+      expect(progress.stop).toHaveBeenCalledWith("Downloaded gemma4:e4b");
+      expect(configuredModel(result.config, "gemma4:e4b")).toMatchObject({
+        contextWindow: 131072,
+        compat: { supportsTools: true },
+      });
+      expect(result.defaultModel).toBe("ollama/gemma4:e4b");
+    },
+  );
 
   it("skips a broken model and continues setup when one inspection fails", async () => {
     const { result, prompter } = await configureInteractive(
@@ -297,63 +293,22 @@ describe("ollama setup", () => {
   });
 
   describe("ensureOllamaModelPulled", () => {
-    describe("pull timers", () => {
-      beforeEach(() => {
-        vi.useFakeTimers();
+    it("propagates failed selected-model pulls as wizard cancellation", async () => {
+      vi.stubGlobal(
+        "fetch",
+        createOllamaFetchMock({
+          tags: [],
+          pullResponse: new Response('{"error":"disk full"}\n'),
+        }),
+      );
+      const prompter = createLocalPrompter({
+        progress: () => ({ update: vi.fn(), stop: vi.fn() }),
       });
-      afterEach(() => {
-        vi.useRealTimers();
-      });
-
-      function startPull(fetchMock: ReturnType<typeof createOllamaFetchMock>) {
-        const progress = { update: vi.fn(), stop: vi.fn() };
-        const prompter = { progress: vi.fn(() => progress) } as unknown as WizardPrompter;
-        vi.stubGlobal("fetch", fetchMock);
-        return { progress, fetchMock, run: () => ensurePulled("ollama/gemma4", prompter) };
-      }
-
-      it("pulls model when not available locally", async () => {
-        const { fetchMock, run } = startPull(
-          createOllamaFetchMock({
-            tags: ["llama3:8b"],
-            pullResponse: new Response('{"status":"success"}\n', { status: 200 }),
-          }),
-        );
-        await run();
-        expect(fetchMock).toHaveBeenCalledTimes(2);
-        expect(mockCallArg(fetchMock, 1)).toContain("/api/pull");
-        const pullInit = mockCallArg(fetchMock, 1, 1) as RequestInit | undefined;
-        expect(pullInit?.signal).toBeInstanceOf(AbortSignal);
-        expect(pullInit?.signal?.aborted).toBe(false);
-        await vi.advanceTimersByTimeAsync(30_000);
-        expect(pullInit?.signal?.aborted).toBe(false);
-      });
-
-      it("fails stalled model pull streams after an idle timeout", async () => {
-        const { progress, fetchMock, run } = startPull(
-          vi.fn(async (input: string | URL | Request) => {
-            const url = requestUrl(input);
-            if (url.endsWith("/api/tags")) {
-              return jsonResponse({ models: [] });
-            }
-            if (url.endsWith("/api/pull")) {
-              return new Response(new ReadableStream<Uint8Array>(), { status: 200 });
-            }
-            throw new Error(`Unexpected fetch: ${url}`);
-          }),
-        );
-        const pullPromise = run().catch((err: unknown) => err);
-        await vi.waitFor(() => expect(mockCallArg(fetchMock, 1)).toContain("/api/pull"));
-        await vi.advanceTimersByTimeAsync(300_000);
-        const pullError = await pullPromise;
-        expect(pullError).toBeInstanceOf(Error);
-        expect(pullError).toMatchObject({
-          name: "WizardCancelledError",
-          message: "Failed to download selected Ollama model",
-        });
-        expect(progress.stop).toHaveBeenCalledWith(
-          "Failed to download gemma4: Ollama pull stalled: no data received for 300s",
-        );
+      const pull = ensurePulled("ollama/gemma4", prompter);
+      await expect(pull).rejects.toBeInstanceOf(Error);
+      await expect(pull).rejects.toMatchObject({
+        name: "WizardCancelledError",
+        message: "Failed to download selected Ollama model",
       });
     });
 
@@ -389,29 +344,41 @@ describe("ollama setup", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("normalizes ollama/ prefix in non-interactive custom model download", async () => {
-    const { fetchMock, configure } = startNonInteractive({
-      tags: [],
-      show: { "llama3.2:latest": 16_384 },
-      capabilities: { "llama3.2:latest": ["completion", "tools", "vision", "thinking"] },
-      pullResponse: new Response('{"status":"success"}\n', { status: 200 }),
-    });
-    const result = await configure({ customModelId: "  OLLAMA/llama3.2:latest  " });
-
-    const pullRequest = mockCallArg(fetchMock, 1, 1) as RequestInit | undefined;
-    expect(JSON.parse(requestBodyText(pullRequest?.body))).toEqual({ model: "llama3.2:latest" });
-    expect(result.agents?.defaults?.model).toEqual({ primary: "ollama/llama3.2:latest" });
-    expect(result.models?.providers?.ollama?.models).toEqual([
-      expect.objectContaining({
-        id: "llama3.2:latest",
-        input: ["text", "image"],
-        reasoning: true,
-        contextWindow: 16_384,
-        contextTokens: 16_384,
-        compat: expect.objectContaining({ supportsTools: true }),
-      }),
-    ]);
-  });
+  it.each([
+    ["downloaded", "llama3.2:latest", 0, 16_384, 16_384],
+    ["past discovery limit", "gemma4:e2b", 200, 131_072, 32_768],
+  ] as const)(
+    "preserves a %s explicit model's capabilities",
+    async (_label, modelId, preceding, contextWindow, contextTokens) => {
+      const { fetchMock, configure } = startNonInteractive({
+        tags: preceding
+          ? [...Array.from({ length: preceding }, (_, index) => `other-${index}`), modelId]
+          : [],
+        fallbackCapabilities: preceding > 0,
+        show: { [modelId]: contextWindow },
+        capabilities: { [modelId]: ["completion", "tools", "vision", "thinking"] },
+      });
+      const result = await configure({ customModelId: `  OLLAMA/${modelId}  ` });
+      if (!preceding) {
+        const pullRequest = mockCallArg(fetchMock, 1, 1) as RequestInit | undefined;
+        expect(JSON.parse(requestBodyText(pullRequest?.body))).toEqual({ model: modelId });
+      }
+      expect(result.agents?.defaults?.model).toEqual({ primary: `ollama/${modelId}` });
+      const models = preceding
+        ? [configuredModel(result, modelId)]
+        : result.models?.providers?.ollama?.models;
+      expect(models).toEqual([
+        expect.objectContaining({
+          id: modelId,
+          input: ["text", "image"],
+          reasoning: true,
+          contextWindow,
+          contextTokens,
+          compat: expect.objectContaining({ supportsTools: true }),
+        }),
+      ]);
+    },
+  );
 
   it("accepts cloud model kimi-k2.5:cloud in non-interactive mode without pulling", async () => {
     const modelId = "kimi-k2.5:cloud";
@@ -566,26 +533,5 @@ describe("Ollama non-interactive onboarding", () => {
       "http://127.0.0.1:11434/api/pull",
     );
     expect(result.agents?.defaults?.model).toEqual({ primary: "ollama/llama3.2:latest" });
-  });
-
-  it("preserves the capabilities of an explicitly selected model beyond the discovery limit", async () => {
-    const modelId = "gemma4:e2b";
-    const { configure } = startNonInteractive({
-      fallbackCapabilities: true,
-      tags: [...Array.from({ length: 200 }, (_, index) => `other-${index}`), modelId],
-      show: { [modelId]: 131_072 },
-      capabilities: { [modelId]: ["completion", "tools", "vision", "thinking"] },
-    });
-    const result = await configure({ customModelId: modelId });
-
-    expect(result.agents?.defaults?.model).toEqual({ primary: `ollama/${modelId}` });
-    expect(configuredModel(result, modelId)).toMatchObject({
-      id: modelId,
-      input: ["text", "image"],
-      reasoning: true,
-      contextWindow: 131_072,
-      contextTokens: 32_768,
-      compat: { supportsTools: true },
-    });
   });
 });

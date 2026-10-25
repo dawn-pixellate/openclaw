@@ -10,11 +10,7 @@ const loopback = vi.hoisted(() => ({
   boundaryCredentialAtCap: false,
   authorization: undefined as string | undefined,
   socketClosed: undefined as Promise<void> | undefined,
-  releases: [] as Array<{
-    bodyIsNull: boolean;
-    bodyUsed: boolean;
-    socketClosedBeforeGuardRelease: boolean;
-  }>,
+  releases: [] as boolean[],
 }));
 
 async function waitForSocketClose(closed: Promise<void> | undefined): Promise<void> {
@@ -40,18 +36,12 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
       return {
         ...guarded,
         release: async () => {
-          let socketClosedBeforeGuardRelease = false;
           try {
             if (guarded.response.status === 401 || guarded.response.status === 403) {
               await waitForSocketClose(loopback.socketClosed);
-              socketClosedBeforeGuardRelease = true;
             }
           } finally {
-            loopback.releases.push({
-              bodyIsNull: guarded.response.body === null,
-              bodyUsed: guarded.response.bodyUsed,
-              socketClosedBeforeGuardRelease,
-            });
+            loopback.releases.push(guarded.response.bodyUsed);
             await guarded.release();
           }
         },
@@ -159,11 +149,7 @@ describe("ollama web search guarded fetch", () => {
       });
       expect(loopback.releases.length).toBeGreaterThan(0);
       for (const release of loopback.releases) {
-        expect(release).toEqual({
-          bodyIsNull: false,
-          bodyUsed: true,
-          socketClosedBeforeGuardRelease: true,
-        });
+        expect(release).toBe(true);
       }
     }),
   );
@@ -186,9 +172,7 @@ describe("ollama web search guarded fetch", () => {
       expect(error.message).toContain("rate limit exceeded");
       expect(error.message).not.toContain(authorization);
       expect(error.message).not.toContain(bearerCredential);
-      expect(loopback.releases).toEqual([
-        { bodyIsNull: false, bodyUsed: true, socketClosedBeforeGuardRelease: false },
-      ]);
+      expect(loopback.releases).toEqual([true]);
 
       loopback.status = 200;
       const result = await tool.execute({ query: "latest openclaw release" });

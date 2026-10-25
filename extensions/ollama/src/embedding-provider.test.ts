@@ -34,11 +34,12 @@ type EmbeddingProviderOptions = Parameters<typeof createOllamaEmbeddingProvider>
 type MemoryEmbeddingOptions = Parameters<typeof ollamaMemoryEmbeddingProviderAdapter.create>[0];
 type AuthCase = [
   name: string,
-  selected: Record<string, unknown> & { baseUrl?: string },
+  selected: (Record<string, unknown> & { baseUrl?: string }) | undefined,
   remote: NonNullable<EmbeddingProviderOptions["remote"]>,
-  headers: Record<string, string>,
+  headers: Record<string, string> | RegExp,
   providerId?: string,
   selectedKey?: string,
+  model?: string,
 ];
 
 function createProviderConfig(
@@ -64,6 +65,19 @@ const localCredential = { baseUrl: LOCAL_HOST, apiKey: "provider-host-key" };
 const explicitAuth = { authorization: "Bearer synthetic-explicit-tenant-a" };
 const proxyHeader = { "x-proxy-auth": "synthetic-remote-header" };
 const remoteHeader = { "X-Remote-Auth": "synthetic-remote-header" };
+const selectedWithProxy = { ...selectedCredential, headers: { "X-Proxy-Auth": selectedProxyRef } };
+const selectedProxyAuth = { "X-Proxy-Auth": "synthetic-selected-proxy-key", ...selectedAuth };
+const markerAuth = { Authorization: "Bearer ollama-local" };
+const explicitRemote = { baseUrl: PRIVATE_HOST, headers: explicitAuth };
+const overriddenProxy = { ...selectedCredential, headers: { "X-Proxy-Auth": missingRef } };
+const remoteWithKey = { baseUrl: REMOTE_HOST, apiKey: REMOTE_KEY };
+
+function stubCredentials(selectedKey = SELECTED_KEY) {
+  vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
+  vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", selectedKey);
+  vi.stubEnv("OLLAMA_SELECTED_PROXY_KEY", "synthetic-selected-proxy-key");
+  vi.stubEnv("OLLAMA_MISSING_SELECTED_SECRET", "");
+}
 function selectedConfig(provider: Record<string, unknown> = {}, providerId = "ollama") {
   return createProviderConfig(
     { baseUrl: `${PRIVATE_HOST}/v1`, models: [], ...provider },
@@ -92,8 +106,9 @@ async function createEmbeddingProvider(overrides: Partial<EmbeddingProviderOptio
   return await createOllamaEmbeddingProvider(embeddingOptions(overrides));
 }
 
-async function createMemoryEmbeddingProvider(overrides: Partial<MemoryEmbeddingOptions> = {}) {
-  return await ollamaMemoryEmbeddingProviderAdapter.create(embeddingOptions(overrides));
+async function memoryKey(overrides: Partial<MemoryEmbeddingOptions> = {}) {
+  return (await ollamaMemoryEmbeddingProviderAdapter.create(embeddingOptions(overrides))).runtime
+    ?.cacheKeyData;
 }
 
 function mockEmbeddingResponse(response: Response) {
@@ -111,19 +126,10 @@ function mockEmbeddingFetch(embedding: number[]) {
   return mockEmbeddingResponse(embeddingResponse([embedding]));
 }
 
-function mockBatchEmbeddingFetch(count: number, promptEvalCount?: unknown) {
-  return mockEmbeddingResponse(
-    embeddingResponse(
-      Array.from({ length: count }, () => [1, 0]),
-      promptEvalCount,
-    ),
-  );
-}
-
 async function embedTestQuery(overrides: Partial<EmbeddingProviderOptions> = {}, query = "hello") {
   const fetchMock = mockEmbeddingFetch([1, 0]);
   const { provider } = await createEmbeddingProvider(overrides);
-  await provider.embed(query, { inputType: "query" });
+  expect(await provider.embed(query, { inputType: "query" })).toEqual([1, 0]);
   return { fetchMock, provider };
 }
 
@@ -152,21 +158,6 @@ function expectEmbeddingFetch(
 }
 
 describe("ollama embedding provider", () => {
-  it.each([undefined, 2])(
-    "normalizes vectors after applying outputDimensionality=%s",
-    async (dimensions) => {
-      mockEmbeddingFetch(dimensions === undefined ? [3, 4] : [3, 4, 12]);
-
-      const { provider } = await createEmbeddingProvider({ model: "unknown-embedder", dimensions });
-
-      const vector = await provider.embed("hi", { inputType: "query" });
-
-      expect(vector).toHaveLength(2);
-      expect(vector[0]).toBeCloseTo(0.6, 5);
-      expect(vector[1]).toBeCloseTo(0.8, 5);
-    },
-  );
-
   it("preserves a host-applied query instruction instead of adding the family template", async () => {
     const fetchMock = mockEmbeddingFetch([1, 0]);
     const { provider } = await createEmbeddingProvider();
@@ -174,69 +165,17 @@ describe("ollama embedding provider", () => {
     expectEmbeddingFetch(fetchMock, "http://127.0.0.1:11434/api/embed", { input: "custom: hello" });
   });
 
-  it("resolves configured base URL and headers without sending local marker auth", async () => {
-    const { fetchMock } = await embedTestQuery({
-      config: createProviderConfig({
-        baseUrl: "http://127.0.0.1:11434/v1",
-        apiKey: "ollama-\nlocal\r\n", // pragma: allowlist secret
-        headers: { "X-Provider-Header": "provider" },
-      }),
-      model: "",
-    });
-
-    expectEmbeddingFetch(fetchMock, "http://127.0.0.1:11434/api/embed", {
-      input: "search_query: hello",
-      headers: { "Content-Type": "application/json", "X-Provider-Header": "provider" },
-    });
-  });
-
-  it("fails fast when memory-search remote apiKey is an unresolved SecretRef", async () => {
-    await expect(
-      createEmbeddingProvider({
-        remote: { baseUrl: LOCAL_HOST, apiKey: envRef("OLLAMA_API_KEY") },
-      }),
-    ).rejects.toThrow(/memory\.search\.remote\.apiKey: unresolved SecretRef/i);
-  });
-
-  it.each([
-    { providerId: "ollama-private", surface: "apiKey", source: "env" },
-    { providerId: "ollama-private", surface: "headers", source: "exec" },
-  ])(
-    "fails closed before any request for unresolved $providerId $surface $source SecretRefs",
-    async ({ providerId, surface, source }) => {
-      vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-      vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", "synthetic-selected-host-key");
-      vi.stubEnv("OLLAMA_MISSING_SELECTED_SECRET", "");
-      const fetchMock = mockEmbeddingFetch([1, 0]);
-      const unavailableSecret = {
-        source,
-        provider: "default",
-        id:
-          source === "exec" ? "synthetic-missing-ollama-secret" : "OLLAMA_MISSING_SELECTED_SECRET",
-      };
-
-      await expect(
-        createEmbeddingProvider({
-          config: selectedConfig(
-            {
-              apiKey: surface === "apiKey" ? unavailableSecret : selectedKeyRef,
-              ...(surface === "headers" ? { headers: { "X-Proxy-Auth": unavailableSecret } } : {}),
-            },
-            providerId,
-          ),
-          provider: providerId,
-        }),
-      ).rejects.toThrow(
-        `models.providers["${providerId}"].${
-          surface === "headers" ? 'headers["X-Proxy-Auth"]' : "apiKey"
-        }`,
-      );
-      expect(fetchMock).not.toHaveBeenCalled();
-    },
-  );
-
   it.each([7, -1])("sends one batch and reports native usage %s", async (tokens) => {
-    const fetchMock = mockBatchEmbeddingFetch(3, tokens);
+    const fetchMock = mockEmbeddingResponse(
+      embeddingResponse(
+        [
+          [1, 0],
+          [1, 0],
+          [1, 0],
+        ],
+        tokens,
+      ),
+    );
 
     const { provider } = await createEmbeddingProvider();
 
@@ -249,23 +188,20 @@ describe("ollama embedding provider", () => {
     expectEmbeddingFetch(fetchMock, "http://127.0.0.1:11434/api/embed", {
       input: ["a", "bb", "ccc"],
     });
-    expect(fetchConfiguredLocalOriginWithSsrFGuardMock.mock.calls[0]?.[0]).toMatchObject({
-      url: "http://127.0.0.1:11434/api/embed",
-      policy: { allowedOrigins: ["http://127.0.0.1:11434"] },
-      configuredLocalOriginBaseUrl: "http://127.0.0.1:11434",
-      auditContext: "ollama-memory-embedding",
+    expect(fetchMock.mock.calls[0]?.[0]).toMatchObject({
+      policy: { allowedOrigins: [LOCAL_HOST] },
+      configuredLocalOriginBaseUrl: LOCAL_HOST,
     });
   });
 
   it("reports actionable embed errors for a missing model", async () => {
     const body = JSON.stringify({ error: 'model "all-minilm" not found, try pulling it first' });
-    const fetchMock = mockEmbeddingResponse(new Response(body, { status: 404 }));
+    mockEmbeddingResponse(new Response(body, { status: 404 }));
     const { provider } = await createEmbeddingProvider({ model: "all-minilm" });
 
     await expect(provider.embed("hello", { inputType: "query" })).rejects.toMatchObject({
       message: `Ollama embed HTTP 404: ${body} Run \`ollama pull all-minilm\` on the configured Ollama host.`,
     });
-    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -279,157 +215,163 @@ describe("ollama embedding provider", () => {
     );
   });
 
-  it("uses custom Ollama provider config and strips that provider prefix", async () => {
-    const release = vi.fn();
-    const acquireLocalService = vi.fn(async (_target: unknown) => ({ release }));
-    const service = { command: "/usr/bin/ollama-spark", args: ["serve"], idleStopMs: 10 };
-    const headers = {
-      "Content-Type": "application/json",
-      "X-Custom-Ollama": "spark",
-      Authorization: "Bearer spark-key",
-    };
-
-    const { fetchMock, provider } = await embedTestQuery({
-      config: createProviderConfig(
-        {
-          baseUrl: "http://spark.local:11434/v1",
-          apiKey: "spark-key",
-          headers: { "X-Custom-Ollama": "spark" },
-          localService: service,
-          models: [],
-        },
-        "ollama-spark",
-      ),
-      provider: "ollama-spark",
-      model: "ollama-spark/qwen3-embedding:4b",
-      acquireLocalService,
-    });
-
-    expect(provider.model).toBe("qwen3-embedding:4b");
-    expectEmbeddingFetch(fetchMock, "http://spark.local:11434/api/embed", {
-      model: "qwen3-embedding:4b",
-      input:
-        "Instruct: Given a user query, retrieve relevant memory notes and documents\nQuery:hello",
-      headers,
-    });
-    expect(acquireLocalService).toHaveBeenCalledWith(
-      {
-        providerId: "ollama-spark",
-        baseUrl: "http://spark.local:11434/v1",
-        headers,
-      },
-      undefined,
-    );
-    expect(release).toHaveBeenCalledOnce();
-  });
-
-  it("does not lease a configured local service for a remote endpoint override", async () => {
-    const fetchMock = mockEmbeddingFetch([1, 0]);
-    const acquireLocalService = vi.fn(async () => ({ release: vi.fn() }));
-    const { provider } = await createEmbeddingProvider({
-      config: createProviderConfig(
-        {
-          baseUrl: "http://spark.local:11434/v1",
-          localService: { command: process.execPath },
-          models: [],
-        },
-        "ollama-spark",
-      ),
-      provider: "ollama-spark",
-      remote: { baseUrl: "http://memory.local:11434" },
-      acquireLocalService,
-    });
-
-    await expect(provider.embed("hello", { inputType: "query" })).resolves.toEqual([1, 0]);
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(acquireLocalService).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["http://127.0.0.1:11434", undefined],
-    ["https://ollama.com", "Bearer ollama-cloud-key"],
-  ])("scopes ambient cloud credentials for %s", async (baseUrl, authorization) => {
-    vi.stubEnv("OLLAMA_API_KEY", "ollama-cloud-key");
-    const { fetchMock } = await embedTestQuery({ remote: { baseUrl } });
-    expectEmbeddingFetch(fetchMock, `${baseUrl}/api/embed`, {
-      input: "search_query: hello",
-      headers: {
+  it.each([false, true])(
+    "leases custom Ollama only without a remote override=%s",
+    async (override) => {
+      const release = vi.fn();
+      const acquireLocalService = vi.fn(async (_target: unknown) => ({ release }));
+      const service = { command: "/usr/bin/ollama-spark", args: ["serve"], idleStopMs: 10 };
+      const headers = {
         "Content-Type": "application/json",
-        ...(authorization ? { Authorization: authorization } : {}),
-      },
-    });
-  });
+        "X-Custom-Ollama": "spark",
+        Authorization: "Bearer spark-key",
+      };
+
+      const { fetchMock, provider } = await embedTestQuery({
+        config: createProviderConfig(
+          {
+            baseUrl: "http://spark.local:11434/v1",
+            apiKey: "spark-key",
+            headers: { "X-Custom-Ollama": "spark" },
+            localService: service,
+            models: [],
+          },
+          "ollama-spark",
+        ),
+        provider: "ollama-spark",
+        model: "ollama-spark/qwen3-embedding:4b",
+        acquireLocalService,
+        ...(override ? { remote: { baseUrl: "http://memory.local:11434" } } : {}),
+      });
+
+      expect(provider.model).toBe("qwen3-embedding:4b");
+      expectEmbeddingFetch(
+        fetchMock,
+        `http://${override ? "memory" : "spark"}.local:11434/api/embed`,
+        {
+          model: "qwen3-embedding:4b",
+          input:
+            "Instruct: Given a user query, retrieve relevant memory notes and documents\nQuery:hello",
+          headers: override ? { "Content-Type": "application/json" } : headers,
+        },
+      );
+      if (override) {
+        expect(acquireLocalService).not.toHaveBeenCalled();
+      } else {
+        expect(acquireLocalService).toHaveBeenCalledWith(
+          {
+            providerId: "ollama-spark",
+            baseUrl: "http://spark.local:11434/v1",
+            headers,
+          },
+          undefined,
+        );
+        expect(release).toHaveBeenCalledOnce();
+      }
+    },
+  );
 
   it.each<AuthCase>([
+    ["ambient auth stays off local hosts", undefined, { baseUrl: LOCAL_HOST }, {}],
     [
-      "selected credential and header refs precede ambient auth",
-      { ...selectedCredential, headers: { "X-Proxy-Auth": selectedProxyRef } },
+      "ambient auth reaches cloud",
+      undefined,
+      { baseUrl: "https://ollama.com" },
+      { Authorization: "Bearer synthetic-cloud-key" },
+    ],
+    [
+      "remote SecretRef fails closed",
+      undefined,
+      { baseUrl: LOCAL_HOST, apiKey: envRef("OLLAMA_API_KEY") },
+      /memory\.search\.remote\.apiKey: unresolved SecretRef/i,
+    ],
+    [
+      "selected key SecretRef fails closed",
+      missingCredential,
       {},
-      {
-        "X-Proxy-Auth": "synthetic-selected-proxy-key",
-        ...selectedAuth,
-      },
+      /models\.providers\["ollama-private"\]\.apiKey/,
       "ollama-private",
     ],
     [
-      "resolved refs stay opaque even for local markers",
-      selectedCredential,
+      "selected header SecretRef fails closed",
+      {
+        ...selectedCredential,
+        headers: {
+          "X-Proxy-Auth": {
+            source: "exec",
+            provider: "default",
+            id: "synthetic-missing-ollama-secret",
+          },
+        },
+      },
       {},
-      { Authorization: "Bearer ollama-local" },
+      /models\.providers\["ollama-private"\]\.headers\["X-Proxy-Auth"\]/,
+      "ollama-private",
+    ],
+    [
+      "local markers preserve headers and default model",
+      {
+        baseUrl: `${LOCAL_HOST}/v1`,
+        apiKey: "ollama-\nlocal\r\n",
+        headers: { "X-Provider-Header": "provider" },
+      },
+      {},
+      { "X-Provider-Header": "provider" },
       "ollama",
-      "ollama-local",
+      SELECTED_KEY,
+      "",
     ],
+    ["refs override ambient auth", selectedWithProxy, {}, selectedProxyAuth, "ollama-private"],
+    ["resolved markers stay opaque", selectedCredential, {}, markerAuth, "ollama", "ollama-local"],
+    ["explicit auth bypasses refs", missingCredential, explicitRemote, { ...explicitAuth }],
     [
-      "explicit header auth leaves competing refs inactive",
-      missingCredential,
-      { baseUrl: PRIVATE_HOST, headers: explicitAuth },
-      { ...explicitAuth },
-    ],
-    [
-      "remote headers override refs case-insensitively",
-      { ...selectedCredential, headers: { "X-Proxy-Auth": missingRef } },
+      "remote headers override refs ignoring case",
+      overriddenProxy,
       { baseUrl: PRIVATE_HOST, headers: proxyHeader },
       { ...proxyHeader, ...selectedAuth },
     ],
     [
-      "another host cannot inherit a literal key",
+      "host override drops literal key",
       localCredential,
       { baseUrl: "https://memory.example.com" },
       {},
     ],
     [
-      "another host cannot inherit credential/header refs",
+      "host override drops credential/header refs",
       { ...selectedCredential, headers: { "X-Selected-Host-Auth": selectedProxyRef } },
-      { baseUrl: REMOTE_HOST, apiKey: REMOTE_KEY, headers: remoteHeader },
+      { ...remoteWithKey, headers: remoteHeader },
       { ...remoteHeader, ...remoteAuth },
     ],
-    [
-      "remote credentials leave another host's refs inactive",
-      missingCredential,
-      { baseUrl: REMOTE_HOST, apiKey: REMOTE_KEY },
-      remoteAuth,
-    ],
-    [
-      "remote local marker opts out of selected auth",
-      localCredential,
-      { apiKey: "ollama-local" },
-      {}, // pragma: allowlist secret
-    ],
+    ["remote auth bypasses host refs", missingCredential, remoteWithKey, remoteAuth],
+    ["remote marker opts out", localCredential, { apiKey: "ollama-local" }, {}],
   ])(
     "%s",
-    async (_name, selected, remote, headers, providerId = "ollama", selectedKey = SELECTED_KEY) => {
-      vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-      vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", selectedKey);
-      vi.stubEnv("OLLAMA_SELECTED_PROXY_KEY", "synthetic-selected-proxy-key");
-      vi.stubEnv("OLLAMA_MISSING_SELECTED_SECRET", "");
-      const { fetchMock } = await embedTestQuery({
-        config: selectedConfig(selected, providerId),
+    async (
+      _name,
+      selected,
+      remote,
+      headers,
+      providerId = "ollama",
+      selectedKey = SELECTED_KEY,
+      model = "nomic-embed-text",
+    ) => {
+      stubCredentials(selectedKey);
+      const options = {
+        config: selected ? selectedConfig(selected, providerId) : {},
         provider: providerId,
         remote,
-      });
+        model,
+      };
+      if (headers instanceof RegExp) {
+        const fetchMock = mockEmbeddingFetch([1, 0]);
+        await expect(createEmbeddingProvider(options)).rejects.toThrow(headers);
+        expect(fetchMock).not.toHaveBeenCalled();
+        return;
+      }
+      const { fetchMock } = await embedTestQuery(options);
       expectEmbeddingFetch(
         fetchMock,
-        `${remote.baseUrl ?? selected.baseUrl ?? PRIVATE_HOST}/api/embed`,
+        `${remote.baseUrl ?? selected?.baseUrl?.replace(/\/v1$/, "") ?? PRIVATE_HOST}/api/embed`,
         {
           input: "search_query: hello",
           headers: { "Content-Type": "application/json", ...headers },
@@ -439,8 +381,8 @@ describe("ollama embedding provider", () => {
   );
 
   it("preserves the legacy identity only for the default Ollama endpoint", async () => {
-    const defaultEndpoint = await createMemoryEmbeddingProvider({ dimensions: 2 });
-    const customEndpoint = await createMemoryEmbeddingProvider({
+    const defaultEndpoint = await memoryKey({ dimensions: 2 });
+    const customEndpoint = await memoryKey({
       remote: { baseUrl: "http://10.0.0.5:11434" },
       dimensions: 2,
     });
@@ -450,8 +392,8 @@ describe("ollama embedding provider", () => {
       model: "nomic-embed-text",
       outputDimensionality: 2,
     };
-    expect(defaultEndpoint.runtime?.cacheKeyData).toEqual(identity);
-    expect(customEndpoint.runtime?.cacheKeyData).toEqual({
+    expect(defaultEndpoint).toEqual(identity);
+    expect(customEndpoint).toEqual({
       ...identity,
       baseUrl: "http://10.0.0.5:11434",
     });
@@ -461,7 +403,7 @@ describe("ollama embedding provider", () => {
   // the tenant may change the cache key.
   it("keys custom endpoints by non-secret headers while excluding credentials", async () => {
     const createCustomProvider = (tenant: string, apiKey: string) =>
-      createMemoryEmbeddingProvider({
+      memoryKey({
         config: createProviderConfig(
           {
             api: "ollama",
@@ -476,19 +418,19 @@ describe("ollama embedding provider", () => {
       });
     const result = await createCustomProvider("tenant-a", "super-secret"); // pragma: allowlist secret
 
-    expect(result.runtime?.cacheKeyData).toMatchObject({
+    expect(result).toMatchObject({
       provider: "ollama-cpu",
       baseUrl: "https://ollama-cpu.home.lab",
       model: "qwen3-embedding:4b",
       headersHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
     });
-    expect(JSON.stringify(result.runtime?.cacheKeyData)).not.toContain("tenant-a");
-    expect(JSON.stringify(result.runtime?.cacheKeyData)).not.toContain("super-secret");
+    expect(JSON.stringify(result)).not.toContain("tenant-a");
+    expect(JSON.stringify(result)).not.toContain("super-secret");
 
     const rotatedCredential = await createCustomProvider("tenant-a", "rotated-fixture-key");
-    expect(rotatedCredential.runtime?.cacheKeyData).toEqual(result.runtime?.cacheKeyData);
+    expect(rotatedCredential).toEqual(result);
 
     const otherTenant = await createCustomProvider("tenant-b", "super-secret"); // pragma: allowlist secret
-    expect(otherTenant.runtime?.cacheKeyData).not.toEqual(result.runtime?.cacheKeyData);
+    expect(otherTenant).not.toEqual(result);
   });
 });

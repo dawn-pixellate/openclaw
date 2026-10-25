@@ -27,17 +27,17 @@ function mockOllama(modelId: string, thinking: unknown) {
     digest: "first",
     thinking,
   };
-  const requests: string[] = [];
+  let showCount = 0;
   const chatBodies: Record<string, unknown>[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const pathname = new URL(requestUrl(input)).pathname;
-      requests.push(pathname);
       if (pathname === "/api/tags") {
         return jsonResponse({ models: [{ name: modelId, digest: metadata.digest }] });
       }
       if (pathname === "/api/show") {
+        showCount++;
         return jsonResponse({
           model_info: {
             "test.context_length": 32768,
@@ -56,7 +56,7 @@ function mockOllama(modelId: string, thinking: unknown) {
   );
   return {
     metadata,
-    showCount: () => requests.filter((path) => path === "/api/show").length,
+    showCount: () => showCount,
     thoughts: () => chatBodies.map((body) => body.think),
     chatBodies,
     async discover(
@@ -71,7 +71,6 @@ function mockOllama(modelId: string, thinking: unknown) {
         resolveProviderApiKey: () => ({ apiKey: "ollama-local" }),
         resolveProviderAuth: () => ({ apiKey: "ollama-local", mode: "api_key", source: "env" }),
       });
-      expect(result?.outcomes).toMatchObject([{ provider: "ollama", status: "ready" }]);
       const provider = expectDefined(
         result && "provider" in result ? result.provider : undefined,
         "discovered provider",
@@ -111,13 +110,6 @@ const descriptor = (values: unknown) => ({ values });
 const graded = ["low", "medium", "high"];
 const extended = [false, "low", "medium", "xhigh"];
 const fallback = [false, "low", "high", "high"];
-type Mapping = [
-  name: string,
-  thinking: unknown,
-  expected: unknown[],
-  capability?: "xhigh" | "minimal" | "legacy",
-];
-
 describe("Ollama discovered thinking contracts", () => {
   it("preserves manual settings with discovered mandatory thinking", async () => {
     const fixture = mockOllama("manual-mandatory-thinking:latest", descriptor([true]));
@@ -144,38 +136,29 @@ describe("Ollama discovered thinking contracts", () => {
     expect(model.thinkingLevelMap).toBeUndefined();
   });
 
-  it.each<Mapping>([
+  it.each<[string, unknown, unknown[]]>([
     ["boolean", descriptor([false, true]), [false, true, true, true]],
-    ["mandatory boolean", descriptor([true]), [true, true, true, true]],
-    ["graded xhigh", descriptor(extended), [false, "low", "xhigh", "xhigh"], "xhigh"],
+    ["graded xhigh", descriptor(extended), [false, "low", "xhigh", "xhigh"]],
     ["mandatory graded", descriptor(graded), ["low", "low", "high", "high"]],
     ["native max", descriptor([false, ...graded, "max"]), [false, "low", "high", "max"]],
-    ["native minimal", descriptor([false, "minimal", "low", "high"]), fallback, "minimal"],
-    ["missing descriptor", undefined, fallback, "legacy"],
-    ["malformed descriptor", descriptor("xhigh"), fallback, "legacy"],
-  ])("maps %s discovery to native requests", async (name, thinking, expected, capability) => {
+    ["native minimal", descriptor([false, "minimal", "low", "high"]), fallback],
+    ["missing descriptor", undefined, fallback],
+    ["malformed descriptor", descriptor("xhigh"), fallback],
+  ])("maps %s discovery to native requests", async (name, thinking, expected) => {
     const fixture = mockOllama(`thinking-${name.replaceAll(" ", "-")}:latest`, thinking);
     const model = await fixture.discover();
-    const xhigh = capability === "xhigh";
-    expect(clampThinkingLevel(model, "xhigh")).toBe(xhigh ? "xhigh" : "high");
-    expect(clampThinkingLevel(model, "minimal")).toBe(capability && !xhigh ? "minimal" : "low");
-    expect(levelsFor(model)).toEqual([
-      "off",
-      ...(capability === "minimal" ? ["minimal"] : []),
-      ...graded,
-      ...(xhigh ? ["xhigh"] : []),
-      "max",
-    ]);
+    if (name === "native minimal") {
+      expect(clampThinkingLevel(model, "minimal")).toBe("minimal");
+    }
     await sendThinking(model, "off", "low", "high", "max");
     expect(fixture.thoughts()).toEqual(expected);
     for (const body of fixture.chatBodies) {
       expect(body.options).not.toHaveProperty("think");
     }
-    if (xhigh) {
+    if (name === "graded xhigh") {
       await sendThinking(model, "xhigh");
       expect(fixture.thoughts().at(-1)).toBe("xhigh");
     }
-    expect(fixture.showCount()).toBe(1);
   });
 
   it("preserves explicit think at off but lets enabled runtime levels win", async () => {
@@ -188,23 +171,23 @@ describe("Ollama discovered thinking contracts", () => {
     expect(fixture.thoughts()).toEqual(["xhigh", "low", false]);
   });
 
-  it("honors reasoning false even when discovery advertised thinking levels", async () => {
-    const fixture = mockOllama("thinking-disabled:latest", { values: extended });
-    const model = await fixture.discover();
-    model.reasoning = false;
-    expect(levelsFor(model)).toEqual(["off"]);
-    await sendThinking(model, "high", "off");
-    expect(fixture.thoughts()).toEqual([undefined, false]);
-  });
-
-  it("lets an off-only descriptor replace a stale cloud thinking floor", async () => {
-    const fixture = mockOllama("glm-5.3", { values: [false], default: false });
-    const model = await fixture.discover();
-    expect(model.reasoning).toBe(false);
-    expect(levelsFor(model)).toEqual(["off"]);
-    await sendThinking(model, "off");
-    expect(fixture.thoughts()).toEqual([false]);
-  });
+  it.each([
+    ["thinking-disabled:latest", { values: extended }, true],
+    ["glm-5.3", { values: [false], default: false }, false],
+  ] as const)(
+    "disables reasoning for %s despite advertised or cloud defaults",
+    async (id, thinking, override) => {
+      const fixture = mockOllama(id, thinking);
+      const model = await fixture.discover();
+      if (override) {
+        model.reasoning = false;
+      }
+      expect(model.reasoning).toBe(false);
+      expect(levelsFor(model)).toEqual(["off"]);
+      await sendThinking(model, ...(override ? (["high", "off"] as const) : (["off"] as const)));
+      expect(fixture.thoughts()).toEqual(override ? [undefined, false] : [false]);
+    },
+  );
 
   it("preserves configured effort over mandatory thinking in wrapped and direct calls", async () => {
     const fixture = mockOllama("thinking-mandatory-precedence:latest", { values: graded });

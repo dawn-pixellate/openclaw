@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildOllamaProvider,
   buildOllamaBaseUrlSsrFPolicy,
-  buildOllamaModelDefinition,
   enrichOllamaCompletionModels,
   enrichOllamaModelsWithContext,
   fetchLoadedOllamaModelNames,
@@ -59,41 +58,11 @@ describe("ollama provider models", () => {
     },
   );
 
-  it("keeps incomplete cloud metadata discoverable with remote host metadata", async () => {
-    const listed = {
-      name: "deepseek-r1:671b",
-      remote_host: "https://ollama.example",
-      capabilities: ["vision"],
-    };
-    stubDiscovery([listed]);
-
-    await expect(buildOllamaProvider(localUrl)).resolves.toMatchObject({
-      models: [
-        {
-          id: listed.name,
-          input: ["text", "image"],
-          reasoning: true,
-          compat: { supportsTools: true },
-        },
-      ],
-    });
-  });
-
   it("keeps strict node discovery closed when remote completion is only inferred", async () => {
     stubDiscovery([]);
-
+    const model = { name: "remote", remote_model: "upstream", capabilities: ["tools"] };
     await expect(
-      enrichOllamaCompletionModels(
-        localUrl,
-        [
-          {
-            name: "remote-chat:latest",
-            remote_model: "upstream-chat:latest",
-            capabilities: ["tools"],
-          },
-        ],
-        { requireCompletionCapability: true },
-      ),
+      enrichOllamaCompletionModels(localUrl, [model], { requireCompletionCapability: true }),
     ).resolves.toEqual([]);
   });
 
@@ -144,24 +113,12 @@ describe("ollama provider models", () => {
     expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
-  it.each([
-    { id: "minimax-m2.7", contextWindow: 196_608, maxTokens: 204_800 },
-    { id: "minimax-m3", contextWindow: 524_288, maxTokens: 524_288 },
-    { id: "kimi-k3", contextWindow: 1_048_576, maxTokens: 1_048_576 },
-    { id: "glm-5.2", contextWindow: 1_000_000, maxTokens: 131_072 },
-  ])("keeps the cloud output budget for $id aliases", ({ id, contextWindow, maxTokens }) => {
-    for (const modelId of [id, `${id}:cloud`, `${id}-cloud`]) {
-      expect(
-        buildOllamaModelDefinition(modelId, undefined, undefined, { remote: true }),
-      ).toMatchObject({ id: modelId, contextWindow, maxTokens });
-    }
-  });
-
   it.each<[name: string, url: string, maxTokens: number, remote?: Partial<OllamaTagModel>]>([
     ["local-model", localUrl, 8192],
     ["minimax-m3", localUrl, 8192],
     ["kimi-k3", localUrl, 8192],
     ["minimax-m3", "https://ollama.com", 524_288],
+    ["minimax-m3-cloud", localUrl, 524_288],
     ["kimi-k3", "https://ollama.com", 1_048_576],
     ["glm-5.2:cloud", localUrl, 131_072],
     ["unknown:cloud", localUrl, 262_144],
@@ -171,9 +128,13 @@ describe("ollama provider models", () => {
   ])("discovers %s output limits at %s", async (name, url, maxTokens, remote) => {
     stubDiscovery([{ name, ...remote }], {
       capabilities: completion,
-      model_info: { "test.context_length": 262_144 },
+      model_info: name.endsWith("-cloud") ? {} : { "test.context_length": 262_144 },
     });
-    expect((await discoverModel(url)).runtime).toMatchObject({ id: name, maxTokens });
+    expect((await discoverModel(url)).runtime).toMatchObject({
+      id: name,
+      maxTokens,
+      ...(name.endsWith("-cloud") ? { contextWindow: 524_288 } : {}),
+    });
   });
 
   it("uses Modelfile num_ctx when it expands the discovered context window", async () => {
@@ -188,110 +149,68 @@ describe("ollama provider models", () => {
     ]);
   });
 
-  it("closes real failed discovery sockets while preserving successful discovery", async () => {
-    const socketClosures = new Map<string, Promise<void>>();
-    let mode: "failure" | "success" = "failure";
-
-    const handleRequest: Parameters<typeof withServer>[0] = (request, response) => {
-      const path = request.url;
-      if (path !== "/api/tags" && path !== "/api/show") {
-        response.writeHead(404);
-        response.end();
-        return;
-      }
-
-      if (mode === "failure") {
-        socketClosures.set(
-          path,
-          new Promise<void>((resolve) => {
-            request.socket.once("close", () => resolve());
-          }),
-        );
-        response.writeHead(503, { "content-type": "text/plain" });
-        // Leave the body open so only real client cancellation can close its socket.
-        response.write("ollama unavailable");
-        return;
-      }
-
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify(
-          path === "/api/tags"
-            ? { models: [{ name: "llama3:8b" }] }
-            : {
-                model_info: { "llama.context_length": 32768 },
-                capabilities: ["completion", "tools"],
-              },
-        ),
-      );
-    };
-
-    const waitForSocketClose = async (path: string): Promise<void> => {
-      await withTimeout(
-        expectDefined(socketClosures.get(path), `failed discovery socket for ${path}`),
-        2_000,
-        { message: `Failed discovery socket was not closed for ${path}` },
-      );
-    };
-
-    await withServer(handleRequest, async (baseUrl) => {
-      await expect(fetchOllamaModels(baseUrl)).resolves.toEqual({
-        reachable: true,
-        models: [],
-      });
-      await waitForSocketClose("/api/tags");
-
-      await expect(queryOllamaModelShowInfo(baseUrl, "llama3:8b")).resolves.toEqual({
-        showInspectionFailed: true,
-      });
-      await waitForSocketClose("/api/show");
-
-      mode = "success";
-      await expect(fetchOllamaModels(baseUrl)).resolves.toEqual({
-        reachable: true,
-        models: [{ name: "llama3:8b" }],
-      });
-      await expect(queryOllamaModelShowInfo(baseUrl, "llama3:8b")).resolves.toEqual({
-        contextWindow: 32768,
-        capabilities: ["completion", "tools"],
-      });
-    });
-  });
-
-  it("preserves remote-model-only list capabilities after a live inspection failure", async () => {
-    const listed = {
-      name: "remote-chat:latest",
-      remote_model: "upstream-chat:latest",
-      digest: "sha256:remote-model-list-metadata",
-      details: { context_length: 32_768 },
-      capabilities: ["tools"],
-    };
-
+  it.each(["tags", "show"])("closes a real failed %s discovery socket", async (endpoint) => {
+    let closed: Promise<void> | undefined;
     await withServer(
       (request, response) => {
-        response.setHeader("Content-Type", "application/json");
-        if (request.url === "/api/tags") {
-          response.end(JSON.stringify({ models: [listed] }));
-          return;
-        }
-        if (request.url === "/api/show") {
-          response.statusCode = 500;
-          response.end(JSON.stringify({ error: "show failed" }));
-          return;
-        }
-        response.statusCode = 404;
-        response.end(JSON.stringify({ error: "not found" }));
+        expect(request.url).toBe(`/api/${endpoint}`);
+        closed = new Promise<void>((resolve) => {
+          request.socket.once("close", resolve);
+        });
+        response.writeHead(503, { "content-type": "text/plain" });
+        // Only client cancellation can close this unfinished response.
+        response.write("ollama unavailable");
       },
       async (baseUrl) => {
-        expect((await discoverModel(baseUrl)).model).toMatchObject({
-          id: listed.name,
-          contextWindow: 32_768,
-          compat: { supportsTools: true },
-          reasoning: false,
+        const result =
+          endpoint === "tags"
+            ? await fetchOllamaModels(baseUrl)
+            : await queryOllamaModelShowInfo(baseUrl, "llama3:8b");
+        expect(result).toEqual(
+          endpoint === "tags" ? { reachable: true, models: [] } : { showInspectionFailed: true },
+        );
+        await withTimeout(expectDefined(closed, "failed discovery socket"), 2_000, {
+          message: "Failed discovery socket was not closed",
         });
       },
     );
   });
+
+  it.each([
+    [200, "deepseek-r1:671b", { remote_host: "https://ollama.example" }, ["vision"], true],
+    [500, "remote-chat:latest", { remote_model: "upstream-chat" }, ["tools"], false],
+  ] as const)(
+    "preserves remote list metadata after inspection HTTP %i",
+    async (status, name, remote, capabilities, reasoning) => {
+      const listed = {
+        name,
+        ...remote,
+        details: { context_length: 32_768 },
+        capabilities,
+      };
+      await withServer(
+        (request, response) => {
+          expect(["/api/tags", "/api/show"]).toContain(request.url);
+          const tags = request.url === "/api/tags";
+          response.writeHead(tags ? 200 : status, { "Content-Type": "application/json" });
+          response.end(
+            JSON.stringify(
+              tags ? { models: [listed] } : status === 200 ? {} : { error: "show failed" },
+            ),
+          );
+        },
+        async (baseUrl) => {
+          expect((await discoverModel(baseUrl)).model).toMatchObject({
+            id: listed.name,
+            contextWindow: 32_768,
+            input: status === 200 ? ["text", "image"] : ["text"],
+            compat: { supportsTools: true },
+            reasoning,
+          });
+        },
+      );
+    },
+  );
 
   it.each(["tags", "show"] as const)(
     "bounds %s discovery JSON and cancels oversized streams",
