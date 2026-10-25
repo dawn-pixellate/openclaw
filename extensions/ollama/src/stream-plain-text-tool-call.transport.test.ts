@@ -80,35 +80,16 @@ async function runThroughTransport(chunks: readonly string[], tools: Tool[]) {
     [...chunks.map((content) => record(content)), record("", true)],
     tools,
   );
-  const run = {
-    deltaText: "",
-    doneText: "",
-    errors: Array<unknown>(),
-    partialCarryingDeltas: 0,
-    toolCallNames: Array<string>(),
+  const events = await Array.fromAsync(stream);
+  const deltas = events.filter((event) => event.type === "text_delta");
+  const content = events.flatMap((event) => (event.type === "done" ? event.message.content : []));
+  return {
+    deltaText: deltas.map((event) => event.delta).join(""),
+    doneText: content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join(""),
+    errors: events.flatMap((event) => (event.type === "error" ? [event.error] : [])),
+    partialCarryingDeltas: deltas.filter((event) => event.partial !== undefined).length,
+    toolCallNames: content.flatMap((block) => (block.type === "toolCall" ? [block.name] : [])),
   };
-  for await (const event of stream) {
-    if (event.type === "text_delta") {
-      run.deltaText += event.delta;
-      if ("partial" in event && event.partial !== undefined) {
-        run.partialCarryingDeltas += 1;
-      }
-    }
-    if (event.type === "error") {
-      run.errors.push(event.error);
-    }
-    if (event.type === "done") {
-      for (const block of event.message.content) {
-        if (block.type === "text") {
-          run.doneText += block.text;
-        }
-        if (block.type === "toolCall") {
-          run.toolCallNames.push(block.name);
-        }
-      }
-    }
-  }
-  return run;
 }
 
 const readTool = {
@@ -180,11 +161,7 @@ const toolCallDispatcherTool = {
     required: ["id"],
     properties: {
       id: { type: "string", description: "Tool search result id or tool name." },
-      args: {
-        type: "object",
-        patternProperties: { "^.*$": {} },
-        description: "Tool input.",
-      },
+      args: { type: "object", patternProperties: { "^.*$": {} }, description: "Tool input." },
     },
   },
 };

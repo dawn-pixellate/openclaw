@@ -53,14 +53,46 @@ function ensurePulled(model: string, prompter: WizardPrompter) {
   return ensureOllamaModelPulled({ config: createDefaultOllamaConfig(model), model, prompter });
 }
 
-function pendingResponse(signal: AbortSignal | null | undefined, message: string) {
+function pendingResponse(signal: AbortSignal | null | undefined) {
   return new Promise<Response>((_resolve, reject) => {
     if (!signal) {
-      reject(new Error(message));
+      reject(new Error("expected setup abort signal"));
       return;
     }
     signal.addEventListener("abort", () => reject(abortReasonAsError(signal)), { once: true });
   });
+}
+
+function startAbortableSetup(
+  options: Parameters<typeof createOllamaFetchMock>[0],
+  prompter: WizardPrompter,
+  shouldPause: (url: string, body: string) => boolean,
+) {
+  const controller = new AbortController();
+  const started = createDeferred<void>();
+  const baseFetch = createOllamaFetchMock(options);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (!shouldPause(requestUrl(input), requestBodyText(init?.body))) {
+        return baseFetch(input, init);
+      }
+      started.resolve();
+      return pendingResponse(init?.signal);
+    }),
+  );
+  return {
+    controller,
+    started: started.promise,
+    setup: promptAndConfigureOllama({ cfg: {}, prompter, signal: controller.signal }),
+  };
+}
+
+function configuredModel(
+  config: Parameters<typeof ensureOllamaModelPulled>[0]["config"],
+  id: string,
+) {
+  return config.models?.providers?.ollama?.models?.find((model) => model.id === id);
 }
 
 describe("ollama setup", () => {
@@ -94,10 +126,7 @@ describe("ollama setup", () => {
 
   it("puts hybrid cloud model suggestions after the local default when signed in", async () => {
     const { result } = await configureInteractive(
-      {
-        tags: ["llama3:8b"],
-        meResponse: jsonResponse({ user: "signed-in" }),
-      },
+      { tags: ["llama3:8b"], meResponse: jsonResponse({ user: "signed-in" }) },
       { select: vi.fn().mockResolvedValueOnce("cloud-local") },
     );
     const modelIds = result.config.models?.providers?.ollama?.models?.map((m) => m.id);
@@ -131,10 +160,7 @@ describe("ollama setup", () => {
     const { result, prompter } = await configureInteractive(
       {
         tags: ["llama3:8b"],
-        meResponse: new Response(JSON.stringify({ signin_url: "https://ollama.com/signin" }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" },
-        }),
+        meResponse: Response.json({ signin_url: "https://ollama.com/signin" }, { status: 401 }),
       },
       { select: vi.fn().mockResolvedValueOnce("cloud-local") },
     );
@@ -155,10 +181,7 @@ describe("ollama setup", () => {
       {
         tags: ["llama3:8b"],
         show: { "gemma4:e4b": 131072 },
-        capabilities: {
-          "llama3:8b": ["generate"],
-          "gemma4:e4b": ["tools"],
-        },
+        capabilities: { "llama3:8b": ["generate"], "gemma4:e4b": ["tools"] },
         pullResponse: new Response(
           [
             '{"status":"pulling sha256:12345678","total":100,"completed":50}',
@@ -182,9 +205,7 @@ describe("ollama setup", () => {
     expect(JSON.parse(requestBodyText(pullCall?.[1]?.body))).toEqual({ model: "gemma4:e4b" });
     expect(progress.update).toHaveBeenCalledWith("Downloading gemma4:e4b - pulling part - 50%");
     expect(progress.stop).toHaveBeenCalledWith("Downloaded gemma4:e4b");
-    expect(
-      result.config.models?.providers?.ollama?.models?.find((model) => model.id === "gemma4:e4b"),
-    ).toMatchObject({
+    expect(configuredModel(result.config, "gemma4:e4b")).toMatchObject({
       contextWindow: 131072,
       compat: { supportsTools: true },
     });
@@ -193,10 +214,7 @@ describe("ollama setup", () => {
 
   it("does not pull the recommended Ollama model when declined", async () => {
     const { prompter, fetchMock } = await configureInteractive(
-      {
-        tags: ["llama3:8b"],
-        capabilities: { "llama3:8b": ["generate"] },
-      },
+      { tags: ["llama3:8b"], capabilities: { "llama3:8b": ["generate"] } },
       { confirm: vi.fn().mockResolvedValueOnce(false) },
     );
 
@@ -207,32 +225,25 @@ describe("ollama setup", () => {
   });
 
   it("skips a broken model and continues setup when one inspection fails", async () => {
-    const prompter = createLocalPrompter({ confirm: vi.fn() });
-    const baseFetch = createOllamaFetchMock({
-      tags: ["broken:20b", "gemma4:e4b"],
-      capabilities: { "gemma4:e4b": ["tools"] },
-    });
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      if (requestUrl(input).endsWith("/api/show")) {
-        const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
-        if (body.model === "broken:20b") {
-          return new Response("boom", { status: 500 });
-        }
-      }
-      return await baseFetch(input, init);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await promptAndConfigureOllama({ cfg: {}, prompter });
+    const { result, prompter } = await configureInteractive(
+      {
+        tags: ["broken:20b", "gemma4:e4b"],
+        showResponse: (model) =>
+          model === "broken:20b"
+            ? new Response("boom", { status: 500 })
+            : jsonResponse({ capabilities: ["tools"] }),
+      },
+      { confirm: vi.fn() },
+    );
 
     expect(prompter.confirm).not.toHaveBeenCalled();
     expect(prompter.note).toHaveBeenCalledWith(expect.stringContaining("broken:20b"), "Ollama");
-    expect(
-      result.config.models?.providers?.ollama?.models?.find((model) => model.id === "gemma4:e4b"),
-    ).toMatchObject({ compat: { supportsTools: true } });
-    expect(
-      result.config.models?.providers?.ollama?.models?.find((model) => model.id === "broken:20b"),
-    ).toMatchObject({ compat: { supportsTools: false } });
+    expect(configuredModel(result.config, "gemma4:e4b")).toMatchObject({
+      compat: { supportsTools: true },
+    });
+    expect(configuredModel(result.config, "broken:20b")).toMatchObject({
+      compat: { supportsTools: false },
+    });
   });
 
   it("checks all installed Ollama models before offering a recommended pull", async () => {
@@ -246,30 +257,21 @@ describe("ollama setup", () => {
     );
 
     expect(prompter.confirm).not.toHaveBeenCalled();
-    expect(
-      result.config.models?.providers?.ollama?.models?.find((model) => model.id === "model-200"),
-    ).toMatchObject({ compat: { supportsTools: true } });
+    expect(configuredModel(result.config, "model-200")).toMatchObject({
+      compat: { supportsTools: true },
+    });
   });
 
   it("aborts the exhaustive tools-capability scan with the setup session", async () => {
-    const controller = new AbortController();
     const prompter = createLocalPrompter({ confirm: vi.fn() });
     const tags = Array.from({ length: 201 }, (_, index) => `model-${index}`);
     const capabilities = Object.fromEntries(tags.map((name) => [name, ["generate"]]));
-    const baseFetch = createOllamaFetchMock({ tags, capabilities });
-    const scanStarted = createDeferred<void>();
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const body = init?.body ? (JSON.parse(requestBodyText(init.body)) as { model?: string }) : {};
-      if (!requestUrl(input).endsWith("/api/show") || body.model !== "model-200") {
-        return await baseFetch(input, init);
-      }
-      scanStarted.resolve();
-      return await pendingResponse(init?.signal, "expected tools scan abort signal");
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const setup = promptAndConfigureOllama({ cfg: {}, prompter, signal: controller.signal });
-    await scanStarted.promise;
+    const { setup, started, controller } = startAbortableSetup(
+      { tags, capabilities },
+      prompter,
+      (url, body) => url.endsWith("/api/show") && JSON.parse(body).model === "model-200",
+    );
+    await started;
     controller.abort();
 
     await expect(setup).rejects.toMatchObject({ name: "AbortError" });
@@ -277,28 +279,17 @@ describe("ollama setup", () => {
   });
 
   it("aborts a recommended Ollama pull when the setup session is cancelled", async () => {
-    const controller = new AbortController();
     const progress = { update: vi.fn(), stop: vi.fn() };
     const prompter = createLocalPrompter({
       confirm: vi.fn().mockResolvedValueOnce(true),
       progress: vi.fn(() => progress),
     });
-    const baseFetch = createOllamaFetchMock({
-      tags: ["llama3:8b"],
-      capabilities: { "llama3:8b": ["generate"] },
-    });
-    const pullStarted = createDeferred<void>();
-    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      if (!requestUrl(input).endsWith("/api/pull")) {
-        return await baseFetch(input, init);
-      }
-      pullStarted.resolve();
-      return await pendingResponse(init?.signal, "expected pull abort signal");
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const setup = promptAndConfigureOllama({ cfg: {}, prompter, signal: controller.signal });
-    await pullStarted.promise;
+    const { setup, started, controller } = startAbortableSetup(
+      { tags: ["llama3:8b"], capabilities: { "llama3:8b": ["generate"] } },
+      prompter,
+      (url) => url.endsWith("/api/pull"),
+    );
+    await started;
     controller.abort();
 
     await expect(setup).rejects.toThrow("Failed to download recommended Ollama model");
@@ -356,8 +347,10 @@ describe("ollama setup", () => {
         await vi.advanceTimersByTimeAsync(300_000);
         const pullError = await pullPromise;
         expect(pullError).toBeInstanceOf(Error);
-        expect((pullError as Error).name).toBe("WizardCancelledError");
-        expect((pullError as Error).message).toBe("Failed to download selected Ollama model");
+        expect(pullError).toMatchObject({
+          name: "WizardCancelledError",
+          message: "Failed to download selected Ollama model",
+        });
         expect(progress.stop).toHaveBeenCalledWith(
           "Failed to download gemma4: Ollama pull stalled: no data received for 300s",
         );
@@ -379,29 +372,10 @@ describe("ollama setup", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
-    it("skips pull for cloud models", async () => {
-      const prompter = {} as unknown as WizardPrompter;
+    it.each(["ollama/kimi-k2.5:cloud", "openai/gpt-4o"])("skips pull for %s", async (model) => {
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
-
-      await ensurePulled("ollama/kimi-k2.5:cloud", prompter);
-
-      expect(fetchMock).not.toHaveBeenCalled();
-    });
-
-    it("skips when model is not an ollama model", async () => {
-      const prompter = {} as unknown as WizardPrompter;
-      const fetchMock = vi.fn();
-      vi.stubGlobal("fetch", fetchMock);
-
-      await ensureOllamaModelPulled({
-        config: {
-          agents: { defaults: { model: { primary: "openai/gpt-4o" } } },
-        },
-        model: "openai/gpt-4o",
-        prompter,
-      });
-
+      await ensurePulled(model, createLocalPrompter());
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
@@ -521,14 +495,9 @@ describe("Ollama non-interactive onboarding", () => {
   });
 
   it("does not persist unavailable local models when the model pull ends before success", async () => {
-    const { body, error } = {
-      body: '{"status":"pulling manifest"}\n',
-      error: "Failed to download missing-model: pull stream ended before success",
-    };
-
     const { configure, runtime, nextConfig } = startNonInteractive({
       tags: [],
-      pullResponse: new Response(body, { status: 200 }),
+      pullResponse: new Response('{"status":"pulling manifest"}\n', { status: 200 }),
       fallbackCapabilities: true,
     });
 
@@ -538,7 +507,9 @@ describe("Ollama non-interactive onboarding", () => {
         "Pull a chat model first, then re-run setup.",
       ].join("\n"),
     );
-    expect(runtime.error).toHaveBeenCalledWith(error);
+    expect(runtime.error).toHaveBeenCalledWith(
+      "Failed to download missing-model: pull stream ended before success",
+    );
     expect(runtime.log).not.toHaveBeenCalledWith("Downloaded missing-model");
     expect(runtime.exit).not.toHaveBeenCalled();
     expect(nextConfig).toEqual({});
@@ -559,10 +530,7 @@ describe("Ollama non-interactive onboarding", () => {
       {
         agents: {
           defaults: {
-            model: {
-              primary: "openai/gpt-5.6-luna",
-              fallbacks: ["anthropic/claude-sonnet-4-6"],
-            },
+            model: { primary: "openai/gpt-5.6-luna", fallbacks: ["anthropic/claude-sonnet-4-6"] },
           },
         },
       },
@@ -585,11 +553,7 @@ describe("Ollama non-interactive onboarding", () => {
         { name: "gemma4:latest", size: 9_608_350_718 },
         { name: "llama3.2:latest", size: 2_019_393_189 },
       ],
-      show: {
-        "qwen3:4b-instruct": 262_144,
-        "gemma4:latest": 131_072,
-        "llama3.2:latest": 131_072,
-      },
+      show: { "qwen3:4b-instruct": 262_144, "gemma4:latest": 131_072, "llama3.2:latest": 131_072 },
       capabilities: {
         "qwen3:4b-instruct": ["completion", "tools", "thinking"],
         "gemma4:latest": ["completion", "tools", "thinking"],
@@ -615,9 +579,7 @@ describe("Ollama non-interactive onboarding", () => {
     const result = await configure({ customModelId: modelId });
 
     expect(result.agents?.defaults?.model).toEqual({ primary: `ollama/${modelId}` });
-    expect(
-      result.models?.providers?.ollama?.models?.find((model) => model.id === modelId),
-    ).toMatchObject({
+    expect(configuredModel(result, modelId)).toMatchObject({
       id: modelId,
       input: ["text", "image"],
       reasoning: true,

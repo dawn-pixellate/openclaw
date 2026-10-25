@@ -56,7 +56,8 @@ function mockOllama(modelId: string, thinking: unknown) {
   );
   return {
     metadata,
-    requests,
+    showCount: () => requests.filter((path) => path === "/api/show").length,
+    thoughts: () => chatBodies.map((body) => body.think),
     chatBodies,
     async discover(
       api: "ollama" | "openai-completions" = "ollama",
@@ -103,9 +104,8 @@ async function sendThinking(model: ProviderRuntimeModel, ...levels: ThinkingLeve
   }
 }
 
-function profileFor(model: ProviderRuntimeModel) {
-  return resolveThinkingProfile({ ...model, modelId: model.id });
-}
+const levelsFor = (model: ProviderRuntimeModel) =>
+  resolveThinkingProfile({ ...model, modelId: model.id }).levels.map(({ id }) => id);
 
 const descriptor = (values: unknown) => ({ values });
 const graded = ["low", "medium", "high"];
@@ -119,7 +119,7 @@ type Mapping = [
 ];
 
 describe("Ollama discovered thinking contracts", () => {
-  it("keeps manual model settings while discovering the mandatory native thinking format", async () => {
+  it("preserves manual settings with discovered mandatory thinking", async () => {
     const fixture = mockOllama("manual-mandatory-thinking:latest", descriptor([true]));
     fixture.metadata.parameterCount = 70_000_000_000;
     const settings = {
@@ -134,7 +134,7 @@ describe("Ollama discovered thinking contracts", () => {
     });
     expect(model).toMatchObject({ ...settings, parameterCount: 70_000_000_000 });
     await sendThinking(model, "off", "high");
-    expect(fixture.chatBodies.map((body) => body.think)).toEqual([true, true]);
+    expect(fixture.thoughts()).toEqual([true, true]);
   });
 
   it("keeps native boolean mappings off the legacy OpenAI-compatible transport", async () => {
@@ -156,11 +156,10 @@ describe("Ollama discovered thinking contracts", () => {
   ])("maps %s discovery to native requests", async (name, thinking, expected, capability) => {
     const fixture = mockOllama(`thinking-${name.replaceAll(" ", "-")}:latest`, thinking);
     const model = await fixture.discover();
-    const profile = profileFor(model);
     const xhigh = capability === "xhigh";
     expect(clampThinkingLevel(model, "xhigh")).toBe(xhigh ? "xhigh" : "high");
     expect(clampThinkingLevel(model, "minimal")).toBe(capability && !xhigh ? "minimal" : "low");
-    expect(profile.levels.map(({ id }) => id)).toEqual([
+    expect(levelsFor(model)).toEqual([
       "off",
       ...(capability === "minimal" ? ["minimal"] : []),
       ...graded,
@@ -168,46 +167,46 @@ describe("Ollama discovered thinking contracts", () => {
       "max",
     ]);
     await sendThinking(model, "off", "low", "high", "max");
-    expect(fixture.chatBodies.map((body) => body.think)).toEqual(expected);
+    expect(fixture.thoughts()).toEqual(expected);
     for (const body of fixture.chatBodies) {
       expect(body.options).not.toHaveProperty("think");
     }
     if (xhigh) {
       await sendThinking(model, "xhigh");
-      expect(fixture.chatBodies.at(-1)?.think).toBe("xhigh");
+      expect(fixture.thoughts().at(-1)).toBe("xhigh");
     }
-    expect(fixture.requests.filter((path) => path === "/api/show")).toHaveLength(1);
+    expect(fixture.showCount()).toBe(1);
   });
 
-  it("preserves explicit native think with implicit off and lets an enabled runtime level win", async () => {
+  it("preserves explicit think at off but lets enabled runtime levels win", async () => {
     const fixture = mockOllama("thinking-precedence:latest", descriptor(extended));
     const model = await fixture.discover();
     model.params = { think: "xhigh", thinking: "low" };
     await sendThinking(model, "off", "low");
     model.params = { think: false, thinking: "xhigh" };
     await sendThinking(model, "off");
-    expect(fixture.chatBodies.map((body) => body.think)).toEqual(["xhigh", "low", false]);
+    expect(fixture.thoughts()).toEqual(["xhigh", "low", false]);
   });
 
   it("honors reasoning false even when discovery advertised thinking levels", async () => {
     const fixture = mockOllama("thinking-disabled:latest", { values: extended });
     const model = await fixture.discover();
     model.reasoning = false;
-    expect(profileFor(model).levels.map(({ id }) => id)).toEqual(["off"]);
+    expect(levelsFor(model)).toEqual(["off"]);
     await sendThinking(model, "high", "off");
-    expect(fixture.chatBodies.map((body) => body.think)).toEqual([undefined, false]);
+    expect(fixture.thoughts()).toEqual([undefined, false]);
   });
 
   it("lets an off-only descriptor replace a stale cloud thinking floor", async () => {
     const fixture = mockOllama("glm-5.3", { values: [false], default: false });
     const model = await fixture.discover();
     expect(model.reasoning).toBe(false);
-    expect(profileFor(model).levels.map(({ id }) => id)).toEqual(["off"]);
+    expect(levelsFor(model)).toEqual(["off"]);
     await sendThinking(model, "off");
-    expect(fixture.chatBodies.map((body) => body.think)).toEqual([false]);
+    expect(fixture.thoughts()).toEqual([false]);
   });
 
-  it("preserves configured effort over an implicit mandatory-thinking floor, including direct completions", async () => {
+  it("preserves configured effort over mandatory thinking in wrapped and direct calls", async () => {
     const fixture = mockOllama("thinking-mandatory-precedence:latest", { values: graded });
     const model = await fixture.discover();
     model.params = { think: "medium" };
@@ -216,19 +215,19 @@ describe("Ollama discovered thinking contracts", () => {
     await expectStop(streamFn(model, chatContext, { reasoning: "off" }));
     model.params = {};
     await expectStop(streamFn(model, chatContext, { reasoning: "off" }));
-    expect(fixture.chatBodies.map((body) => body.think)).toEqual(["medium", "medium", "low"]);
+    expect(fixture.thoughts()).toEqual(["medium", "medium", "low"]);
   });
 
   it("reuses cached thinking metadata until the advertised model digest changes", async () => {
     const fixture = mockOllama("thinking-cache-version:latest", { values: [false, true] });
     await sendThinking(await fixture.discover(), "high");
     await sendThinking(await fixture.discover(), "high");
-    expect(fixture.requests.filter((path) => path === "/api/show")).toHaveLength(1);
+    expect(fixture.showCount()).toBe(1);
 
     fixture.metadata.digest = "second";
     fixture.metadata.thinking = { values: extended };
     await sendThinking(await fixture.discover(), "high");
-    expect(fixture.chatBodies.map((body) => body.think)).toEqual([true, true, "xhigh"]);
-    expect(fixture.requests.filter((path) => path === "/api/show")).toHaveLength(2);
+    expect(fixture.thoughts()).toEqual([true, true, "xhigh"]);
+    expect(fixture.showCount()).toBe(2);
   });
 });

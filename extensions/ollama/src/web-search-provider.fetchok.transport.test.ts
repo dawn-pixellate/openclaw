@@ -1,5 +1,6 @@
 import "openclaw/plugin-sdk/compiled-subprocess-testing";
 import { withServer } from "openclaw/plugin-sdk/test-env";
+import { raceWithTimeout } from "openclaw/plugin-sdk/time-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createModelProviderConfig } from "../../test-support/model-provider-config.test-support.js";
 
@@ -20,21 +21,9 @@ async function waitForSocketClose(closed: Promise<void> | undefined): Promise<vo
   if (!closed) {
     throw new Error("Ollama web search test server did not receive a request");
   }
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      closed,
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(() => {
-          reject(new Error("Ollama auth-failure response was not canceled before guarded release"));
-        }, 2_000);
-      }),
-    ]);
-  } finally {
-    if (timeout !== undefined) {
-      clearTimeout(timeout);
-    }
-  }
+  await raceWithTimeout(closed, 2_000, () => {
+    throw new Error("Ollama auth-failure response was not canceled before guarded release");
+  });
 }
 
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
@@ -198,11 +187,7 @@ describe("ollama web search guarded fetch", () => {
       expect(error.message).not.toContain(authorization);
       expect(error.message).not.toContain(bearerCredential);
       expect(loopback.releases).toEqual([
-        {
-          bodyIsNull: false,
-          bodyUsed: true,
-          socketClosedBeforeGuardRelease: false,
-        },
+        { bodyIsNull: false, bodyUsed: true, socketClosedBeforeGuardRelease: false },
       ]);
 
       loopback.status = 200;
