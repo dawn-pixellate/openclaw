@@ -18,7 +18,6 @@ import type { MeetingSessionRecord } from "./session-types.js";
 import {
   createMeetingTranscriptSourceProvider,
   type MeetingDurableTranscriptBridge,
-  type MeetingTranscriptBridgeLogger,
 } from "./transcripts-bridge.js";
 import { createMeetingDurableTranscriptBridge } from "./transcripts-bridge.runtime.js";
 
@@ -26,7 +25,6 @@ let stateDir: string;
 let current: MeetingSessionRecord<"chrome", "agent">;
 let bridge: MeetingDurableTranscriptBridge;
 let store: TranscriptsStore;
-let logger: MeetingTranscriptBridgeLogger;
 
 beforeEach(async () => {
   stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-transcript-bridge-"));
@@ -44,7 +42,6 @@ beforeEach(async () => {
     realtime: { enabled: true, toolPolicy: "safe-read-only" },
     notes: [],
   };
-  logger = { warn: vi.fn() };
   bridge = createBridge();
   store = new TranscriptsStore(path.join(stateDir, "transcripts"), {
     env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
@@ -64,7 +61,7 @@ afterEach(async () => {
 
 function createBridge(config?: { enabled: boolean }) {
   return createMeetingDurableTranscriptBridge({
-    logger,
+    logger: { warn: vi.fn() },
     options: { providerId: "meeting", providerName: "Meeting", stateDir, config },
   });
 }
@@ -236,29 +233,6 @@ it("rejects attachments once finalization begins", async () => {
   await expect(stopping).resolves.toBe(true);
 });
 
-it("drains subscriber delivery before detaching", async () => {
-  const { promise: delivery, resolve: releaseDelivery } = createDeferredCore();
-  const onStatus = vi.fn(async () => {});
-  await start();
-  const request = attachment("external-drain", { onStatus, onUtterance: () => delivery });
-  await bridge.attach(current, request);
-  await expect(
-    bridge.detach({
-      ...request.session,
-      source: { ...request.session.source, agentId: "another-agent" },
-    }),
-  ).resolves.toMatchObject({ ok: false });
-  const ingesting = bridge.ingest(current, [{ text: "pending delivery" }]);
-  const detaching = bridge.detach(request.session);
-  await Promise.resolve();
-  expect(onStatus).toHaveBeenCalledTimes(1);
-  releaseDelivery();
-  await ingesting;
-  await expect(detaching).resolves.toMatchObject({ ok: true });
-
-  expect(onStatus).toHaveBeenCalledTimes(2);
-});
-
 it("does not let terminal subscriber notification block finalization", async () => {
   const onStatus = vi
     .fn()
@@ -274,18 +248,35 @@ it("does not let terminal subscriber notification block finalization", async () 
   expect(onStatus).toHaveBeenCalledTimes(2);
 });
 
-it("queues detach behind a pending attachment replay", async () => {
-  const { promise: replay, resolve: releaseReplay } = createDeferredCore();
-  const onUtterance = vi.fn(async () => await replay);
+it.each(["live delivery", "attachment replay"])("drains %s before detaching", async (phase) => {
+  const { promise, resolve } = createDeferredCore();
+  const onUtterance = vi.fn(async () => await promise);
+  const onStatus = vi.fn();
   await start();
-  await bridge.ingest(current, [{ text: "existing row" }]);
-  const request = attachment("external-pending", { onUtterance });
-
+  const replay = phase === "attachment replay";
+  if (replay) {
+    await bridge.ingest(current, [{ text: "existing row" }]);
+  }
+  const request = attachment("external-pending", { onUtterance, onStatus });
   const attaching = bridge.attach(current, request);
+  if (!replay) {
+    await attaching;
+  }
+  await expect(
+    bridge.detach({
+      ...request.session,
+      source: { ...request.session.source, agentId: "another-agent" },
+    }),
+  ).resolves.toMatchObject({ ok: false });
+  const ingesting = replay ? undefined : bridge.ingest(current, [{ text: "pending delivery" }]);
   const detaching = bridge.detach(request.session);
-  releaseReplay();
+  await Promise.resolve();
+  expect(onStatus).toHaveBeenCalledTimes(replay ? 0 : 1);
+  resolve();
   await expect(attaching).resolves.toMatchObject({ ok: true });
+  await ingesting;
   await expect(detaching).resolves.toMatchObject({ ok: true });
+  expect(onStatus).toHaveBeenCalledTimes(2);
   const replayed = vi.fn();
   await expect(
     bridge.attach(current, { ...request, onUtterance: replayed }),

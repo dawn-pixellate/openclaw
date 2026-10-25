@@ -204,12 +204,16 @@ async function createEngineFixture(
         expect(writeOutput).toHaveBeenLastCalledWith(audio);
       }
     },
-    async overflowOutput() {
-      this.sendOutputAudio(Buffer.alloc(48_000, 1), "response-1");
+    async overflowOutput(responseId: string | null = "response-1") {
+      const send = (audio: Buffer) =>
+        responseId === null
+          ? bridgeCallbacks.onAudio(audio)
+          : this.sendOutputAudio(audio, responseId);
+      send(Buffer.alloc(48_000, 1));
       await this.expectWrite(1);
       vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5_000);
-      this.sendOutputAudio(Buffer.alloc(48_000, 2), "response-1");
-      this.sendOutputAudio(Buffer.from([3]), "response-1");
+      send(Buffer.alloc(48_000, 2));
+      send(Buffer.from([3]));
       await vi.waitFor(() => expect(handleBargeIn).toHaveBeenCalledOnce());
     },
     releaseWrite(index: number) {
@@ -445,78 +449,67 @@ describe("meeting realtime engine output ownership", () => {
     fixture.releaseWrite(1);
   });
 
-  it("bounds queued bytes and rejects stale output through response.done", async () => {
-    const fixture = await createEngineFixture();
-    const first = Buffer.alloc(48_000, 1);
-    const queued = Buffer.alloc(48_000 * 119, 2);
-    const overflow = Buffer.from([3]);
-    const late = Buffer.from([4]);
-    const fresh = Buffer.from([5]);
+  it.each(["bytes", "frames"] as const)(
+    "bounds queued %s and rejects stale output through response.done",
+    async (limit) => {
+      const fixture = await createEngineFixture();
+      const first = Buffer.alloc(48_000, 1);
+      const late = Buffer.from([4]);
+      const fresh = Buffer.from([5]);
 
-    fixture.sendOutputAudio(first, "response-1");
-    await fixture.expectWrite(1);
-    fixture.sendOutputAudio(queued, "response-1");
-    fixture.sendOutputAudio(overflow, "response-1");
+      fixture.sendOutputAudio(first, "response-1");
+      await fixture.expectWrite(1);
+      if (limit === "bytes") {
+        fixture.sendOutputAudio(Buffer.alloc(48_000 * 119, 2), "response-1");
+        fixture.sendOutputAudio(Buffer.from([3]), "response-1");
+      } else {
+        for (let index = 1; index < 6_001; index += 1) {
+          fixture.sendOutputAudio(Buffer.from([index]), "response-1");
+        }
+      }
 
-    await vi.waitFor(() => fixture.expectForcedBargeIn());
-    fixture.callbacks.onClearAudio("barge-in");
-    await vi.waitFor(() => expect(fixture.clearOutput).toHaveBeenCalledOnce());
-    expect(fixture.writeOutput).toHaveBeenLastCalledWith(first);
+      await vi.waitFor(() => fixture.expectForcedBargeIn());
+      fixture.callbacks.onClearAudio("barge-in");
+      await vi.waitFor(() => expect(fixture.clearOutput).toHaveBeenCalledOnce());
+      expect(fixture.writeOutput).toHaveBeenLastCalledWith(first);
 
-    fixture.sendOutputAudio(late, "response-1");
-    fixture.event("response.done", "response-1");
-    fixture.sendOutputAudio(fresh, "response-2");
-    fixture.releaseWrite(0);
+      fixture.sendOutputAudio(late, "response-1");
+      fixture.event("response.done", "response-1");
+      fixture.sendOutputAudio(fresh, "response-2");
+      fixture.releaseWrite(0);
 
-    await fixture.expectWrite(2, fresh);
-    expect(fixture.clearOutput).toHaveBeenCalledTimes(2);
-    expect(fixture.clearOutput.mock.invocationCallOrder[1]).toBeLessThan(
-      fixture.writeOutput.mock.invocationCallOrder[1] ?? 0,
-    );
-    expect(fixture.beginOutput).toHaveBeenCalledTimes(2);
-    fixture.releaseWrite(1);
-  });
+      await fixture.expectWrite(2, fresh);
+      expect(fixture.clearOutput).toHaveBeenCalledTimes(2);
+      expect(fixture.clearOutput.mock.invocationCallOrder[1]).toBeLessThan(
+        fixture.writeOutput.mock.invocationCallOrder[1] ?? 0,
+      );
+      expect(fixture.beginOutput).toHaveBeenCalledTimes(2);
+      fixture.releaseWrite(1);
+    },
+  );
 
-  it("accepts a new response owner after backpressure without the stale response terminal", async () => {
-    const fixture = await createEngineFixture();
-    const late = Buffer.from([3]);
-    const fresh = Buffer.from([4]);
-
-    await fixture.overflowOutput();
-    fixture.expectForcedBargeIn();
-
-    fixture.sendOutputAudio(late, "response-1");
-    fixture.sendOutputAudio(fresh, "response-2");
-    fixture.releaseWrite(0);
-
-    await fixture.expectWrite(2, fresh);
-    expect(fixture.writeOutput).not.toHaveBeenCalledWith(late);
-    fixture.releaseWrite(1);
-  });
-
-  it("holds anonymous backpressure output until the provider clear fence", async () => {
-    const fixture = await createEngineFixture();
-    const active = Buffer.alloc(48_000, 1);
-    const queued = Buffer.alloc(48_000, 2);
-    const late = Buffer.from([3]);
-    const fresh = Buffer.from([4]);
-
-    fixture.callbacks.onAudio(active);
-    await fixture.expectWrite(1);
-    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5_000);
-    fixture.callbacks.onAudio(queued);
-    fixture.callbacks.onAudio(Buffer.from([5]));
-    await vi.waitFor(() => expect(fixture.handleBargeIn).toHaveBeenCalledOnce());
-
-    fixture.callbacks.onAudio(late);
-    fixture.callbacks.onClearAudio("barge-in");
-    fixture.callbacks.onAudio(fresh);
-    fixture.releaseWrite(0);
-
-    await fixture.expectWrite(2, fresh);
-    expect(fixture.writeOutput).not.toHaveBeenCalledWith(late);
-    fixture.releaseWrite(1);
-  });
+  it.each(["response-1", null])(
+    "releases backpressured owner %s only for a new response or an anonymous clear fence",
+    async (responseId) => {
+      const fixture = await createEngineFixture();
+      const late = Buffer.from([3]);
+      const fresh = Buffer.from([4]);
+      await fixture.overflowOutput(responseId);
+      fixture.expectForcedBargeIn();
+      if (responseId) {
+        fixture.sendOutputAudio(late, responseId);
+        fixture.sendOutputAudio(fresh, "response-2");
+      } else {
+        fixture.callbacks.onAudio(late);
+        fixture.callbacks.onClearAudio("barge-in");
+        fixture.callbacks.onAudio(fresh);
+      }
+      fixture.releaseWrite(0);
+      await fixture.expectWrite(2, fresh);
+      expect(fixture.writeOutput).not.toHaveBeenCalledWith(late);
+      fixture.releaseWrite(1);
+    },
+  );
 
   it("plays a long reply that streams ahead of playback", async () => {
     const fixture = await createEngineFixture();
@@ -535,19 +528,6 @@ describe("meeting realtime engine output ownership", () => {
       await fixture.expectWrite(index + 2, chunk);
     }
     fixture.releaseWrite(rest.length);
-  });
-
-  it("bounds queued tiny-frame ownership", async () => {
-    const fixture = await createEngineFixture();
-    fixture.sendOutputAudio(Buffer.from([0]), "response-1");
-    await fixture.expectWrite(1);
-    for (let index = 1; index < 6_001; index += 1) {
-      fixture.sendOutputAudio(Buffer.from([index]), "response-1");
-    }
-
-    await vi.waitFor(() => fixture.expectForcedBargeIn());
-    expect(fixture.clearOutput).toHaveBeenCalledOnce();
-    fixture.releaseWrite(0);
   });
 
   it("does not report a deferred cancellation race after response completion", async () => {

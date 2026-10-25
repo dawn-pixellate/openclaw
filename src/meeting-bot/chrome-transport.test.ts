@@ -105,31 +105,19 @@ function mockTransport(options: Partial<Omit<TransportOptions, "runtime">> = {},
     getHealth: vi.fn(),
     stop: vi.fn(async () => {}),
   };
-  const createBindings = vi.fn(() => ({
-    platform: { displayName: "Test", logScope: "[test]", sessionIdPrefix: "test" },
-    consultAgent: vi.fn(),
-    tools: [],
-    handleToolCall: vi.fn(),
-  }));
+  const createBindings = vi.fn(createMeetingRealtimeEngineBindings);
   const startAgent = vi.fn(async () => engine);
   const dispose = vi.fn(async () => {});
   const localAudio = {
-    clearOutput: vi.fn(),
+    clearOutput: vi.fn(async () => {}),
     dispose,
     onFatal: vi.fn(),
     startInput: vi.fn(),
-    stop: vi.fn(),
-    writeOutput: vi.fn(),
-  };
-  const nodeAudioTransport = {
-    ...localAudio,
-    dispose: vi.fn(async () => {}),
-    clearOutput: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
     writeOutput: vi.fn(async () => {}),
   };
   const createNodeAudioTransport = node
-    ? vi.fn<typeof createNodeMeetingRealtimeAudioTransport>(() => nodeAudioTransport)
+    ? vi.fn<typeof createNodeMeetingRealtimeAudioTransport>(() => localAudio)
     : vi.fn<typeof createNodeMeetingRealtimeAudioTransport>();
   const transport = createTransport({
     ...transportOptions,
@@ -148,7 +136,7 @@ function mockTransport(options: Partial<Omit<TransportOptions, "runtime">> = {},
     createBindings,
     startAgent,
     dispose,
-    nodeAudioTransport,
+    nodeAudioTransport: localAudio,
     createNodeAudioTransport,
   };
 }

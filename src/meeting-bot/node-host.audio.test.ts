@@ -156,11 +156,11 @@ function queueTerminalAudio(bridge: Bridge) {
 }
 const expectUnknown = (bridge: Bridge) =>
   expect(rpc(bridge, "pullAudio")).rejects.toThrow(`unknown bridgeId: ${bridge.bridgeId}`);
-const expectPull = (bridge: Bridge, pulling: Promise<unknown>, closed: boolean, audio: Buffer) =>
+const expectPull = (bridge: Bridge, pulling: Promise<unknown>, closed: boolean, audio?: Buffer) =>
   expect(pulling).resolves.toEqual({
     bridgeId: bridge.bridgeId,
     closed,
-    base64: audio.toString("base64"),
+    ...(audio ? { base64: audio.toString("base64") } : {}),
   });
 const expectRetained = (bridge: Bridge) =>
   expect(rpc(bridge, "status")).resolves.toMatchObject({
@@ -342,40 +342,30 @@ describe("meeting node host audio output", () => {
     }
   });
 
-  it.each([false, true])(
-    "delivers terminal close with final audio=%s to a pending pull",
-    async (audio) => {
-      const bridge = await startAudioBridge();
-      const { bridgeId } = bridge;
-      const pulling = rpc(bridge, "pullAudio", { timeoutMs: 2_000 });
-
-      if (audio) {
-        bridge.inputStdout.emit("data", FIRST_AUDIO);
-      }
-      failCapture(bridge);
-      await expect(pulling).resolves.toEqual({
-        bridgeId,
-        closed: true,
-        ...(audio ? { base64: FIRST_AUDIO.toString("base64") } : {}),
-      });
-      await vi.waitFor(() => expectClosed(bridge));
-      await expectUnknown(bridge);
-      expect(bridge.outputProcess.kill).toHaveBeenCalledTimes(1);
-      expect(bridge.inputProcess.kill).toHaveBeenCalledTimes(1);
-    },
-  );
-
-  it("delivers stdout flushed after 250ms to a pending empty pull", async () => {
-    vi.useFakeTimers();
-    const bridge = await startAudioBridge({ inputAutoClose: false });
-    const finalAudio = Buffer.from([7, 8, 9]);
+  it.each([
+    ["empty", undefined, 0],
+    ["queued audio", FIRST_AUDIO, 0],
+    ["stdout flushed after 250ms", FINAL_AUDIO, 300],
+  ] as const)("delivers terminal close with %s to a pending pull", async (_name, audio, delay) => {
+    if (delay) {
+      vi.useFakeTimers();
+    }
+    const bridge = await startAudioBridge({ inputAutoClose: !delay });
     const pulling = rpc(bridge, "pullAudio", { timeoutMs: 2_000 });
-
+    if (audio && !delay) {
+      bridge.inputStdout.emit("data", FIRST_AUDIO);
+    }
     failCapture(bridge);
-    await vi.advanceTimersByTimeAsync(300);
-    bridge.inputStdout.emit("data", finalAudio);
-    endCapture(bridge);
-    await expectPull(bridge, pulling, true, finalAudio);
+    if (delay) {
+      await vi.advanceTimersByTimeAsync(delay);
+      bridge.inputStdout.emit("data", audio);
+      endCapture(bridge);
+    }
+    await expectPull(bridge, pulling, true, audio);
+    await vi.waitFor(() => expectClosed(bridge));
+    await expectUnknown(bridge);
+    expect(bridge.outputProcess.kill).toHaveBeenCalledTimes(1);
+    expect(bridge.inputProcess.kill).toHaveBeenCalledTimes(1);
   });
 
   it("blocks output commands as soon as terminal teardown starts", async () => {
