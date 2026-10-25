@@ -56,6 +56,20 @@ type TranscriptMessage = Parameters<
 const cfg = { agents: { entries: { main: {} } } };
 const display = { includeDerivedTitles: true, includeLastMessage: true };
 
+function omitOptionalTranscriptFacts(key: string) {
+  watchRowFacts((owner) => async (input) => {
+    const result = await owner.readRowFacts(input);
+    for (const row of result.rows) {
+      if (row.sessionKey === key) {
+        row.transcriptPreview = undefined;
+        row.transcriptTerminalModel = undefined;
+        row.transcriptAssistantMessage = "unknown";
+      }
+    }
+    return result;
+  });
+}
+
 async function withStreamingProjection(
   run: (fixture: {
     projection: Awaited<ReturnType<typeof createTestProjection>>;
@@ -247,7 +261,20 @@ it.for(["absent", "user", "assistant"] as const)(
         });
       }
       clearStoredSessionRowTranscriptForTest(target);
-      const backfill = vi.spyOn(transcriptBackfill, "backfillSessionRowTranscriptFields");
+      // Actor row facts can omit optional fields even after durable backfill completes.
+      omitOptionalTranscriptFacts(target.sessionKey);
+      const read = transcriptBackfill.backfillSessionRowTranscriptFields;
+      let barrier = "";
+      let drained = createDeferredCore();
+      const backfill = vi
+        .spyOn(transcriptBackfill, "backfillSessionRowTranscriptFields")
+        .mockImplementation(async (params) => {
+          const fields = await read(params);
+          if (params.sessionKey === barrier) drained.resolve();
+          return fields;
+        });
+      const reads = () =>
+        backfill.mock.calls.filter(([params]) => params.sessionKey === target.sessionKey);
       using release = holdForeground();
       using projection = await createTestProjection({ cfg, modelCatalog: [] });
       await projection.ensureMaterialized();
@@ -257,7 +284,7 @@ it.for(["absent", "user", "assistant"] as const)(
       projection.describe(query);
       release();
       await withinTest(published, signal);
-      expect(backfill).toHaveBeenCalledTimes(1);
+      expect(reads()).toHaveLength(1);
       for (let wave = 0; wave < 3; wave++) {
         projection.sweepMaterializedRows(Date.now() + 10 * 60_000);
         expect(projection.capture(query)?.materialized).toBeUndefined();
@@ -269,7 +296,17 @@ it.for(["absent", "user", "assistant"] as const)(
         );
         await withinTest(reused, signal);
         expect(snapshot?.lastMessagePreview).toBe(source === "absent" ? undefined : "Cold message");
-        expect(backfill).toHaveBeenCalledTimes(1);
+        const sentinel = seedTranscriptRow(`backfill-barrier-${wave}`);
+        barrier = sentinel.target.sessionKey;
+        drained = createDeferredCore();
+        // A later real backfill completes only after the earlier row's queued work drains.
+        await withReadySessionRows(
+          projection,
+          () => [sentinel.query],
+          () => projection.snapshot(sentinel.query),
+        );
+        await withinTest(drained.promise, signal);
+        expect(reads()).toHaveLength(1);
       }
       await appendTranscript(
         target,
@@ -285,7 +322,7 @@ it.for(["absent", "user", "assistant"] as const)(
       ).toEqual(source === "assistant" ? { text: "Cold message", timestamp: 100 } : undefined);
       await nextTurn();
       // A first append can create the missing transcript and require one fresh backfill.
-      expect(backfill.mock.calls.length).toBeLessThanOrEqual(source === "absent" ? 2 : 1);
+      expect(reads().length).toBeLessThanOrEqual(source === "absent" ? 2 : 1);
     });
   },
 );
@@ -296,15 +333,20 @@ it("keeps an in-flight transcript outcome through demotion without admitting ano
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     setRuntimeConfigSnapshot(cfg);
     const { target, query } = seedTranscriptRow("inflight-preview", { status: "done" });
+    omitOptionalTranscriptFacts(target.sessionKey);
     const captured = createDeferredCore();
     const resume = createDeferredCore();
+    const drained = createDeferredCore();
+    let barrier = "";
     const read = transcriptBackfill.backfillSessionRowTranscriptFields;
     const backfill = vi
       .spyOn(transcriptBackfill, "backfillSessionRowTranscriptFields")
-      .mockImplementationOnce(async (params) => {
+      .mockImplementation(async (params) => {
         const fields = await read(params);
-        captured.resolve();
-        await resume.promise;
+        if (params.sessionKey === target.sessionKey) {
+          captured.resolve();
+          await resume.promise;
+        } else if (params.sessionKey === barrier) drained.resolve();
         return fields;
       });
     using projection = await createTestProjection({ cfg, modelCatalog: [] });
@@ -319,11 +361,21 @@ it("keeps an in-flight transcript outcome through demotion without admitting ano
         () => [query],
         () => projection.snapshot(query),
       );
+      const sentinel = seedTranscriptRow("inflight-barrier");
+      barrier = sentinel.target.sessionKey;
+      await withReadySessionRows(
+        projection,
+        () => [sentinel.query],
+        () => projection.snapshot(sentinel.query),
+      );
     } finally {
       resume.resolve();
     }
     await withinTest(published, signal);
-    expect(backfill).toHaveBeenCalledTimes(1);
+    await withinTest(drained.promise, signal);
+    expect(
+      backfill.mock.calls.filter(([params]) => params.sessionKey === target.sessionKey),
+    ).toHaveLength(1);
   });
 });
 
