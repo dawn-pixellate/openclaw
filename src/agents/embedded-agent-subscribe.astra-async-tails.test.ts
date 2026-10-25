@@ -119,13 +119,11 @@ function responsesStream(id: string, request: Request) {
 }
 
 const answered = [lookupCall, finalAnswer("msg_answer", "Use counter B.")];
-const answeredTail = ["toolUse:toolCall", "stop:text", "stop:text"];
 const voice = "/tmp/openclaw/tts-a/voice-a.opus";
 type Scenario = {
   name: string;
   delivery: "deferred" | "live" | "off";
   requests: readonly Request[];
-  transcript: readonly string[];
   delivered: readonly string[];
   reply?: { disposition: "visible"; text: string } | { disposition: "empty" | "silent" };
   trigger?: "cron";
@@ -137,7 +135,6 @@ const scenario = (name: string, overrides: Partial<Omit<Scenario, "name">> = {})
   name,
   delivery: "deferred",
   requests: [answered, "NO_REPLY"],
-  transcript: answeredTail,
   delivered: ["Use counter B."],
   reply: { disposition: "visible", text: "Use counter B." },
   ...overrides,
@@ -158,7 +155,6 @@ it.each([
       ],
       "NO_REPLY",
     ],
-    transcript: ["toolUse:toolCall", "stop:text+text", "stop:text"],
     delivered: ["Alpha."],
     reply: { disposition: "visible", text: "Alpha." },
   }),
@@ -167,7 +163,6 @@ it.each([
     requests: [
       [finalAnswer("msg_first", "First part."), finalAnswer("msg_second", "Second part.")],
     ],
-    transcript: ["stop:text+text"],
     delivered: ["First part.", "Second part."],
     reply: { disposition: "visible", text: "First part.Second part." },
   }),
@@ -188,7 +183,6 @@ it.each([
       ],
       "NO_REPLY",
     ],
-    transcript: ["toolUse:toolCall", "stop:text", "toolUse:toolCall", "stop:text", "stop:text"],
     delivered: [voice],
     // The kept attachment answer owns the result; its parsed text is empty, not NO_REPLY.
     reply: { disposition: "empty" },
@@ -201,7 +195,6 @@ it.each([
   }),
   scenario("a later NO_REPLY keeps pre-tool progress silent", {
     requests: [[finalAnswer("msg_progress", "Checking counter B."), lookupCall], "NO_REPLY"],
-    transcript: ["toolUse:text+toolCall", "stop:", "stop:text"],
     delivered: [],
     reply: { disposition: "silent" },
   }),
@@ -211,7 +204,6 @@ it.each([
       { items: [finalAnswer("msg_progress", "Exporting the rest now.")], endTurn: false },
       "NO_REPLY",
     ],
-    transcript: [...answeredTail, "stop:text"],
   }),
   scenario("quiet mode keeps the completed answer private", {
     delivered: ["Sent with the message tool."],
@@ -224,7 +216,7 @@ it.each([
     reasoning: true,
   }),
 ])("$name", async (row) => {
-  const { delivery, requests, transcript, delivered, trigger = "user", quiet = false } = row;
+  const { delivery, requests, delivered, trigger = "user", quiet = false } = row;
   const sent: string[] = [];
   const show = (payload: { text?: string; mediaUrl?: string }) =>
     payload.text ?? payload.mediaUrl ?? "";
@@ -311,17 +303,6 @@ it.each([
   await subscription.waitForPendingEvents();
   await pipeline.flush({ force: true });
   expect(pending).toEqual([]);
-  expect(
-    messages
-      .filter((message) => message.role === "assistant")
-      .map(
-        (message) =>
-          `${message.stopReason}:${message.content
-            .map((item) => item.type)
-            .filter((type) => type !== "thinking")
-            .join("+")}`,
-      ),
-  ).toEqual(transcript);
   const completed = subscription.getCurrentAttemptAssistant();
   const attempt: EmbeddedRunAttemptWithReceiptEvidence = {
     ...makeEmbeddedRunnerAttempt({

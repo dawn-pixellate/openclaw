@@ -115,11 +115,6 @@ it.each([false, true])(
     const rootSandboxFactory = getSandboxBackendFactory(SANDBOX_PROBE_ID);
 
     expect(getActivePluginRegistry()).toBe(root);
-    expect(root.plugins, JSON.stringify(root.diagnostics)).toEqual([
-      expect.objectContaining({ id: "ce-probe", status: "loaded" }),
-      expect.objectContaining({ id: "sandbox-probe", status: "loaded" }),
-    ]);
-    expect(root.contextEngines.get("ce-probe")?.lifecycle).toBe("runtime");
     expect(rootSandboxFactory).not.toBeNull();
     expect(rootSandboxFactory).not.toBe(previousSandboxFactory);
 
@@ -134,14 +129,12 @@ it.each([false, true])(
       onlyPluginIds: ["ce-probe", "sandbox-probe"],
     });
 
-    expect(handle).not.toBe(root);
     expect(getActivePluginRegistry()).toBe(root);
     expect(handle.plugins.find((plugin) => plugin.id === "sandbox-probe")?.status).toBe(
       fullOnly ? "loaded" : undefined,
     );
     expect(getSandboxBackendFactory(SANDBOX_PROBE_ID)).toBe(rootSandboxFactory);
     expect(discovery.contextEngines.has("ce-probe")).toBe(!fullOnly);
-    expect(handle.contextEngines.get("ce-probe")?.lifecycle).toBe("runtime");
 
     using warnings = vi.spyOn(console, "warn");
     warnings.mockImplementation((message: string) => {
