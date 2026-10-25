@@ -141,13 +141,7 @@ function requireEmbeddedAgentCall(
   return params;
 }
 
-function expectPositiveTimestamp(value: unknown) {
-  expect(typeof value).toBe("number");
-  expect(value as number).toBeGreaterThan(0);
-}
-
 function expectNonEmptyString(value: unknown) {
-  expect(typeof value).toBe("string");
   expect(value).toEqual(expect.stringMatching(/\S/u));
 }
 
@@ -313,9 +307,9 @@ describe("realtime voice agent consult runtime", () => {
       sessionId: expect.any(String),
       updatedAt: expect.any(Number),
     });
-    expectPositiveTimestamp(voiceSession.createdAt);
+    expect(voiceSession.createdAt).toBeGreaterThan(0);
     expectNonEmptyString(voiceSession.sessionId);
-    expectPositiveTimestamp(voiceSession.updatedAt);
+    expect(voiceSession.updatedAt).toBeGreaterThan(0);
     const call = requireEmbeddedAgentCall(runEmbeddedAgent);
     expect(call).toMatchObject({
       sessionId: voiceSession.sessionId,
